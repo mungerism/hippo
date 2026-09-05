@@ -10,8 +10,8 @@ DEFAULT_ENV_FILE = HIPPO_HOME / ".env"
 
 # Auto-load .env from ~/.hippo/.env and project root .env
 if DEFAULT_ENV_FILE.exists():
-    load_dotenv(DEFAULT_ENV_FILE)
-load_dotenv()
+    load_dotenv(DEFAULT_ENV_FILE, override=True)
+load_dotenv(override=True)
 
 # Normalize Google Gemini API key names
 if not os.getenv("GOOGLE_API_KEY"):
