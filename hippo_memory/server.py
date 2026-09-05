@@ -26,27 +26,97 @@ def get_engine() -> HippoEngine:
     return _engine
 
 
-@mcp_server.tool()
-def search_memory(
-    query: str,
-    scope: str = "all",
-    limit: int = 5,
+@mcp_server.tool(
+    description="Store a new preference, fact, or conversation snippet into persistent long-term memory."
+)
+def add_memory(
+    text: str,
+    messages: Optional[list[Dict[str, str]]] = None,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    scope: str = "project",
     project_id: Optional[str] = None,
+    image_path: Optional[str] = None,
 ) -> str:
-    """检索用户的全局偏好或当前项目的历史架构与经验事实。
+    """Store a new preference, fact, or conversation snippet into persistent long-term memory.
 
     Args:
-        query: 检索的关键词或自然语言问题 (例如: '包管理器偏好', '项目存储选型')。
-        scope: 检索范围：'all'(默认，同时检索全局和当前项目) | 'global'(仅全局习惯) | 'project'(仅当前项目)。
-        limit: 返回的最大条数，默认 5。
-        project_id: 可选，指定特定项目名（默认自动探测当前 Git 仓库）。
+        text: Plain sentence summarizing what to store (e.g. '项目偏好使用 uv 代替 poetry', '代码风格偏好紧凑').
+        messages: Optional structured conversation history with role/content.
+        user_id: Optional user identifier (defaults to current user).
+        agent_id: Optional agent or project identifier (e.g. 'global' for personal habits, or project name).
+        run_id: Optional run identifier.
+        metadata: Optional arbitrary metadata JSON.
+        scope: Storage scope: 'project' (default, current project) or 'global' (cross-project personal preference).
+        project_id: Optional explicit project name.
+        image_path: Optional local image/screenshot path for multimodal visual memory.
 
     Returns:
-        Markdown 格式的匹配记忆事实列表。
+        Confirmation message with saved memory details.
     """
     try:
         engine = get_engine()
-        results = engine.search(query=query, scope=scope, project_id=project_id, limit=limit)
+        res = engine.add(
+            content=text,
+            text=text,
+            messages=messages,
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            metadata=metadata,
+            scope=scope,
+            project_id=project_id,
+            image_path=image_path,
+        )
+        tag = (
+            "Global"
+            if (scope == "global" or agent_id == "global")
+            else f"Project: {agent_id or engine.router.resolve_project(project_id)}"
+        )
+        return f"记忆已成功沉淀至 [{tag}] 命名空间。\n详情: {json.dumps(res, ensure_ascii=False)}"
+    except Exception as e:
+        return f"记忆保存失败: {str(e)}"
+
+
+@mcp_server.tool(
+    description="Run a semantic search over existing memories to retrieve relevant context, facts, and guidelines."
+)
+def search_memories(
+    query: str,
+    filters: Optional[Dict[str, Any]] = None,
+    limit: int = 5,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    scope: str = "all",
+    project_id: Optional[str] = None,
+) -> str:
+    """Run a semantic search over existing memories.
+
+    Args:
+        query: Natural language question or search query (e.g. '技术栈选型', 'CQRS 架构', '代码规范').
+        filters: Optional structured filters dictionary.
+        limit: Maximum number of results to return (default: 5).
+        user_id: Optional user identifier.
+        agent_id: Optional agent or project identifier.
+        scope: Search scope: 'all' (default, project + global) | 'global' (personal habits) | 'project' (current project).
+        project_id: Optional explicit project name.
+
+    Returns:
+        Markdown-formatted list of matching memories.
+    """
+    try:
+        engine = get_engine()
+        results = engine.search(
+            query=query,
+            filters=filters,
+            limit=limit,
+            user_id=user_id,
+            agent_id=agent_id,
+            scope=scope,
+            project_id=project_id,
+        )
 
         if not results:
             return f"未找到与 '{query}' 相关的记忆事实 (Scope: {scope})。"
@@ -54,9 +124,8 @@ def search_memory(
         lines = [f"### 检索到的相关记忆 (匹配 {len(results)} 条，Scope: {scope}):"]
         for idx, item in enumerate(results, 1):
             mem_text = item.get("memory", "")
-            meta = item.get("metadata", {})
-            agent_id = item.get("agent_id", "global")
-            tag = "Global" if agent_id == "global" else f"Project: {agent_id}"
+            aid = item.get("agent_id", "global")
+            tag = "Global" if aid == "global" else f"Project: {aid}"
             mem_id = item.get("id", "")
             lines.append(f"{idx}. [{tag}] {mem_text} (ID: `{mem_id}`)")
 
@@ -65,72 +134,48 @@ def search_memory(
         return f"记忆检索失败: {str(e)}"
 
 
-@mcp_server.tool()
-def save_memory(
-    content: str,
-    scope: str = "project",
-    project_id: Optional[str] = None,
-    image_path: Optional[str] = None,
-) -> str:
-    """沉淀新的个人习惯、技术选型决定或项目踩坑经验到长时记忆中枢。
-
-    Args:
-        content: 要记忆的事实内容（例如：'本项目使用 uv 代替 poetry'，'用户偏好紧凑的代码风格'）。
-        scope: 存储范围：'project'(默认，当前项目专有记忆) | 'global'(个人跨项目全局习惯)。
-        project_id: 可选，指定特定项目名（默认自动探测当前 Git 仓库）。
-        image_path: 可选，引用的本地图片/截图路径（用于多模态视觉记忆）。
-
-    Returns:
-        保存结果与状态提示。
-    """
-    try:
-        engine = get_engine()
-        res = engine.add(content=content, scope=scope, project_id=project_id, image_path=image_path)
-        tag = "Global" if scope == "global" else f"Project: {engine.router.resolve_project(project_id)}"
-        return f"记忆已成功保存至 [{tag}] 命名空间。\n详情: {json.dumps(res, ensure_ascii=False)}"
-    except Exception as e:
-        return f"记忆保存失败: {str(e)}"
-
-
-@mcp_server.tool()
-def get_user_profile(user_id: Optional[str] = None) -> str:
-    """快速拉取用户的全局开发偏好画像与环境背景（适合在任务开局时快速注入上下文）。
-
-    Returns:
-        格式化的用户全局偏好 Markdown 列表。
-    """
-    try:
-        engine = get_engine()
-        profile = engine.get_user_profile(user_id=user_id)
-        return f"### 用户全局开发偏好画像 (共 {profile['count']} 条):\n{profile['markdown']}"
-    except Exception as e:
-        return f"获取用户画像失败: {str(e)}"
-
-
-@mcp_server.tool()
-def list_memories(
-    scope: str = "all",
+@mcp_server.tool(
+    description="List and page through memories using structured filters or scope (e.g. personal preferences or project guidelines)."
+)
+def get_memories(
+    filters: Optional[Dict[str, Any]] = None,
     limit: int = 20,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    scope: str = "all",
     project_id: Optional[str] = None,
 ) -> str:
-    """列出指定范围内的所有持久化事实记忆清单。
+    """List memories using structured filters or scope.
 
     Args:
-        scope: 'all'(默认) | 'global' | 'project'。
-        limit: 返回条数上限，默认 20。
-        project_id: 可选，指定特定项目名。
+        filters: Optional structured filters dictionary.
+        limit: Maximum number of memories to return (default: 20).
+        user_id: Optional user identifier.
+        agent_id: Optional agent or project identifier (e.g. 'global' for personal preferences).
+        scope: Scope: 'all' (default) | 'global' (personal preferences) | 'project'.
+        project_id: Optional explicit project name.
+
+    Returns:
+        Markdown-formatted list of memories.
     """
     try:
         engine = get_engine()
-        items = engine.list_memories(scope=scope, project_id=project_id, limit=limit)
+        items = engine.get_memories(
+            filters=filters,
+            limit=limit,
+            user_id=user_id,
+            agent_id=agent_id,
+            scope=scope,
+            project_id=project_id,
+        )
         if not items:
             return f"当前指定范围暂无记忆记录 (Scope: {scope})。"
 
         lines = [f"### 持久化记忆列表 (共 {len(items)} 条，Scope: {scope}):"]
         for idx, item in enumerate(items, 1):
             mem_text = item.get("memory", "")
-            agent_id = item.get("agent_id", "global")
-            tag = "Global" if agent_id == "global" else f"Project: {agent_id}"
+            aid = item.get("agent_id", "global")
+            tag = "Global" if aid == "global" else f"Project: {aid}"
             mem_id = item.get("id", "")
             lines.append(f"{idx}. [{tag}] {mem_text} (ID: `{mem_id}`)")
 
@@ -139,12 +184,75 @@ def list_memories(
         return f"获取记忆列表失败: {str(e)}"
 
 
-@mcp_server.tool()
-def delete_memory(memory_id: str) -> str:
-    """根据记忆 ID 删除一条不再需要或过期的记忆事实。
+@mcp_server.tool(
+    description="Fetch a single memory once you know its memory_id."
+)
+def get_memory(memory_id: str) -> str:
+    """Retrieve a single memory by its memory ID.
 
     Args:
-        memory_id: 记忆事实的唯一 ID。
+        memory_id: The exact unique identifier of the memory.
+
+    Returns:
+        Markdown details of the memory.
+    """
+    try:
+        engine = get_engine()
+        item = engine.get(memory_id)
+        if not item:
+            return f"未找到 ID 为 `{memory_id}` 的记忆记录。"
+        aid = item.get("agent_id", "global")
+        tag = "Global" if aid == "global" else f"Project: {aid}"
+        return (
+            f"### 记忆详情 (`{memory_id}`)\n"
+            f"- **作用域**: [{tag}]\n"
+            f"- **记忆事实**: {item.get('memory', '')}\n"
+            f"- **用户**: `{item.get('user_id', '')}`\n"
+            f"- **创建时间**: {item.get('created_at', '')}\n"
+            f"- **更新时间**: {item.get('updated_at', '')}\n"
+            f"- **元数据**: {json.dumps(item.get('metadata', {}), ensure_ascii=False)}"
+        )
+    except Exception as e:
+        return f"获取记忆详情失败: {str(e)}"
+
+
+@mcp_server.tool(
+    description="Overwrite an existing memory's text or metadata after confirming its memory_id."
+)
+def update_memory(
+    memory_id: str,
+    text: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Overwrite an existing memory's text or metadata.
+
+    Args:
+        memory_id: Exact memory_id to overwrite.
+        text: Replacement text for the memory.
+        metadata: Optional metadata to update.
+
+    Returns:
+        Update result status.
+    """
+    try:
+        engine = get_engine()
+        res = engine.update(memory_id=memory_id, text=text, metadata=metadata)
+        return f"记忆 `{memory_id}` 已成功更新。\n详情: {json.dumps(res, ensure_ascii=False)}"
+    except Exception as e:
+        return f"更新记忆失败: {str(e)}"
+
+
+@mcp_server.tool(
+    description="Delete one memory after the user confirms its memory_id."
+)
+def delete_memory(memory_id: str) -> str:
+    """Delete a memory once the user explicitly confirms the memory_id to remove.
+
+    Args:
+        memory_id: The unique identifier of the memory to delete.
+
+    Returns:
+        Status message of the deletion.
     """
     try:
         engine = get_engine()
@@ -155,6 +263,65 @@ def delete_memory(memory_id: str) -> str:
             return f"删除记忆 `{memory_id}` 失败或该记忆不存在。"
     except Exception as e:
         return f"删除记忆失败: {str(e)}"
+
+
+@mcp_server.tool(
+    description="Delete every memory in the given user/agent/project scope."
+)
+def delete_all_memories(
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> str:
+    """Bulk delete memories within a confirmed scope.
+
+    Args:
+        user_id: User scope to delete (defaults to current user).
+        agent_id: Optional agent or project identifier.
+        run_id: Optional run identifier.
+        scope: Storage scope: 'project' | 'global' | 'all'.
+        project_id: Optional explicit project name.
+
+    Returns:
+        Status message.
+    """
+    try:
+        engine = get_engine()
+        ok = engine.delete_all(
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            scope=scope,
+            project_id=project_id,
+        )
+        if ok:
+            return f"已成功清空指定作用域内的所有记忆。"
+        else:
+            return "批量清空记忆失败。"
+    except Exception as e:
+        return f"批量删除记忆异常: {str(e)}"
+
+
+@mcp_server.tool(
+    description="List which users and agents/projects currently hold persistent memories."
+)
+def list_entities() -> str:
+    """List users and agents/projects currently stored in memories."""
+    try:
+        engine = get_engine()
+        entities = engine.list_entities()
+        users_str = ", ".join(entities["users"]) if entities["users"] else "无"
+        agents_str = ", ".join(entities["agents"]) if entities["agents"] else "无"
+        return (
+            f"### 存储实体概览 (Mem0 Entities)\n"
+            f"- **用户 (Users)**: {users_str}\n"
+            f"- **智能体/项目 (Agents/Projects)**: {agents_str}\n"
+            f"- **已索引记录采样数**: {entities['total_memories_sampled']}"
+        )
+    except Exception as e:
+        return f"获取实体列表失败: {str(e)}"
 
 
 def main():

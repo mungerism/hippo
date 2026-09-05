@@ -37,6 +37,24 @@ class TestHippo(unittest.TestCase):
         self.assertEqual(config.qdrant_host, "127.0.0.1")
         self.assertEqual(config.qdrant_port, 6333)
 
+    def test_mcp_server_tools(self):
+        import asyncio
+        from hippo_memory.server import mcp_server
+
+        tools = asyncio.run(mcp_server.list_tools())
+        tool_names = {t.name for t in tools}
+        expected_tools = {
+            "add_memory",
+            "search_memories",
+            "get_memories",
+            "get_memory",
+            "update_memory",
+            "delete_memory",
+            "delete_all_memories",
+            "list_entities",
+        }
+        self.assertEqual(tool_names, expected_tools)
+
 
 if __name__ == "__main__":
     unittest.main()

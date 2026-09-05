@@ -34,41 +34,66 @@ class HippoEngine:
 
     def add(
         self,
-        content: str,
+        content: Optional[str] = None,
         scope: str = "project",
         project_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         image_path: Optional[str] = None,
+        text: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Add a memory (text or multimodal).
+        """Add a memory (text or multimodal) matching Mem0 specifications.
 
         Args:
-            content: The text content, fact, or interaction to remember.
+            content: The text content, fact, or interaction to remember (alias for text).
             scope: 'project' (repo-specific) or 'global' (personal preference).
             project_id: Explicit project name (defaults to auto-detected git repo).
             metadata: Custom metadata dictionary.
             image_path: Optional path to a local image/screenshot for visual memory.
+            text: Plain sentence summarizing what to store (official Mem0 argument).
+            messages: Optional structured conversation history with role/content.
+            user_id: Optional user identifier override.
+            agent_id: Optional agent or project identifier override.
+            run_id: Optional run identifier.
 
         Returns:
             Dict containing the added memory results.
         """
+        raw_text = text if text is not None else (content or "")
+        uid = user_id or self.config.user_id
+
+        # Scope and agent_id resolution
+        effective_scope = scope
+        effective_project = project_id
+        if agent_id:
+            if agent_id == "global":
+                effective_scope = "global"
+            else:
+                effective_scope = "project"
+                effective_project = agent_id
+
         params = self.router.build_add_params(
-            scope=scope,
-            user_id=self.config.user_id,
-            project_id=project_id,
+            scope=effective_scope,
+            user_id=uid,
+            project_id=effective_project,
             extra_metadata=metadata,
         )
+        if run_id:
+            params["run_id"] = run_id
 
-        full_content = content
+        full_content = raw_text
         if image_path:
             img_p = Path(image_path).expanduser()
             if img_p.exists():
                 full_content += f"\n[Referenced Image: {img_p.name}]"
                 params["metadata"]["image_path"] = str(img_p)
 
-        messages = [{"role": "user", "content": full_content}]
+        conversation = messages if messages else [{"role": "user", "content": full_content}]
         try:
-            result = self.memory.add(messages, **params)
+            result = self.memory.add(conversation, **params)
         except Exception as e:
             err_str = str(e)
             # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
@@ -81,7 +106,7 @@ class HippoEngine:
                 if orig_model != fallback_model:
                     try:
                         self.memory.llm.config.model = fallback_model
-                        result = self.memory.add(messages, **params)
+                        result = self.memory.add(conversation, **params)
                     finally:
                         self.memory.llm.config.model = orig_model
                 else:
@@ -96,6 +121,9 @@ class HippoEngine:
         scope: str = "all",
         project_id: Optional[str] = None,
         limit: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search relevant memories using multi-signal hybrid retrieval.
 
@@ -104,22 +132,90 @@ class HippoEngine:
             scope: 'all' (both global and project), 'project', or 'global'.
             project_id: Explicit project name (defaults to auto-detected git repo).
             limit: Maximum number of memories to return.
+            filters: Structured filters dictionary (official Mem0 argument).
+            user_id: Optional user identifier.
+            agent_id: Optional agent or project identifier.
 
         Returns:
             List of matching memory objects.
         """
-        filters = self.router.build_search_filters(
-            scope=scope,
-            user_id=self.config.user_id,
-            project_id=project_id,
-        )
+        uid = user_id or self.config.user_id
+        if filters:
+            computed_filters = filters.copy()
+            if "user_id" not in computed_filters and not any(k in computed_filters for k in ("AND", "OR", "NOT")):
+                computed_filters["user_id"] = uid
+        elif agent_id:
+            computed_filters = {"user_id": uid, "agent_id": agent_id}
+        else:
+            computed_filters = self.router.build_search_filters(
+                scope=scope,
+                user_id=uid,
+                project_id=project_id,
+            )
 
         results = self.memory.search(
             query=query,
-            filters=filters,
+            filters=computed_filters,
             top_k=limit,
         )
         return results if isinstance(results, list) else results.get("results", [])
+
+    def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a single memory by its ID."""
+        try:
+            return self.memory.get(memory_id)
+        except Exception:
+            return None
+
+    def update(
+        self,
+        memory_id: str,
+        text: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Update an existing memory's text or metadata."""
+        kwargs: Dict[str, Any] = {}
+        if text is not None:
+            kwargs["text"] = text
+        if metadata is not None:
+            kwargs["metadata"] = metadata
+        return self.memory.update(memory_id, **kwargs)
+
+    def get_memories(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 20,
+        scope: str = "all",
+        project_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List stored memories under the specified filters or scope."""
+        uid = user_id or self.config.user_id
+        if filters:
+            computed_filters = filters.copy()
+            if "user_id" not in computed_filters and not any(k in computed_filters for k in ("AND", "OR", "NOT")):
+                computed_filters["user_id"] = uid
+        elif agent_id:
+            computed_filters = {"user_id": uid, "agent_id": agent_id}
+        else:
+            computed_filters = self.router.build_search_filters(
+                scope=scope,
+                user_id=uid,
+                project_id=project_id,
+            )
+
+        results = self.memory.get_all(filters=computed_filters, top_k=limit)
+        return results if isinstance(results, list) else results.get("results", [])
+
+    def list_memories(
+        self,
+        scope: str = "all",
+        project_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """List stored memories under the specified scope (convenience alias)."""
+        return self.get_memories(scope=scope, project_id=project_id, limit=limit)
 
     def get_user_profile(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Retrieve all persistent global preferences and profile facts for the user.
@@ -146,28 +242,6 @@ class HippoEngine:
             "markdown": formatted,
         }
 
-    def list_memories(
-        self,
-        scope: str = "all",
-        project_id: Optional[str] = None,
-        limit: int = 20,
-    ) -> List[Dict[str, Any]]:
-        """List stored memories under the specified scope.
-
-        Args:
-            scope: 'all', 'project', or 'global'.
-            project_id: Explicit project name.
-            limit: Maximum items to return.
-        """
-        filters = self.router.build_search_filters(
-            scope=scope,
-            user_id=self.config.user_id,
-            project_id=project_id,
-        )
-
-        results = self.memory.get_all(filters=filters, top_k=limit)
-        return results if isinstance(results, list) else results.get("results", [])
-
     def delete(self, memory_id: str) -> bool:
         """Delete a specific memory by its ID."""
         try:
@@ -175,3 +249,47 @@ class HippoEngine:
             return True
         except Exception:
             return False
+
+    def delete_all(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> bool:
+        """Bulk delete memories within a given scope."""
+        uid = user_id or self.config.user_id
+        aid = agent_id
+        if scope == "global":
+            aid = "global"
+        elif scope == "project" and not aid:
+            aid = self.router.resolve_project(project_id)
+
+        kwargs: Dict[str, Any] = {"user_id": uid}
+        if aid:
+            kwargs["agent_id"] = aid
+        if run_id:
+            kwargs["run_id"] = run_id
+
+        try:
+            self.memory.delete_all(**kwargs)
+            return True
+        except Exception:
+            return False
+
+    def list_entities(self) -> Dict[str, Any]:
+        """List users and projects/agents stored in memories."""
+        items = self.get_memories(scope="all", limit=500)
+        agents = set()
+        users = set()
+        for item in items:
+            if "agent_id" in item:
+                agents.add(item["agent_id"])
+            if "user_id" in item:
+                users.add(item["user_id"])
+        return {
+            "users": sorted(list(users)),
+            "agents": sorted(list(agents)),
+            "total_memories_sampled": len(items),
+        }
