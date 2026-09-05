@@ -1,6 +1,11 @@
 # Hippo (海马体) 🦛
 
-> 面向 AI 编码智能体（antigravity, Codex, ZCode 等）的统一长短期记忆中枢，基于 Mem0 与 MCP (Model Context Protocol) 打造。
+> 面向 AI 编码智能体（antigravity, Codex, ZCode, Zed AI, Cursor, pi 等）的统一长短期记忆中枢，基于 Mem0 与 MCP (Model Context Protocol) 打造。
+
+> [!IMPORTANT]
+> **项目重要原则（Core Philosophy）**：**Hippo 只是对 Mem0 的轻量工程封装（Thin Wrapper over Mem0）**。
+> 1. **100% 规范对标**：所有 MCP 工具名（`add_memory`、`search_memories`、`get_memories` 等）与参数类型与 Mem0 官方规范完全一致，拒绝二次发明非标 API。
+> 2. **专注工程边界**：Hippo 仅专注于多端 IDE 的 MCP 协议挂载、Git 目录自动路由（无需手动管理 `agent_id`）以及本地单二进制 Qdrant 常驻服务。
 
 ---
 
