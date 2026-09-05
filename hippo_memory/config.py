@@ -22,6 +22,9 @@ if not os.getenv("GOOGLE_API_KEY"):
             break
 
 
+# Disable telemetry
+os.environ.setdefault("MEM0_TELEMETRY", "false")
+
 class HippoConfig:
     """Hippo unified memory configuration."""
 
@@ -56,7 +59,7 @@ class HippoConfig:
         """Generate Mem0 configuration dictionary based on active provider."""
         if self.provider == "gemini":
             api_key = os.getenv("GOOGLE_API_KEY", "")
-            llm_model = os.getenv("GEMINI_LLM_MODEL", "gemini-2.5-flash")
+            llm_model = os.getenv("GEMINI_LLM_MODEL", "gemini-3.5-flash-lite")
             embed_model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
             dims = 768
 
