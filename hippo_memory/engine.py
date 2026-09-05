@@ -67,7 +67,24 @@ class HippoEngine:
                 params["metadata"]["image_path"] = str(img_p)
 
         messages = [{"role": "user", "content": full_content}]
-        result = self.memory.add(messages, **params)
+        try:
+            result = self.memory.add(messages, **params)
+        except Exception as e:
+            err_str = str(e)
+            # If primary flagship model hits temporary 503 capacity issues, fallback gracefully
+            if ("503" in err_str or "UNAVAILABLE" in err_str) and hasattr(self.memory, "llm"):
+                orig_model = getattr(self.memory.llm.config, "model", "")
+                fallback_model = "gemini-3.5-flash-lite"
+                if orig_model != fallback_model:
+                    try:
+                        self.memory.llm.config.model = fallback_model
+                        result = self.memory.add(messages, **params)
+                    finally:
+                        self.memory.llm.config.model = orig_model
+                else:
+                    raise
+            else:
+                raise
         return result
 
     def search(
