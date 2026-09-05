@@ -176,5 +176,16 @@ def serve():
     run_server()
 
 
+@app.command()
+def migrate_codex(
+    concurrency: int = typer.Option(3, "--concurrency", "-c", help="并发迁移线程数"),
+):
+    """一键将 Codex 本地 SQLite 中的历史项目记忆迁移至 Hippo。"""
+    from hippo_memory.migrate import migrate_all
+
+    migrate_all(concurrency=concurrency)
+
+
 if __name__ == "__main__":
     app()
+

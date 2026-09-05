@@ -60,7 +60,7 @@ class HippoConfig:
         if self.provider == "gemini":
             api_key = os.getenv("GOOGLE_API_KEY", "")
             llm_model = os.getenv("GEMINI_LLM_MODEL", "gemini-3.5-flash-lite")
-            embed_model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
+            embed_model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-2")
             dims = 768
 
             return {
