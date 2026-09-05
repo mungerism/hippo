@@ -71,8 +71,11 @@ class HippoEngine:
             result = self.memory.add(messages, **params)
         except Exception as e:
             err_str = str(e)
-            # If primary flagship model hits temporary 503 capacity issues, fallback gracefully
-            if ("503" in err_str or "UNAVAILABLE" in err_str) and hasattr(self.memory, "llm"):
+            # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
+            should_fallback = any(
+                code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
+            )
+            if should_fallback and hasattr(self.memory, "llm"):
                 orig_model = getattr(self.memory.llm.config, "model", "")
                 fallback_model = "gemini-3.5-flash-lite"
                 if orig_model != fallback_model:
