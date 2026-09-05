@@ -1,12 +1,12 @@
 # Hippo (海马体) 🦛
 
-> 面向 AI 编码智能体（Anti-Gravity, Codex, Z-code 等）的统一长短期记忆中枢，基于 Mem0 与 MCP (Model Context Protocol) 打造。
+> 面向 AI 编码智能体（antigravity, Codex, ZCode 等）的统一长短期记忆中枢，基于 Mem0 与 MCP (Model Context Protocol) 打造。
 
 ---
 
 ## 🌟 核心特性
 
-- **跨 IDE/Agent 统一记忆**：通过标准 MCP (Model Context Protocol) 协议，无缝接入 **Anti-Gravity**、**Codex**、**Cursor**、**Zed AI (Z-code)** 等开发工具。
+- **跨 IDE/Agent 统一记忆**：通过标准 MCP (Model Context Protocol) 协议，无缝接入 **antigravity**、**Codex**、**ZCode**、**Zed AI**、**Cursor** 等开发工具。
 - **两级作用域隔离**：
   - **全局习惯 (`global`)**：记录开发者的个人偏好（如 macOS 环境、Surge 代理设置、代码风格）。
   - **项目专有 (`project`)**：基于当前 Git 仓库自动隔离（架构决策、踩坑记录、技术选型）。
@@ -81,7 +81,7 @@ hippo serve
 
 系统已为各大客户端完成了配置，只要客户端运行，就会自动启动并挂载 `hippo-memory` MCP 服务：
 
-### 1. Anti-Gravity
+### 1. antigravity
 配置文件：`~/.gemini/config/mcp_config.json`
 ```json
 {
@@ -99,7 +99,28 @@ hippo serve
 }
 ```
 
-### 2. Zed AI (Z-code)
+### 2. ZCode (智谱 AI)
+配置文件：`~/.zcode/cli/config.json`
+```json
+{
+  "mcp": {
+    "servers": {
+      "hippo-memory": {
+        "type": "stdio",
+        "command": "/opt/homebrew/bin/uv",
+        "args": [
+          "--directory",
+          "/path/to/hippo",
+          "run",
+          "hippo-mcp"
+        ]
+      }
+    }
+  }
+}
+```
+
+### 3. Zed AI
 配置文件：`~/.config/zed/settings.json`
 ```json
 {
