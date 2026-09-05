@@ -165,6 +165,11 @@ args = ["--directory", "/Users/munger/Code/Repos/Personal/hippo", "run", "hippo-
 enabled = true
 ```
 
+### 5. pi-coding-agent (pi)
+扩展文件：`~/.pi/agent/extensions/hippo-memory.ts`
+> 自动加载为原生工具：`get_user_profile`、`search_memory`、`save_memory` 及 `/hippo` 快捷命令。
+
+
 ---
 
 ## 🛠 暴露的 MCP 工具集
