@@ -186,6 +186,14 @@ def migrate_codex(
     migrate_all(concurrency=concurrency)
 
 
+@app.command()
+def migrate_zcode():
+    """一键将 ZCode 本地 ~/.zcode/cli/memories/ 中的精细记忆迁移至 Hippo。"""
+    from hippo_memory.migrate_zcode import migrate_zcode_all
+
+    migrate_zcode_all()
+
+
 if __name__ == "__main__":
     app()
 
