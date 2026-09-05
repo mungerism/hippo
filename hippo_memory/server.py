@@ -1,6 +1,6 @@
 """Hippo Memory Hub - Model Context Protocol (MCP) Server.
 
-Enables seamless memory reading and writing for Anti-Gravity, Codex, Zed AI, and other agents.
+Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed AI, and other agents.
 """
 
 import json
