@@ -167,19 +167,22 @@ enabled = true
 
 ### 5. pi-coding-agent (pi)
 扩展文件：`~/.pi/agent/extensions/hippo-memory.ts`
-> 自动加载为原生工具：`get_user_profile`、`search_memory`、`save_memory` 及 `/hippo` 快捷命令。
+> 自动加载为原生工具：`search_memories`、`add_memory`、`get_memories`、`get_memory`、`delete_memory` 及 `/hippo` 快捷命令。
 
 
 ---
 
-## 🛠 暴露的 MCP 工具集
+## 🛠 暴露的标准 MCP 工具集 (100% 对标 Mem0 官方规范)
 
-任何接入的 Agent 都可以调用以下工具：
-- `search_memory(query, scope='all', limit=5)`: 混合检索历史事实
-- `save_memory(content, scope='project', image_path=None)`: 保存新事实（支持多模态图片）
-- `get_user_profile()`: 一键拉取用户全局偏好画像
-- `list_memories(scope='all', limit=20)`: 列出持久化记忆
-- `delete_memory(memory_id)`: 删除失效记忆
+任何接入的 Agent 均可调用与 Mem0 官方完全一致的标准工具：
+- **`add_memory(text, ...)`**：沉淀新的个人偏好、技术规范或项目踩坑事实（支持多模态截图与 `messages` 会话记录）。
+- **`search_memories(query, ...)`**：基于向量语义与多信号混合检索相关记忆（支持 `filters`、`limit`、`scope`）。
+- **`get_memories(...)`**：列出记忆列表或全局偏好画像（支持结构化过滤与分页）。
+- **`get_memory(memory_id)`**：根据记忆唯一 ID 获取单条事实的详细上下文与元数据。
+- **`update_memory(memory_id, text, ...)`**：精确覆盖/更新某条已存在记忆的文本内容或元数据。
+- **`delete_memory(memory_id)`**：根据记忆 ID 删除一条不再需要或过期的记忆。
+- **`delete_all_memories(...)`**：在确认的作用域（用户/项目/智能体）内批量清理记忆。
+- **`list_entities()`**：枚举当前记忆库中持久化的所有用户与项目/智能体实体。
 
 ---
 

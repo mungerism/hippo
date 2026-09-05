@@ -137,6 +137,47 @@ def profile(
 
 
 @app.command()
+def get(
+    memory_id: str = typer.Argument(..., help="要查看的记忆 ID"),
+):
+    """获取指定单条记忆的详细信息。"""
+    engine = HippoEngine()
+    item = engine.get(memory_id)
+    if not item:
+        console.print(f"[bold red]✗ 未找到 ID 为 `{memory_id}` 的记忆记录。[/bold red]")
+        raise typer.Exit(1)
+
+    agent_id = item.get("agent_id", "global")
+    tag = "Global" if agent_id == "global" else f"Project: {agent_id}"
+    panel = Panel(
+        f"[bold]记忆内容:[/bold] {item.get('memory', '')}\n\n"
+        f"[dim]作用域:[/dim] [{tag}]\n"
+        f"[dim]用户 ID:[/dim] {item.get('user_id', '')}\n"
+        f"[dim]创建时间:[/dim] {item.get('created_at', '')}\n"
+        f"[dim]更新时间:[/dim] {item.get('updated_at', '')}\n"
+        f"[dim]元数据:[/dim] {item.get('metadata', {})}",
+        title=f"记忆详情 ({memory_id})",
+        border_style="cyan",
+    )
+    console.print(panel)
+
+
+@app.command()
+def update(
+    memory_id: str = typer.Argument(..., help="要更新的记忆 ID"),
+    text: str = typer.Argument(..., help="更新后的记忆文本内容"),
+):
+    """更新指定单条记忆的内容。"""
+    engine = HippoEngine()
+    try:
+        res = engine.update(memory_id=memory_id, text=text)
+        console.print(f"[bold green]✓ 记忆 `{memory_id}` 已成功更新。[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]✗ 更新失败:[/bold red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
 def delete(
     memory_id: str = typer.Argument(..., help="要删除的记忆 ID"),
 ):
