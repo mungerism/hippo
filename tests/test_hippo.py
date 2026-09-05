@@ -34,7 +34,8 @@ class TestHippo(unittest.TestCase):
     def test_config_paths(self):
         config = HippoConfig(user_id="test_user", storage_dir=Path("/tmp/hippo_test"))
         self.assertEqual(config.user_id, "test_user")
-        self.assertEqual(config.qdrant_path, "/tmp/hippo_test/qdrant")
+        self.assertEqual(config.qdrant_host, "127.0.0.1")
+        self.assertEqual(config.qdrant_port, 6333)
 
 
 if __name__ == "__main__":

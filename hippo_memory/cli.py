@@ -162,7 +162,7 @@ def status():
     table.add_row("当前用户 ID", cfg.user_id)
     table.add_row("激活的模型 Provider", cfg.provider)
     table.add_row("数据存储路径", str(cfg.storage_dir))
-    table.add_row("Qdrant 向量存储", cfg.qdrant_path)
+    table.add_row("Qdrant 向量服务", cfg.qdrant_url)
     table.add_row("配置文件位置", str(DEFAULT_ENV_FILE))
     table.add_row("当前 Git 项目", detected_proj or "未在 Git 仓库内")
     table.add_row("Git 根目录路径", str(git_root) if git_root else "N/A")

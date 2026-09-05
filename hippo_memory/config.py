@@ -22,8 +22,31 @@ if not os.getenv("GOOGLE_API_KEY"):
             break
 
 
-# Disable telemetry
-os.environ.setdefault("MEM0_TELEMETRY", "false")
+def ensure_qdrant_server():
+    """Ensure Qdrant server is running on 127.0.0.1:6333."""
+    import socket
+    import subprocess
+    import time
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    result = sock.connect_ex(("127.0.0.1", 6333))
+    sock.close()
+
+    if result != 0:
+        qdrant_bin = HIPPO_HOME / "bin" / "qdrant"
+        qdrant_cfg = HIPPO_HOME / "config" / "qdrant.yaml"
+        if qdrant_bin.exists() and qdrant_cfg.exists():
+            log_path = HIPPO_HOME / "qdrant.log"
+            with open(log_path, "a") as f:
+                subprocess.Popen(
+                    [str(qdrant_bin), "--config-path", str(qdrant_cfg)],
+                    stdout=f,
+                    stderr=f,
+                    start_new_session=True,
+                )
+            time.sleep(1.0)
+
 
 class HippoConfig:
     """Hippo unified memory configuration."""
@@ -40,8 +63,13 @@ class HippoConfig:
         ).expanduser()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-        self.qdrant_path = str(self.storage_dir / "qdrant")
+        self.qdrant_host = os.getenv("QDRANT_HOST", "127.0.0.1")
+        self.qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
+        self.qdrant_url = f"http://{self.qdrant_host}:{self.qdrant_port}"
         self.history_db_path = str(self.storage_dir / "history.db")
+
+        # Ensure Qdrant server is running
+        ensure_qdrant_server()
 
         # Provider determination
         configured_provider = provider or os.getenv("HIPPO_PROVIDER", "auto").lower()
@@ -69,8 +97,8 @@ class HippoConfig:
                     "config": {
                         "collection_name": "hippo_memories",
                         "embedding_model_dims": dims,
-                        "path": self.qdrant_path,
-                        "on_disk": True,
+                        "host": self.qdrant_host,
+                        "port": self.qdrant_port,
                     },
                 },
                 "llm": {
@@ -105,8 +133,8 @@ class HippoConfig:
                     "config": {
                         "collection_name": "hippo_memories",
                         "embedding_model_dims": dims,
-                        "path": self.qdrant_path,
-                        "on_disk": True,
+                        "host": self.qdrant_host,
+                        "port": self.qdrant_port,
                     },
                 },
                 "llm": {

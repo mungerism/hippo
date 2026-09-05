@@ -45,3 +45,4 @@ qdrant_storage/
 .idea/
 *.swp
 *.swo
+.qdrant-initialized
