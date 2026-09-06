@@ -37,9 +37,16 @@ def add(
     with console.status(f"[bold cyan]正在提取并沉淀记忆至 {tag}...[/bold cyan]"):
         try:
             res = engine.add(content=content, scope=scope, project_id=project, image_path=image)
-            console.print(f"[bold green]✓ 记忆已成功保存至 [{tag}][/bold green]")
-            if isinstance(res, dict) and "results" in res:
-                for r in res.get("results", []):
+            # Mem0 v1.1 返回 results 列表；抽取器判定无事实时为空，或仅含 event=NONE 的占位项
+            stored = [
+                r for r in (res.get("results", []) if isinstance(res, dict) else [])
+                if r.get("event") != "NONE"
+            ]
+            if not stored:
+                console.print(f"[yellow]⚠ 无可提取事实：内容不含可沉淀的记忆，未保存至 [{tag}][/yellow]")
+            else:
+                console.print(f"[bold green]✓ 记忆已成功保存至 [{tag}][/bold green]")
+                for r in stored:
                     console.print(f"  • {r.get('memory', '')} [dim](ID: {r.get('id', '')})[/dim]")
         except Exception as e:
             console.print(f"[bold red]✗ 保存失败:[/bold red] {e}")
