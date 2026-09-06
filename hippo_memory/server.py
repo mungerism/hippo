@@ -5,7 +5,9 @@ Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed A
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
+
+from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 from hippo_memory.engine import HippoEngine
@@ -27,18 +29,62 @@ def get_engine() -> HippoEngine:
 
 
 @mcp_server.tool(
-    description="Store a new preference, fact, or conversation snippet into persistent long-term memory."
+    description=(
+        "Store a new preference, fact, or conversation snippet into persistent long-term memory. "
+        "Call this when the user states a preference, makes a decision worth keeping, corrects "
+        "your behavior, or explicitly asks you to remember something. scope='project' (default) "
+        "saves to the current Git repository's namespace; scope='global' saves to the user's "
+        "cross-project personal preferences."
+    )
 )
 def add_memory(
-    text: str,
-    messages: Optional[list[Dict[str, str]]] = None,
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    scope: str = "project",
-    project_id: Optional[str] = None,
-    image_path: Optional[str] = None,
+    text: Annotated[
+        str,
+        Field(
+            description=(
+                "Plain sentence summarizing what to store, e.g. '项目偏好使用 uv 代替 poetry', "
+                "'代码风格偏好紧凑'."
+            )
+        ),
+    ],
+    messages: Annotated[
+        Optional[list[Dict[str, str]]],
+        Field(description="Optional structured conversation history with role/content keys."),
+    ] = None,
+    user_id: Annotated[
+        Optional[str], Field(description="Optional user identifier (defaults to current user).")
+    ] = None,
+    agent_id: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Optional agent or project identifier. Pass 'global' for personal habits, "
+                "omit to auto-route to the current Git repository."
+            )
+        ),
+    ] = None,
+    run_id: Annotated[
+        Optional[str], Field(description="Optional run/session identifier.")
+    ] = None,
+    metadata: Annotated[
+        Optional[Dict[str, Any]], Field(description="Optional arbitrary metadata JSON.")
+    ] = None,
+    scope: Annotated[
+        str,
+        Field(
+            description=(
+                "Storage scope: 'project' (default, current Git repository) or "
+                "'global' (cross-project personal preference)."
+            )
+        ),
+    ] = "project",
+    project_id: Annotated[
+        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
+    ] = None,
+    image_path: Annotated[
+        Optional[str],
+        Field(description="Optional local image/screenshot path for multimodal visual memory."),
+    ] = None,
 ) -> str:
     """Store a new preference, fact, or conversation snippet into persistent long-term memory.
 
@@ -81,16 +127,55 @@ def add_memory(
 
 
 @mcp_server.tool(
-    description="Run a semantic search over existing memories to retrieve relevant context, facts, and guidelines."
+    description=(
+        "Run a semantic search over existing memories. ALWAYS call this before starting a task "
+        "or answering anything that could depend on prior context: project tech-stack decisions, "
+        "past pitfalls, user preferences, or earlier conversations. Do not rely on the chat "
+        "window alone. scope='all' (default) searches the current project's memories plus the "
+        "user's global preferences; scope='project' only the current Git repository; "
+        "scope='global' only cross-project personal preferences."
+    )
 )
 def search_memories(
-    query: str,
-    filters: Optional[Dict[str, Any]] = None,
-    limit: int = 5,
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    scope: str = "all",
-    project_id: Optional[str] = None,
+    query: Annotated[
+        str,
+        Field(
+            description=(
+                "Natural language question or search query, e.g. '技术栈选型', "
+                "'CQRS 架构', '代码规范'."
+            )
+        ),
+    ],
+    filters: Annotated[
+        Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
+    ] = None,
+    limit: Annotated[
+        int, Field(description="Maximum number of results to return (default 5).")
+    ] = 5,
+    user_id: Annotated[
+        Optional[str], Field(description="Optional user identifier.")
+    ] = None,
+    agent_id: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Optional agent or project identifier, e.g. 'global' for personal habits; "
+                "omit to auto-route to the current Git repository."
+            )
+        ),
+    ] = None,
+    scope: Annotated[
+        str,
+        Field(
+            description=(
+                "Search scope: 'all' (default, project + global) | 'global' (personal habits) "
+                "| 'project' (current Git repository)."
+            )
+        ),
+    ] = "all",
+    project_id: Annotated[
+        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
+    ] = None,
 ) -> str:
     """Run a semantic search over existing memories.
 
@@ -135,15 +220,43 @@ def search_memories(
 
 
 @mcp_server.tool(
-    description="List and page through memories using structured filters or scope (e.g. personal preferences or project guidelines)."
+    description=(
+        "List and page through memories using structured filters or scope. Use this when the "
+        "user asks to enumerate or browse memories (e.g. project guidelines, personal "
+        "preferences) rather than to find a semantic match."
+    )
 )
 def get_memories(
-    filters: Optional[Dict[str, Any]] = None,
-    limit: int = 20,
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    scope: str = "all",
-    project_id: Optional[str] = None,
+    filters: Annotated[
+        Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
+    ] = None,
+    limit: Annotated[
+        int, Field(description="Maximum number of memories to return (default 20).")
+    ] = 20,
+    user_id: Annotated[
+        Optional[str], Field(description="Optional user identifier.")
+    ] = None,
+    agent_id: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Optional agent or project identifier, e.g. 'global' for personal preferences; "
+                "omit to auto-route to the current Git repository."
+            )
+        ),
+    ] = None,
+    scope: Annotated[
+        str,
+        Field(
+            description=(
+                "Scope: 'all' (default) | 'global' (personal preferences) | 'project' "
+                "(current Git repository)."
+            )
+        ),
+    ] = "all",
+    project_id: Annotated[
+        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
+    ] = None,
 ) -> str:
     """List memories using structured filters or scope.
 
@@ -185,9 +298,16 @@ def get_memories(
 
 
 @mcp_server.tool(
-    description="Fetch a single memory once you know its memory_id."
+    description=(
+        "Fetch a single memory once you know its memory_id, e.g. from search_memories or "
+        "get_memories results."
+    )
 )
-def get_memory(memory_id: str) -> str:
+def get_memory(
+    memory_id: Annotated[
+        str, Field(description="The exact unique identifier of the memory to fetch.")
+    ],
+) -> str:
     """Retrieve a single memory by its memory ID.
 
     Args:
@@ -217,12 +337,19 @@ def get_memory(memory_id: str) -> str:
 
 
 @mcp_server.tool(
-    description="Overwrite an existing memory's text or metadata after confirming its memory_id."
+    description=(
+        "Overwrite an existing memory's text or metadata after confirming its memory_id. Use "
+        "this when the user asks to update or correct a stored memory."
+    )
 )
 def update_memory(
-    memory_id: str,
-    text: str,
-    metadata: Optional[Dict[str, Any]] = None,
+    memory_id: Annotated[
+        str, Field(description="Exact memory_id to overwrite, from search_memories or get_memories.")
+    ],
+    text: Annotated[str, Field(description="Replacement text for the memory.")],
+    metadata: Annotated[
+        Optional[Dict[str, Any]], Field(description="Optional metadata to update.")
+    ] = None,
 ) -> str:
     """Overwrite an existing memory's text or metadata.
 
@@ -243,9 +370,16 @@ def update_memory(
 
 
 @mcp_server.tool(
-    description="Delete one memory after the user confirms its memory_id."
+    description=(
+        "Delete one memory after the user confirms its memory_id. Never guess a memory_id; "
+        "resolve it via search_memories or get_memories first."
+    )
 )
-def delete_memory(memory_id: str) -> str:
+def delete_memory(
+    memory_id: Annotated[
+        str, Field(description="The unique identifier of the memory to delete.")
+    ],
+) -> str:
     """Delete a memory once the user explicitly confirms the memory_id to remove.
 
     Args:
@@ -266,14 +400,34 @@ def delete_memory(memory_id: str) -> str:
 
 
 @mcp_server.tool(
-    description="Delete every memory in the given user/agent/project scope."
+    description=(
+        "Delete every memory in the given user/agent/project scope. Destructive: call only "
+        "when the user explicitly asks to wipe memories and the scope is unambiguous."
+    )
 )
 def delete_all_memories(
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-    scope: Optional[str] = None,
-    project_id: Optional[str] = None,
+    user_id: Annotated[
+        Optional[str], Field(description="User scope to delete (defaults to current user).")
+    ] = None,
+    agent_id: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Optional agent or project identifier, e.g. 'global'; omit to auto-route to "
+                "the current Git repository."
+            )
+        ),
+    ] = None,
+    run_id: Annotated[
+        Optional[str], Field(description="Optional run/session identifier.")
+    ] = None,
+    scope: Annotated[
+        Optional[str],
+        Field(description="Storage scope to wipe: 'project' | 'global' | 'all'."),
+    ] = None,
+    project_id: Annotated[
+        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
+    ] = None,
 ) -> str:
     """Bulk delete memories within a confirmed scope.
 
@@ -305,7 +459,10 @@ def delete_all_memories(
 
 
 @mcp_server.tool(
-    description="List which users and agents/projects currently hold persistent memories."
+    description=(
+        "List which users and agents/projects currently hold persistent memories. Use this "
+        "before delete_all_memories or when the user asks what memory namespaces exist."
+    )
 )
 def list_entities() -> str:
     """List users and agents/projects currently stored in memories."""
