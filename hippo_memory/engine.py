@@ -7,6 +7,30 @@ from hippo_memory.config import HippoConfig
 from hippo_memory.router import ScopeRouter
 
 
+def build_conversation(
+    text: Optional[str],
+    content: Optional[str],
+    messages: Optional[List[Dict[str, str]]],
+) -> List[Dict[str, str]]:
+    """Build the Mem0 `add()` conversation from text/content and messages.
+
+    - 仅 messages：原样使用。
+    - 仅 text/content：作为单条 user 消息。
+    - 两者都传：messages 保留为上下文，显式 text 作为 assistant 角色的补充
+      事实追加到末尾（对齐 Mem0 官方插件以 assistant 角色传递摘要的模式），
+      绝不静默丢弃任何一方。
+    """
+    raw_text = text if text is not None else (content or "")
+    if messages:
+        conversation = list(messages)
+        if raw_text.strip():
+            conversation = conversation + [{"role": "assistant", "content": raw_text}]
+        return conversation
+    if raw_text.strip():
+        return [{"role": "user", "content": raw_text}]
+    raise ValueError("text/content 与 messages 至少需要提供一个")
+
+
 class HippoEngine:
     """Core memory engine wrapping Mem0 with multi-scope and multi-provider support."""
 
@@ -55,6 +79,8 @@ class HippoEngine:
             image_path: Optional path to a local image/screenshot for visual memory.
             text: Plain sentence summarizing what to store (official Mem0 argument).
             messages: Optional structured conversation history with role/content.
+                When both text and messages are provided, messages serve as context
+                and text is appended as an explicit assistant-role fact (never dropped).
             user_id: Optional user identifier override.
             agent_id: Optional agent or project identifier override.
             run_id: Optional run identifier.
@@ -91,7 +117,7 @@ class HippoEngine:
                 full_content += f"\n[Referenced Image: {img_p.name}]"
                 params["metadata"]["image_path"] = str(img_p)
 
-        conversation = messages if messages else [{"role": "user", "content": full_content}]
+        conversation = build_conversation(text=full_content, content=None, messages=messages)
         try:
             result = self.memory.add(conversation, **params)
         except Exception as e:

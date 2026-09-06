@@ -63,6 +63,42 @@ class TestHippo(unittest.TestCase):
         self.assertIn("search_memories", instructions)
         self.assertIn("add_memory", instructions)
 
+    def test_build_conversation_combinations(self):
+        from hippo_memory.engine import build_conversation
+
+        msgs = [
+            {"role": "user", "content": "用 uv 还是 poetry？"},
+            {"role": "assistant", "content": "建议 uv。"},
+        ]
+
+        # 仅 messages：原样使用
+        self.assertEqual(build_conversation(None, None, msgs), msgs)
+
+        # 仅 text：单条 user 消息
+        self.assertEqual(
+            build_conversation("偏好 uv", None, None),
+            [{"role": "user", "content": "偏好 uv"}],
+        )
+
+        # text + messages：messages 为上下文，text 追加为 assistant 补充事实（不丢弃）
+        combined = build_conversation("决策：项目偏好 uv", None, msgs)
+        self.assertEqual(combined[:2], msgs)
+        self.assertEqual(
+            combined[2], {"role": "assistant", "content": "决策：项目偏好 uv"}
+        )
+
+        # content 别名与 text 等价
+        self.assertEqual(
+            build_conversation(None, "偏好 uv", None)[0]["content"], "偏好 uv"
+        )
+
+        # 全空：显式报错而非静默存空记忆
+        with self.assertRaises(ValueError):
+            build_conversation(None, None, None)
+        with self.assertRaises(ValueError):
+            build_conversation("  ", None, [{"role": "user", "content": "x"}][:0])  # 空列表
+        self.assertEqual(build_conversation("  ", None, msgs), msgs)  # 空白 text 不追加
+
     def test_init_upsert_idempotent(self):
         import tempfile
         from hippo_memory.init import upsert_hippo_section, build_memory_section
