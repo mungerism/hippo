@@ -17,7 +17,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hippo.mcp")
 
 # Initialize MCP Server
-mcp_server = MCPServer("hippo-memory")
+mcp_server = MCPServer(
+    "hippo-memory",
+    instructions=(
+        "Hippo is the persistent long-term memory hub (Mem0-compatible). "
+        "ALWAYS run a search_memories query before starting a task or answering anything "
+        "that could depend on prior context: project tech-stack decisions, past pitfalls, "
+        "user preferences, or earlier conversations. Do not rely on the chat window alone. "
+        "When the user states a preference, makes a decision worth keeping, corrects your "
+        "behavior, or asks you to remember something, persist it with add_memory; use "
+        "scope='global' only for cross-project personal habits."
+    ),
+)
 _engine: Optional[HippoEngine] = None
 
 
@@ -204,7 +215,10 @@ def search_memories(
         )
 
         if not results:
-            return f"未找到与 '{query}' 相关的记忆事实 (Scope: {scope})。"
+            return (
+                f"未找到与 '{query}' 相关的记忆事实 (Scope: {scope})。"
+                "可尝试换用更具体的关键词，或放宽 scope（如 'global' 查跨项目个人偏好）。"
+            )
 
         lines = [f"### 检索到的相关记忆 (匹配 {len(results)} 条，Scope: {scope}):"]
         for idx, item in enumerate(results, 1):
@@ -212,7 +226,9 @@ def search_memories(
             aid = item.get("agent_id", "global")
             tag = "Global" if aid == "global" else f"Project: {aid}"
             mem_id = item.get("id", "")
-            lines.append(f"{idx}. [{tag}] {mem_text} (ID: `{mem_id}`)")
+            score = item.get("score")
+            score_part = f"，相关度 {score:.2f}" if isinstance(score, (int, float)) else ""
+            lines.append(f"{idx}. [{tag}]{score_part} {mem_text} (ID: `{mem_id}`)")
 
         return "\n".join(lines)
     except Exception as e:

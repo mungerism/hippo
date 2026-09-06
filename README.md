@@ -174,6 +174,18 @@ enabled = true
 扩展文件：`~/.pi/agent/extensions/hippo-memory.ts`
 > 自动加载为原生工具：`search_memories`、`add_memory`、`get_memories`、`get_memory`、`delete_memory` 及 `/hippo` 快捷命令。
 
+---
+
+## 🧠 提升记忆触发率（可选）
+
+MCP 记忆工具由模型自主决定何时调用（各客户端均无会话开始自动检索）。Hippo 已通过 server instructions 与工具描述声明调用时机，但若你希望在某项目中**强制**"开始任务前先检索记忆"，可在该项目根目录的 `AGENTS.md` 中加入：
+
+```markdown
+## 记忆检索约定
+- 会话开始处理任务前，先调用 `search_memories` 检索当前项目记忆与个人偏好（scope: 'all'）。
+- 用户表达偏好、做出重要决策或纠正行为时，调用 `add_memory` 沉淀；跨项目个人习惯用 scope='global'。
+```
+
 
 ---
 
