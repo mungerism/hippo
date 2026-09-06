@@ -225,6 +225,33 @@ def serve():
 
 
 @app.command()
+def init(
+    skip_global: bool = typer.Option(False, "--skip-global", help="跳过 Codex 全局 ~/.codex/AGENTS.md"),
+    skip_project: bool = typer.Option(False, "--skip-project", help="跳过当前项目 AGENTS.md"),
+):
+    """将记忆检索约定幂等写入客户端指令文件（全局 Codex + 当前项目 AGENTS.md）。"""
+    from hippo_memory.init import run_init
+
+    status_zh = {
+        "created": "已创建",
+        "appended": "已追加",
+        "updated": "已更新",
+        "unchanged": "无变化",
+    }
+    try:
+        results = run_init(skip_global=skip_global, skip_project=skip_project)
+    except Exception as e:
+        console.print(f"[bold red]✗ init 失败:[/bold red] {e}")
+        raise typer.Exit(1)
+
+    console.print("[bold]Hippo 记忆约定写入结果:[/bold]")
+    for path, state in results:
+        style = "dim" if state == "unchanged" else "bold green"
+        console.print(f"  • [{style}]{status_zh[state]}[/{style}] {path}")
+    console.print("[dim]提示: 段落由 <!-- hippo:memory:start/end --> 标记包裹，重复执行幂等。[/dim]")
+
+
+@app.command()
 def migrate_codex(
     concurrency: int = typer.Option(3, "--concurrency", "-c", help="并发迁移线程数"),
 ):

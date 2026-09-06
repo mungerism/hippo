@@ -55,6 +55,43 @@ class TestHippo(unittest.TestCase):
         }
         self.assertEqual(tool_names, expected_tools)
 
+    def test_mcp_server_instructions(self):
+        import asyncio
+        from hippo_memory.server import mcp_server
+
+        instructions = mcp_server.instructions or ""
+        self.assertIn("search_memories", instructions)
+        self.assertIn("add_memory", instructions)
+
+    def test_init_upsert_idempotent(self):
+        import tempfile
+        from hippo_memory.init import upsert_hippo_section, build_memory_section
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "AGENTS.md"
+
+            self.assertEqual(upsert_hippo_section(path), "created")
+            first = path.read_text(encoding="utf-8")
+            self.assertIn("hippo:memory:start", first)
+
+            self.assertEqual(upsert_hippo_section(path), "unchanged")
+            self.assertEqual(path.read_text(encoding="utf-8"), first)
+
+            # 用户改写段落内容后，再次 upsert 应回滚为标准段落（updated）
+            path.write_text(
+                first.replace("search_memories", "STALE_MARKER"), encoding="utf-8"
+            )
+            self.assertEqual(upsert_hippo_section(path), "updated")
+            self.assertIn("search_memories", path.read_text(encoding="utf-8"))
+
+            # 既有无标记文件应追加而非破坏原内容
+            other = Path(tmp) / "notes.md"
+            other.write_text("原始内容\n", encoding="utf-8")
+            self.assertEqual(upsert_hippo_section(other), "appended")
+            text = other.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("原始内容\n"))
+            self.assertIn(build_memory_section(), text)
+
 
 if __name__ == "__main__":
     unittest.main()

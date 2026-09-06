@@ -176,15 +176,21 @@ enabled = true
 
 ---
 
-## 🧠 提升记忆触发率（可选）
+## 🧠 提升记忆触发率：`hippo init`
 
-MCP 记忆工具由模型自主决定何时调用（各客户端均无会话开始自动检索）。Hippo 已通过 server instructions 与工具描述声明调用时机，但若你希望在某项目中**强制**"开始任务前先检索记忆"，可在该项目根目录的 `AGENTS.md` 中加入：
+MCP 记忆工具由模型自主决定何时调用（各客户端均无会话开始自动检索）。Hippo 已通过 server instructions 与工具描述声明调用时机；若需在指令层进一步固化"开始任务前先检索记忆"，运行：
 
-```markdown
-## 记忆检索约定
-- 会话开始处理任务前，先调用 `search_memories` 检索当前项目记忆与个人偏好（scope: 'all'）。
-- 用户表达偏好、做出重要决策或纠正行为时，调用 `add_memory` 沉淀；跨项目个人习惯用 scope='global'。
+```bash
+hippo init
 ```
+
+它会幂等地将「记忆检索约定」段落写入两处指令文件（以 `<!-- hippo:memory:start/end -->` 标记包裹，重复执行无副作用）：
+
+- **`~/.codex/AGENTS.md`**（Codex 全局指令，对该客户端所有项目生效）
+- **当前 Git 仓库根目录的 `AGENTS.md`**（ZCode、antigravity、pi 等按工作区读取）
+
+可用 `--skip-global` / `--skip-project` 控制写入范围。
+> Mem0 官方通过 lifecycle hooks 实现强制的会话开始自动检索；Hippo 保持零配置定位，采用指令文件软引导。
 
 
 ---
