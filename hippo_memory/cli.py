@@ -252,6 +252,64 @@ def init(
 
 
 @app.command()
+def doctor():
+    """巡检本地部署健康状态（Qdrant/配置/LaunchAgent/客户端接入）。"""
+    from hippo_memory.doctor import collect_checks
+
+    checks = collect_checks()
+    table = Table(title="Hippo 本地部署巡检 (doctor)")
+    table.add_column("分类", style="cyan", width=10)
+    table.add_column("检查项", style="bold")
+    table.add_column("状态", width=6)
+    table.add_column("说明", style="dim")
+
+    failed = 0
+    for c in checks:
+        if not c["ok"]:
+            failed += 1
+        table.add_row(
+            c["category"],
+            c["name"],
+            "[green]✓[/green]" if c["ok"] else "[red]✗[/red]",
+            c["detail"],
+        )
+    console.print(table)
+    if failed:
+        console.print(f"[yellow]共 {failed} 项未通过，见上方修复提示。[/yellow]")
+    else:
+        console.print("[bold green]✓ 全部检查通过。[/bold green]")
+
+
+@app.command()
+def service(
+    action: str = typer.Argument(..., help="操作: install | uninstall | status"),
+):
+    """管理 Qdrant LaunchAgent 常驻服务（dev.hippo.qdrant）。"""
+    from hippo_memory import service as svc
+
+    try:
+        if action == "install":
+            console.print(f"[bold green]✓ {svc.install_service()}[/bold green]")
+        elif action == "uninstall":
+            console.print(f"[bold green]✓ {svc.uninstall_service()}[/bold green]")
+        elif action == "status":
+            st = svc.service_status()
+            state = (
+                "常驻运行中" if st["loaded"] and st["listening"]
+                else "已加载但未监听" if st["loaded"]
+                else "已安装未加载" if st["plist_exists"]
+                else "未安装（按需拉起模式）"
+            )
+            console.print(f"dev.hippo.qdrant: {state}（plist 存在: {st['plist_exists']}，端口监听: {st['listening']}）")
+        else:
+            console.print(f"[bold red]✗ 未知操作:[/bold red] {action}（可选 install | uninstall | status）")
+            raise typer.Exit(1)
+    except RuntimeError as e:
+        console.print(f"[bold red]✗ {e}[/bold red]")
+        raise typer.Exit(1)
+
+
+@app.command()
 def migrate_codex(
     concurrency: int = typer.Option(3, "--concurrency", "-c", help="并发迁移线程数"),
 ):

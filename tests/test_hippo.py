@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from hippo_memory.config import HippoConfig
@@ -98,6 +99,66 @@ class TestHippo(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_conversation("  ", None, [{"role": "user", "content": "x"}][:0])  # 空列表
         self.assertEqual(build_conversation("  ", None, msgs), msgs)  # 空白 text 不追加
+
+    def test_service_plist_and_preflight(self):
+        import tempfile
+        import plistlib
+        from hippo_memory.service import (
+            build_plist_content, install_service, SERVICE_LABEL,
+        )
+
+        content = build_plist_content()
+        data = plistlib.loads(content.encode("utf-8"))
+        self.assertEqual(data["Label"], SERVICE_LABEL)
+        self.assertTrue(data["RunAtLoad"])
+        self.assertTrue(data["KeepAlive"])
+        self.assertIn("--config-path", data["ProgramArguments"])
+        self.assertTrue(data["ProgramArguments"][0].endswith("/bin/qdrant"))
+
+        # 缺少 qdrant 二进制/配置时应拒绝安装且不触碰 launchctl
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                install_service(home=Path(tmp), load=False)
+
+            # 文件齐备（load=False 不经过 launchctl）→ 写出 plist
+            (Path(tmp) / "bin").mkdir()
+            (Path(tmp) / "bin" / "qdrant").write_text("#!/bin/sh\n")
+            (Path(tmp) / "config").mkdir()
+            (Path(tmp) / "config" / "qdrant.yaml").write_text("storage: {}\n")
+            install_service(home=Path(tmp), load=False)
+            installed = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+            self.assertTrue(installed.exists())
+            data2 = plistlib.loads(installed.read_bytes())
+            self.assertEqual(data2["ProgramArguments"][0], str(Path(tmp) / "bin" / "qdrant"))
+
+    def test_doctor_checks_structure(self):
+        from unittest.mock import patch
+        from hippo_memory import doctor
+
+        # 注入假的客户端路径（指向不存在的临时目录）与端口状态，保证离线可测
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_cfg = Path(tmp) / "cfg.json"
+            fake_cfg.write_text('{"command": "uv run hippo-mcp"}', encoding="utf-8")
+            with patch.object(doctor, "_client_config_checks",
+                              return_value=[("FakeClient", fake_cfg, "hippo-mcp")]), \
+                 patch.object(doctor, "is_listening", return_value=False), \
+                 patch("hippo_memory.service.is_loaded", return_value=False):
+                checks = doctor.collect_checks()
+
+        self.assertTrue(checks)  # 必有检查项
+        names = {(c["category"], c["name"]) for c in checks}
+        self.assertIn(("Qdrant", "服务监听 127.0.0.1:6333"), names)
+        self.assertIn(("依赖", "mem0ai"), names)
+
+        # 客户端检查项使用注入路径：存在且含标记 → ok
+        client_checks = [c for c in checks if c["category"] == "客户端" and c["name"] == "FakeClient"]
+        self.assertEqual(len(client_checks), 1)
+        self.assertTrue(client_checks[0]["ok"])
+        self.assertIn(str(fake_cfg), client_checks[0]["detail"])
+
+        # Qdrant 未监听 → 该项失败
+        qdrant_check = next(c for c in checks if c["name"] == "服务监听 127.0.0.1:6333")
+        self.assertFalse(qdrant_check["ok"])
 
     def test_init_upsert_idempotent(self):
         import tempfile
