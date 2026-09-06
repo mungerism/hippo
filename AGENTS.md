@@ -14,7 +14,7 @@
 2. **Hippo 的唯一边界与职责**：
    - **多端协议桥接**：为 antigravity、Codex、ZCode、Zed AI、Cursor、pi 等提供零配置的 MCP stdio 桥接与轻量插件。
    - **自动化作用域路由**：根据执行目录自动探测 Git 根仓库，智能映射 `agent_id` 实现项目级记忆隔离，无需调用方手动传递。
-   - **本地服务高可靠**：通过单二进制常驻 Qdrant Server (`127.0.0.1:6333`) + LaunchAgent 保活彻底规避并发文件锁。
+   - **本地服务高可靠**：单二进制 Qdrant Server (`127.0.0.1:6333`) 按需自愈拉起；`hippo service install` 可升级为 LaunchAgent 常驻保活（dev.hippo.qdrant），`hippo doctor` 提供一键巡检。
    - **终端交互 CLI**：提供面向人类开发者的 `hippo` 极简命令行工具。
 
 3. **依赖与模型选型**：

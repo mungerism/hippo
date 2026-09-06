@@ -209,5 +209,23 @@ hippo init
 
 ---
 
+## 🩺 本地服务运维（service / doctor）
+
+```bash
+# 将 Qdrant 升级为 LaunchAgent 常驻服务（RunAtLoad + KeepAlive 崩溃自拉起）
+hippo service install
+
+# 查看服务状态 / 卸载（卸载后回到按需拉起模式）
+hippo service status
+hippo service uninstall
+
+# 一键巡检：Qdrant 连通、collection、配置与 API Key、服务状态、5 家客户端接入、依赖版本
+hippo doctor
+```
+
+服务未安装时，Hippo 沿用按需拉起模式：任何命令运行前自动探测 6333 端口，未监听则拉起 `~/.hippo/bin/qdrant`。
+
+---
+
 ## 📚 延伸阅读
 - [Mem0 深度技术调研报告](./mem0_research.md)
