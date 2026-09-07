@@ -6,9 +6,9 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from hippo_memory.hooks.adapters.base import BaseHostAdapter
+from hippo_memory.hooks.adapters.base import FILE_EXT_RE, BaseHostAdapter
 from hippo_memory.hooks.models import CapturedPayload, HookEvent, HostType, calculate_job_id
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,10 @@ class PiAdapter(BaseHostAdapter):
             created_at=time.time(),
         )
 
+        raw_touched = data.get("touched_files") or []
+        if isinstance(raw_touched, list):
+            payload.touched_files = [str(f) for f in raw_touched if f]
+
         if raw_turns:
             turns = []
             last_user_goal = ""
@@ -82,7 +86,7 @@ class PiAdapter(BaseHostAdapter):
                     last_user_goal = c
                 elif r in ("assistant", "model"):
                     turns.append({"role": "assistant", "content": c})
-            payload.turns = turns[-20:]
+            payload.turns = turns
             payload.last_user_goal = last_user_goal
             payload.last_assistant_final = self.clean_turn_text(last_assistant_msg) or (
                 turns[-1]["content"] if turns and turns[-1]["role"] == "assistant" else ""
@@ -90,8 +94,37 @@ class PiAdapter(BaseHostAdapter):
 
         return payload
 
+    def _extract_touched_files_from_transcript(self, filepath: str) -> List[str]:
+        """从 Pi 本地 transcript 日志快速扫描工具调用产生的文件变更。"""
+        lines = self.read_transcript_lines(filepath, max_lines=1000)
+        found: Set[str] = set()
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                rec = json.loads(line_str)
+            except Exception:
+                continue
+            # 匹配 toolUse / toolCall 参数中的文件
+            if isinstance(rec, dict):
+                args = rec.get("arguments") or rec.get("args") or rec
+                if isinstance(args, dict):
+                    found.update(self.extract_files_from_dict(args))
+                # 正则匹配整行中的代码文件名
+                for m in FILE_EXT_RE.findall(line_str):
+                    found.add(m)
+        return list(found)[:30]
+
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
-        # If already populated via in-memory turns, skip disk scan
+        # 若已有内存直传轮次，但缺少修改文件列表且有 transcript 日志，做快速文件补充，防御 Delta Skip 误杀
+        if not payload.touched_files and payload.transcript_path and os.path.isfile(payload.transcript_path):
+            try:
+                payload.touched_files = self._extract_touched_files_from_transcript(payload.transcript_path)
+            except Exception:
+                pass
+
+        # If already populated via in-memory turns, skip full turn parsing
         if payload.turns and payload.last_assistant_final:
             return payload
 
@@ -99,14 +132,12 @@ class PiAdapter(BaseHostAdapter):
             return payload
 
         turns: List[Dict[str, str]] = []
-        touched_files: List[str] = []
+        touched_files: Set[str] = set(payload.touched_files)
         last_user_goal = ""
         last_assistant_final = ""
 
         try:
-            with open(payload.transcript_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()[-2000:]
-
+            lines = self.read_transcript_lines(payload.transcript_path, max_lines=2000)
             for line in lines:
                 line_str = line.strip()
                 if not line_str:
@@ -115,6 +146,11 @@ class PiAdapter(BaseHostAdapter):
                     record = json.loads(line_str)
                 except Exception:
                     continue
+
+                if isinstance(record, dict):
+                    args = record.get("arguments") or record.get("args") or record
+                    if isinstance(args, dict):
+                        touched_files.update(self.extract_files_from_dict(args))
 
                 role = record.get("role")
                 content = record.get("content") or ""
@@ -136,8 +172,8 @@ class PiAdapter(BaseHostAdapter):
         except Exception as e:
             logger.error(f"Error extracting Pi transcript {payload.transcript_path}: {e}")
 
-        payload.turns = turns[-20:]
-        payload.touched_files = list(set(touched_files))[:30]
+        payload.turns = turns[-100:]
+        payload.touched_files = list(touched_files)[:30]
         if not payload.last_user_goal:
             payload.last_user_goal = last_user_goal
         if not payload.last_assistant_final:

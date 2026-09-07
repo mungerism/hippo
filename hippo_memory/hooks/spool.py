@@ -30,6 +30,36 @@ TRANSIENT_PATTERNS = [
 ]
 
 
+def is_turns_superset(newer_turns: List[Dict[str, Any]], older_turns: List[Dict[str, Any]]) -> bool:
+    """Check whether newer_turns is a strict superset containing all older_turns.
+
+    Prevents coalescing different sliding windows with equal capped counts.
+    """
+    if not older_turns:
+        return True
+    if len(newer_turns) < len(older_turns):
+        return False
+
+    n_tuples = [(t.get("role"), str(t.get("content", "")).strip()) for t in newer_turns]
+    o_tuples = [(t.get("role"), str(t.get("content", "")).strip()) for t in older_turns]
+
+    # If same length, must match exactly
+    if len(n_tuples) == len(o_tuples):
+        return n_tuples == o_tuples
+
+    # Check if older is a prefix of newer
+    if n_tuples[:len(o_tuples)] == o_tuples:
+        return True
+
+    # Check if older is a contiguous sub-sequence of newer
+    o_len = len(o_tuples)
+    for i in range(len(n_tuples) - o_len + 1):
+        if n_tuples[i:i + o_len] == o_tuples:
+            return True
+
+    return False
+
+
 class SpoolStorage:
     """Filesystem-based atomic spool queue and state store."""
 
@@ -232,11 +262,11 @@ class SpoolStorage:
             newest = jobs[-1]
 
             # 严格安全包含不变量 (Safe Coalescing Invariant):
-            # 仅当最新作业对前置作业构成严格超集（turns 数量或 transcript 文件代际非递减）时方可折叠
+            # 仅当最新作业对前置作业构成严格超集（内容包含且无滑动窗口截断）时方可折叠
             for older in jobs[:-1]:
                 can_coalesce = False
                 if newest.turns and older.turns:
-                    can_coalesce = len(newest.turns) >= len(older.turns)
+                    can_coalesce = is_turns_superset(newest.turns, older.turns)
                 elif newest.transcript_path and older.transcript_path:
                     try:
                         n_size = os.path.getsize(newest.transcript_path) if os.path.isfile(newest.transcript_path) else 0
@@ -328,7 +358,7 @@ class SpoolWorker:
                 self.storage.skip_job(extracted.job_id, "No extractable conversation turns found")
                 return True
 
-            project_id = extracted.project_id or self.engine.router.resolve_project(extracted.project_dir)
+            project_id = extracted.project_id or self.engine.router.resolve_project(cwd=extracted.project_dir)
             cursor = calculate_semantic_cursor(
                 project_id=project_id,
                 session_id=extracted.session_id,
@@ -388,26 +418,48 @@ class SpoolWorker:
             self.storage.fail_job(payload.job_id, err_msg, retryable=retryable)
             return False
 
-    def drain(self, limit: Optional[int] = None) -> int:
-        """Drain ready pending jobs under single-worker lock."""
+    def drain(self, limit: Optional[int] = None, wait_for_retries: bool = True) -> int:
+        """Drain ready pending jobs under single-worker lock, with automatic wake-up for retry backoffs."""
         if not self.acquire_lock():
             logger.debug("Another worker holds lock, skipping drain.")
             return 0
 
         processed = 0
         try:
-            self.storage.recover_expired_leases()
-            self.storage.coalesce_pending_jobs()
+            while True:
+                self.storage.recover_expired_leases()
+                self.storage.coalesce_pending_jobs()
 
-            now = time.time()
-            pending_jobs = self.storage.list_jobs(state=JobState.PENDING)
-            for job in pending_jobs:
+                now = time.time()
+                pending_jobs = self.storage.list_jobs(state=JobState.PENDING)
+                if not pending_jobs:
+                    break
+
+                ready_jobs = [j for j in pending_jobs if j.not_before <= now]
+                for job in ready_jobs:
+                    if limit is not None and processed >= limit:
+                        break
+                    if self.process_one_job(job):
+                        processed += 1
+
                 if limit is not None and processed >= limit:
                     break
-                if job.not_before > now:
-                    continue  # Still in backoff
-                if self.process_one_job(job):
-                    processed += 1
+
+                # 检查是否存在因 429/503 退避等待下一次重试的作业
+                now = time.time()
+                pending_after = self.storage.list_jobs(state=JobState.PENDING)
+                future_jobs = [j for j in pending_after if j.not_before > now]
+
+                if not future_jobs or not wait_for_retries:
+                    break
+
+                # 限制就地等待时间（最多等待 35 秒，完整覆盖常规 10s、20s 指数退避）
+                min_wait = min(j.not_before - now for j in future_jobs)
+                if min_wait <= 35.0:
+                    logger.info(f"Worker waiting {min_wait:.1f}s for scheduled retry job...")
+                    time.sleep(max(0.1, min_wait))
+                else:
+                    break
         finally:
             self.release_lock()
 

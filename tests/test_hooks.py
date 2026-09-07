@@ -119,6 +119,33 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(coalesced2, 0)  # 拒绝折叠，保留两者
         self.assertEqual(self.storage.load_state(j3_rich.job_id).get("state"), JobState.PENDING.value)
 
+        # 3. 滑动窗口防护：turns 条数相同但内容移动（如第 10~29 轮与第 15~34 轮），内容不构成超集，必须拒绝折叠
+        j5_window1 = CapturedPayload(
+            job_id="job-win-1",
+            host="pi",
+            event="Stop",
+            session_id="sess-slide",
+            project_dir="/tmp",
+            turns=[{"role": "user", "content": "t1"}, {"role": "assistant", "content": "t2"}],
+            created_at=500.0,
+        )
+        j6_window2 = CapturedPayload(
+            job_id="job-win-2",
+            host="pi",
+            event="Stop",
+            session_id="sess-slide",
+            project_dir="/tmp",
+            turns=[{"role": "assistant", "content": "t2"}, {"role": "user", "content": "t3"}],  # 相同长度2，但滑动了
+            created_at=600.0,
+        )
+        self.storage.enqueue(j5_window1)
+        self.storage.enqueue(j6_window2)
+
+        coalesced3 = self.storage.coalesce_pending_jobs()
+        self.assertEqual(coalesced3, 0)  # 内容不同，拒绝折叠
+        self.assertEqual(self.storage.load_state(j5_window1.job_id).get("state"), JobState.PENDING.value)
+        self.assertEqual(self.storage.load_state(j6_window2.job_id).get("state"), JobState.PENDING.value)
+
     def test_semantic_cursor_dedup_across_events(self):
         mock_engine = MagicMock()
         mock_engine.router.resolve_project.return_value = "test_repo"
@@ -235,6 +262,64 @@ class TestHookSpool(unittest.TestCase):
         st_dead = self.storage.load_state(j.job_id)
         self.assertEqual(st_dead.get("state"), JobState.DEAD.value)
 
+    def test_project_id_derived_from_git_dir(self):
+        """验证蒸馏时从 project_dir 正确解析 Git 项目名，绝不使用完整路径作为 project_id。"""
+        mock_engine = MagicMock()
+        mock_engine.router.resolve_project.side_effect = lambda project_id=None, cwd=None: "hippo"
+        mock_engine.add.return_value = {"results": [{"id": "mem_1"}]}
+
+        worker = SpoolWorker(storage=self.storage, engine=mock_engine)
+        j = CapturedPayload(
+            job_id="job-proj-test",
+            host="codex",
+            event="Stop",
+            session_id="sess-p",
+            project_dir="/Users/munger/Code/Repos/Personal/hippo",
+            turns=[{"role": "user", "content": "架构原则"}, {"role": "assistant", "content": "遵循 Mem0 规范"}],
+            last_assistant_final="遵循 Mem0 规范",
+        )
+        self.storage.enqueue(j)
+        worker.drain(wait_for_retries=False)
+
+        mock_engine.add.assert_called_once()
+        call_kwargs = mock_engine.add.call_args[1]
+        self.assertEqual(call_kwargs["project_id"], "hippo")
+
+    def test_drain_auto_wakes_for_retries(self):
+        """验证 worker.drain 遇到瞬态退避重试时能够自动原地唤醒并再次重试。"""
+        mock_engine = MagicMock()
+        mock_engine.router.resolve_project.return_value = "test_repo"
+        # 第一次调用模拟 429 报错，第二次调用成功
+        mock_engine.add.side_effect = [
+            Exception("429 RESOURCE_EXHAUSTED: Rate limit exceeded"),
+            {"results": [{"id": "mem_retry_success"}]},
+        ]
+
+        worker = SpoolWorker(storage=self.storage, engine=mock_engine)
+        j = CapturedPayload(
+            job_id="job-retry-wake",
+            host="codex",
+            event="Stop",
+            session_id="sess-retry",
+            project_dir="/tmp/repo",
+            turns=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "world"}],
+            last_assistant_final="world",
+        )
+        self.storage.enqueue(j)
+
+        # 缩短测试退避时间为 0.05 秒
+        orig_fail = self.storage.fail_job
+        def fast_fail(job_id, error_msg, retryable=True):
+            orig_fail(job_id, error_msg, retryable=retryable)
+            self.storage.update_state(job_id, JobState.PENDING, not_before=time.time() + 0.05)
+
+        self.storage.fail_job = fast_fail
+        processed = worker.drain(wait_for_retries=True)
+        self.assertEqual(processed, 1)
+        st = self.storage.load_state(j.job_id)
+        self.assertEqual(st.get("state"), JobState.COMPLETED.value)
+        self.assertEqual(mock_engine.add.call_count, 2)
+
 
 class TestHostAdapters(unittest.TestCase):
     def setUp(self):
@@ -348,6 +433,29 @@ class TestHostAdapters(unittest.TestCase):
         payload = adapter.parse_context(raw_stdin)
         self.assertEqual(payload.session_id, "zcode-sess-2")
         self.assertEqual(payload.event, "Stop")
+
+    def test_pi_adapter_with_touched_files_prevents_delta_skip(self):
+        """验证 Pi 适配器解析 touched_files 并成功防止 Delta Skip 误跳过代码变更。"""
+        adapter = get_adapter("pi")
+        raw_stdin = json.dumps({
+            "session_id": "pi-sess-touched",
+            "event": "agent_settled",
+            "cwd": "/tmp/pi_repo",
+            "turns": [
+                {"role": "user", "content": "修改代码"},
+                {"role": "assistant", "content": "Done."},
+            ],
+            "last_assistant_message": "Done.",
+            "touched_files": ["hippo_memory/cli.py"],
+        })
+        payload = adapter.parse_context(raw_stdin)
+        self.assertIn("hippo_memory/cli.py", payload.touched_files)
+
+        mock_storage = MagicMock()
+        worker = SpoolWorker(storage=mock_storage)
+        extracted = adapter.extract_session_turns(payload)
+        # 即使消息简短如 Done.，只要存在 touched_files 就绝对不能被当作 delta transient 跳过
+        self.assertFalse(worker.is_delta_transient(extracted))
 
 
 if __name__ == "__main__":

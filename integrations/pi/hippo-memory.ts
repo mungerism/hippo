@@ -151,6 +151,39 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+/**
+ * 从会话上下文或工具调用中提取修改过的文件路径
+ */
+function extractTouchedFiles(messages: any[]): string[] {
+  const files = new Set<string>();
+  if (!Array.isArray(messages)) return [];
+  const fileExtRegex = /\b[\w./-]+\.(?:py|ts|js|jsx|tsx|go|rs|java|c|cpp|h|md|json|toml|yaml|yml|sh|sql)\b/g;
+
+  for (const msg of messages) {
+    if (!msg) continue;
+    // 检查工具调用参数
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        const args = tc?.function?.arguments || tc?.arguments;
+        const str = typeof args === "string" ? args : JSON.stringify(args || {});
+        const matches = str.match(fileExtRegex);
+        if (matches) matches.forEach((f) => files.add(f));
+      }
+    }
+    // 检查工具返回或内容块
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block?.type === "tool_result" || block?.type === "tool_use") {
+          const str = JSON.stringify(block);
+          const matches = str.match(fileExtRegex);
+          if (matches) matches.forEach((f) => files.add(f));
+        }
+      }
+    }
+  }
+  return Array.from(files);
+}
+
   // 4. 双事件生命周期自动蒸馏 (agent_settled 主检查点 + session_shutdown 退出兜底)
   const dispatchHook = (eventName: string, ctx: any) => {
     try {
@@ -179,25 +212,38 @@ export default function (pi: ExtensionAPI) {
       }
       const extractedTurns = extractConversation(rawMsgs);
       const lastAssistant = extractedTurns.filter((t) => t.role === "assistant").pop()?.content || "";
+      const touchedFiles = extractTouchedFiles(rawMsgs);
 
       const payload = JSON.stringify({
         session_id: sessionId,
         event: eventName,
         project_dir: ctx?.cwd || process.cwd(),
         transcript_path: transcriptPath,
-        turns: extractedTurns.slice(-20),
+        turns: extractedTurns.slice(-100),
         last_assistant_message: lastAssistant,
+        touched_files: touchedFiles,
       });
 
       const child = spawn(hippoBin, ["hook", "capture", "--host", "pi"], {
         detached: true,
         stdio: ["pipe", "ignore", "ignore"],
       });
-      child.stdin.write(payload);
-      child.stdin.end();
+
+      // 关键防崩：为子进程及其 stdin 绑定异步 error 监听器，防止因可执行文件缺失（ENOENT）导致宿主崩溃
+      child.on("error", () => {
+        // 静默容灾，绝不打扰用户
+      });
+
+      if (child.stdin) {
+        child.stdin.on("error", () => {
+          // 捕获 EPIPE 异步管道异常
+        });
+        child.stdin.write(payload);
+        child.stdin.end();
+      }
       child.unref();
     } catch {
-      // 静默容灾，绝不阻塞用户终端与交互
+      // 同步异常静默容灾
     }
   };
 
