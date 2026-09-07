@@ -47,3 +47,4 @@ qdrant_storage/
 *.swp
 *.swo
 .qdrant-initialized
+*.ses

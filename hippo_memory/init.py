@@ -4,8 +4,12 @@
 使各客户端的智能体在会话层面获得"先检索、后沉淀"的稳定指引。
 """
 
+import json
+import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
+
+logger = logging.getLogger("hippo.init")
 
 SECTION_START = "<!-- hippo:memory:start -->"
 SECTION_END = "<!-- hippo:memory:end -->"
@@ -62,22 +66,51 @@ def resolve_hippo_command(host: str) -> str:
     return f"'{sys.executable}' -m hippo_memory.cli hook capture --host {host}"
 
 
+def _safe_load_json_config(target: Path, default_factory: Callable[[], dict]) -> Tuple[Optional[dict], Optional[str]]:
+    """Safely load JSON config file without risking destructive overwrites.
+
+    Returns:
+        (data, None) on success
+        (None, "malformed") if target exists and contains invalid JSON or non-dict root
+    """
+    if not target.exists():
+        return default_factory(), None
+
+    try:
+        raw = target.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        logger.warning(f"无法读取配置文件 {target}: {e}。已中止写入以防损坏配置。")
+        return None, "unreadable"
+
+    if not raw:
+        return default_factory(), None
+
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            logger.warning(f"配置文件 {target} 根对象非 JSON 字典，已中止写入以防清空配置。")
+            return None, "malformed"
+        return data, None
+    except Exception as e:
+        logger.warning(f"无法解析配置文件 {target} (JSON语法错误: {e})。已中止写入以防清空配置。")
+        return None, "malformed"
+
+
 def upsert_codex_hooks(path: Optional[Path] = None) -> str:
     """Idempotently configure Stop and SessionEnd hooks in ~/.codex/hooks.json."""
-    import json
-
     target = path or (Path.home() / ".codex" / "hooks.json")
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
-    data = {"hooks": {}}
-    if target.exists():
-        try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"hooks": {}}
+    data, err = _safe_load_json_config(target, lambda: {"hooks": {}})
+    if err is not None:
+        return "aborted (malformed JSON)"
 
     hooks_obj = data.setdefault("hooks", {})
+    if not isinstance(hooks_obj, dict):
+        logger.warning(f"配置文件 {target} 中的 hooks 字段非字典，已中止写入以防清空配置。")
+        return "aborted (malformed JSON)"
+
     cmd_str = resolve_hippo_command("codex")
     changed = False
 
@@ -108,22 +141,25 @@ def upsert_codex_hooks(path: Optional[Path] = None) -> str:
 
 def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
     """Idempotently configure Stop hook in ~/.zcode/cli/config.json."""
-    import json
-
     target = path or (Path.home() / ".zcode" / "cli" / "config.json")
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
-    data = {}
-    if target.exists():
-        try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data, err = _safe_load_json_config(target, dict)
+    if err is not None:
+        return "aborted (malformed JSON)"
 
     hooks_sec = data.setdefault("hooks", {})
+    if not isinstance(hooks_sec, dict):
+        logger.warning(f"配置文件 {target} 中的 hooks 字段非字典，已中止写入以防清空配置。")
+        return "aborted (malformed JSON)"
+
     hooks_sec["enabled"] = True
     events = hooks_sec.setdefault("events", {})
+    if not isinstance(events, dict):
+        logger.warning(f"配置文件 {target} 中的 events 字段非字典，已中止写入以防清空配置。")
+        return "aborted (malformed JSON)"
+
     stop_list = events.setdefault("Stop", [])
 
     cmd_str = resolve_hippo_command("zcode")
@@ -150,21 +186,20 @@ def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
 
 def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
     """Idempotently configure Stop hook in ~/.gemini/antigravity-cli/hooks.json."""
-    import json
-
     target = path or (Path.home() / ".gemini" / "antigravity-cli" / "hooks.json")
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
-    data = {}
-    if target.exists():
-        try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data, err = _safe_load_json_config(target, dict)
+    if err is not None:
+        return "aborted (malformed JSON)"
 
     cmd_str = resolve_hippo_command("antigravity")
     hippo_group = data.setdefault("hippo-memory-distill", {})
+    if not isinstance(hippo_group, dict):
+        logger.warning(f"配置文件 {target} 中的 hippo-memory-distill 字段非字典，已中止写入以防清空配置。")
+        return "aborted (malformed JSON)"
+
     stop_list = hippo_group.setdefault("Stop", [])
 
     exists = any("hook capture --host antigravity" in h.get("command", "") for h in stop_list if isinstance(h, dict))

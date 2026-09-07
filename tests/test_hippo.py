@@ -256,6 +256,50 @@ class TestHippo(unittest.TestCase):
             self.assertIn("agent_settled", pi_file.read_text(encoding="utf-8"))
             self.assertEqual(upsert_pi_extension(pi_file), "unchanged")
 
+    def test_hooks_init_malformed_json_guard(self):
+        """验证宿主现有配置文件损坏时安全中止，拒绝破坏性清空。"""
+        import tempfile
+        from hippo_memory.init import (
+            upsert_codex_hooks,
+            upsert_zcode_hooks,
+            upsert_antigravity_hooks,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bad_content = '{"hooks": { malformed json ...'
+
+            # 1. Codex
+            c_file = tmp_path / "codex_hooks.json"
+            c_file.write_text(bad_content, encoding="utf-8")
+            self.assertEqual(upsert_codex_hooks(c_file), "aborted (malformed JSON)")
+            self.assertEqual(c_file.read_text(encoding="utf-8"), bad_content)
+
+            # 2. ZCode
+            z_file = tmp_path / "zcode_config.json"
+            z_file.write_text(bad_content, encoding="utf-8")
+            self.assertEqual(upsert_zcode_hooks(z_file), "aborted (malformed JSON)")
+            self.assertEqual(z_file.read_text(encoding="utf-8"), bad_content)
+
+            # 3. Antigravity
+            a_file = tmp_path / "agy_hooks.json"
+            a_file.write_text(bad_content, encoding="utf-8")
+            self.assertEqual(upsert_antigravity_hooks(a_file), "aborted (malformed JSON)")
+            self.assertEqual(a_file.read_text(encoding="utf-8"), bad_content)
+
+    def test_migrate_zcode_invokes_migration(self):
+        """验证 hippo migrate-zcode 命令确实执行了 migrate_zcode_all()。"""
+        from unittest.mock import patch
+        from typer.testing import CliRunner
+        from hippo_memory.cli import app
+
+        runner = CliRunner()
+        with patch("hippo_memory.migrate_zcode.migrate_zcode_all") as mock_migrate:
+            mock_migrate.return_value = {"total": 1, "success": 1, "failed": 0}
+            result = runner.invoke(app, ["migrate-zcode"])
+            self.assertEqual(result.exit_code, 0)
+            mock_migrate.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

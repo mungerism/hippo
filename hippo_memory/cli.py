@@ -237,6 +237,7 @@ def init(
         "appended": "已追加",
         "updated": "已更新",
         "unchanged": "无变化",
+        "aborted (malformed JSON)": "已中止 (JSON语法错误，保留原文件)",
     }
     try:
         results = run_init(skip_global=skip_global, skip_project=skip_project)
@@ -246,8 +247,14 @@ def init(
 
     console.print("[bold]Hippo 记忆约定写入结果:[/bold]")
     for path, state in results:
-        style = "dim" if state == "unchanged" else "bold green"
-        console.print(f"  • [{style}]{status_zh[state]}[/{style}] {path}")
+        if "aborted" in state or "failed" in state:
+            style = "bold red"
+        elif state == "unchanged":
+            style = "dim"
+        else:
+            style = "bold green"
+        state_label = status_zh.get(state, state)
+        console.print(f"  • [{style}]{state_label}[/{style}] {path}")
     console.print("[dim]提示: 段落由 <!-- hippo:memory:start/end --> 标记包裹，重复执行幂等。[/dim]")
 
 
@@ -323,6 +330,8 @@ def migrate_codex(
 def migrate_zcode():
     """一键将 ZCode 本地 ~/.zcode/cli/memories/ 中的精细记忆迁移至 Hippo。"""
     from hippo_memory.migrate_zcode import migrate_zcode_all
+
+    migrate_zcode_all()
 
 hook_app = typer.Typer(
     name="hook",
