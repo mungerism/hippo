@@ -513,6 +513,102 @@ class TestHostAdapters(unittest.TestCase):
         self.assertEqual(payload.session_id, "zcode-sess-2")
         self.assertEqual(payload.event, "Stop")
 
+    def test_zcode_adapter_model_io_rollout(self):
+        """验证 ZCode model-io 结构 (request.messages / response.text / response.toolCalls) 的正确解析与文件提取。"""
+        adapter = get_adapter("zcode")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            transcript_file = Path(f.name)
+            # Record 1: turn 1, intermediate call with tool call
+            f.write(json.dumps({
+                "turnId": "turn_1",
+                "request": {
+                    "messages": [
+                        {"role": "user", "content": "实现会话记忆提取"}
+                    ]
+                },
+                "response": {
+                    "text": "正在分析代码...",
+                    "toolCalls": [
+                        {"name": "Bash", "input": {"command": "cat hippo_memory/hooks/adapters/zcode.py"}}
+                    ]
+                }
+            }) + "\n")
+            # Record 2: turn 1, final response
+            f.write(json.dumps({
+                "turnId": "turn_1",
+                "request": {
+                    "messages": [
+                        {"role": "user", "content": "实现会话记忆提取"},
+                        {"role": "assistant", "content": "正在分析代码..."},
+                        {"role": "tool", "content": "class ZCodeAdapter..."}
+                    ]
+                },
+                "response": {
+                    "text": "已成功实现 ZCode model-io 格式解析。",
+                    "toolCalls": []
+                }
+            }) + "\n")
+            # Record 3: turn 2, second user prompt
+            f.write(json.dumps({
+                "turnId": "turn_2",
+                "request": {
+                    "messages": [
+                        {"role": "user", "content": "运行单测验证"}
+                    ]
+                },
+                "response": {
+                    "text": "所有单元测试通过。",
+                    "toolCalls": [
+                        {"name": "Bash", "input": {"command": "pytest tests/test_hooks.py"}}
+                    ]
+                }
+            }) + "\n")
+
+        try:
+            payload = adapter.parse_context(json.dumps({
+                "session_id": "zcode-model-io-sess",
+                "transcript_path": str(transcript_file),
+            }))
+            extracted = adapter.extract_session_turns(payload)
+            self.assertEqual(len(extracted.turns), 4)
+            self.assertEqual(extracted.turns[0]["content"], "实现会话记忆提取")
+            self.assertEqual(extracted.turns[1]["content"], "已成功实现 ZCode model-io 格式解析。")
+            self.assertEqual(extracted.turns[2]["content"], "运行单测验证")
+            self.assertEqual(extracted.turns[3]["content"], "所有单元测试通过。")
+            self.assertEqual(extracted.last_user_goal, "运行单测验证")
+            self.assertEqual(extracted.last_assistant_final, "所有单元测试通过。")
+            self.assertIn("hippo_memory/hooks/adapters/zcode.py", extracted.touched_files)
+            self.assertIn("tests/test_hooks.py", extracted.touched_files)
+        finally:
+            if transcript_file.exists():
+                transcript_file.unlink()
+
+    def test_zcode_adapter_legacy_transcript(self):
+        """验证 ZCode 兼容标准单行 role/content 格式及工具调用。"""
+        adapter = get_adapter("zcode")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            transcript_file = Path(f.name)
+            f.write(json.dumps({"role": "user", "content": "编写 README"}) + "\n")
+            f.write(json.dumps({
+                "role": "assistant",
+                "content": "已更新 README.md。",
+                "tool_calls": [{"name": "edit", "args": {"path": "README.md"}}]
+            }) + "\n")
+
+        try:
+            payload = adapter.parse_context(json.dumps({
+                "session_id": "zcode-legacy-sess",
+                "transcript_path": str(transcript_file),
+            }))
+            extracted = adapter.extract_session_turns(payload)
+            self.assertEqual(len(extracted.turns), 2)
+            self.assertEqual(extracted.last_user_goal, "编写 README")
+            self.assertEqual(extracted.last_assistant_final, "已更新 README.md。")
+            self.assertIn("README.md", extracted.touched_files)
+        finally:
+            if transcript_file.exists():
+                transcript_file.unlink()
+
     def test_pi_adapter_with_touched_files_prevents_delta_skip(self):
         """验证 Pi 适配器解析 touched_files 并成功防止 Delta Skip 误跳过代码变更。"""
         adapter = get_adapter("pi")

@@ -10,8 +10,6 @@ from rich.table import Table
 from rich.panel import Panel
 
 from hippo_memory.config import HippoConfig, DEFAULT_ENV_FILE
-from hippo_memory.engine import HippoEngine
-from hippo_memory.server import main as run_server
 
 app = typer.Typer(
     name="hippo",
@@ -19,6 +17,11 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+
+def _get_engine(cfg: Optional[HippoConfig] = None):
+    from hippo_memory.engine import HippoEngine
+    return HippoEngine(cfg)
 
 
 @app.command()
@@ -30,7 +33,7 @@ def add(
 ):
     """沉淀一条新记忆到 Hippo 中枢。"""
     scope = "global" if is_global else "project"
-    engine = HippoEngine()
+    engine = _get_engine()
     resolved_proj = engine.router.resolve_project(project)
     tag = "Global (全局习惯)" if scope == "global" else f"Project: {resolved_proj} (项目记忆)"
 
@@ -61,7 +64,7 @@ def search(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
 ):
     """在记忆中枢中进行语义与多信号混合检索。"""
-    engine = HippoEngine()
+    engine = _get_engine()
     with console.status(f"[bold cyan]正在检索与 '{query}' 相关的记忆 (Scope: {scope})...[/bold cyan]"):
         try:
             results = engine.search(query=query, scope=scope, project_id=project, limit=limit)
@@ -98,7 +101,7 @@ def list(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
 ):
     """列出当前指定范围内的所有事实记忆清单。"""
-    engine = HippoEngine()
+    engine = _get_engine()
     with console.status(f"[bold cyan]正在拉取记忆列表 (Scope: {scope})...[/bold cyan]"):
         try:
             items = engine.list_memories(scope=scope, project_id=project, limit=limit)
@@ -133,7 +136,7 @@ def profile(
     user_id: Optional[str] = typer.Option(None, "--user", "-u", help="用户 ID"),
 ):
     """查看用户的全局开发偏好画像（适合快速校验全局规范）。"""
-    engine = HippoEngine()
+    engine = _get_engine()
     prof = engine.get_user_profile(user_id=user_id)
     panel = Panel(
         prof["markdown"],
@@ -148,7 +151,7 @@ def get(
     memory_id: str = typer.Argument(..., help="要查看的记忆 ID"),
 ):
     """获取指定单条记忆的详细信息。"""
-    engine = HippoEngine()
+    engine = _get_engine()
     item = engine.get(memory_id)
     if not item:
         console.print(f"[bold red]✗ 未找到 ID 为 `{memory_id}` 的记忆记录。[/bold red]")
@@ -175,7 +178,7 @@ def update(
     text: str = typer.Argument(..., help="更新后的记忆文本内容"),
 ):
     """更新指定单条记忆的内容。"""
-    engine = HippoEngine()
+    engine = _get_engine()
     try:
         res = engine.update(memory_id=memory_id, text=text)
         console.print(f"[bold green]✓ 记忆 `{memory_id}` 已成功更新。[/bold green]")
@@ -189,7 +192,7 @@ def delete(
     memory_id: str = typer.Argument(..., help="要删除的记忆 ID"),
 ):
     """删除指定的单条记忆。"""
-    engine = HippoEngine()
+    engine = _get_engine()
     if engine.delete(memory_id):
         console.print(f"[bold green]✓ 记忆 `{memory_id}` 已成功删除。[/bold green]")
     else:
@@ -200,7 +203,7 @@ def delete(
 def status():
     """查看当前 Hippo 配置状态与存储位置。"""
     cfg = HippoConfig()
-    engine = HippoEngine(cfg)
+    engine = _get_engine(cfg)
     detected_proj, git_root = engine.router.detect_git_project()
 
     table = Table(title="Hippo 运行状态与配置")
@@ -221,6 +224,7 @@ def status():
 @app.command()
 def serve():
     """启动 Hippo MCP Server（标准 stdio 模式，供各 IDE 接入）。"""
+    from hippo_memory.server import main as run_server
     run_server()
 
 
@@ -228,8 +232,9 @@ def serve():
 def init(
     skip_global: bool = typer.Option(False, "--skip-global", help="跳过 Codex 全局 ~/.codex/AGENTS.md"),
     skip_project: bool = typer.Option(False, "--skip-project", help="跳过当前项目 AGENTS.md"),
+    no_hooks: bool = typer.Option(False, "--no-hooks", help="跳过自动配置各客户端生命周期 Hook 与 pi 扩展"),
 ):
-    """将记忆检索约定幂等写入客户端指令文件（全局 Codex + 当前项目 AGENTS.md）。"""
+    """将记忆检索约定幂等写入客户端指令文件，并配置各宿主 Hook 蒸馏切面。"""
     from hippo_memory.init import run_init
 
     status_zh = {
@@ -240,7 +245,11 @@ def init(
         "aborted (malformed JSON)": "已中止 (JSON语法错误，保留原文件)",
     }
     try:
-        results = run_init(skip_global=skip_global, skip_project=skip_project)
+        results = run_init(
+            skip_global=skip_global,
+            skip_project=skip_project,
+            configure_hooks=not no_hooks,
+        )
     except Exception as e:
         console.print(f"[bold red]✗ init 失败:[/bold red] {e}")
         raise typer.Exit(1)
@@ -360,36 +369,46 @@ def hook_capture(
     except Exception:
         pass
 
+    adapter = None
+    payload = None
     try:
-        adapter = get_adapter(host)
-    except ValueError as e:
-        console.print(f"[bold red]✗[/bold red] {e}", file=sys.stderr)
-        sys.stdout.write("{}\n")
-        sys.stdout.flush()
-        raise typer.Exit(1)
+        try:
+            adapter = get_adapter(host)
+        except ValueError as e:
+            sys.stderr.write(f"Hippo Hook warning: unknown host {host}: {e}\n")
+            return
 
-    payload = adapter.parse_context(raw_input, env_cwd=cwd)
-    storage = SpoolStorage()
-    is_new, job_id = storage.enqueue(payload)
+        payload = adapter.parse_context(raw_input, env_cwd=cwd)
+        storage = SpoolStorage()
+        is_new, job_id = storage.enqueue(payload)
 
-    # Output host-clean JSON response immediately to release host terminal
-    sys.stdout.write(adapter.format_response(payload))
-    sys.stdout.flush()
-
-    if sync:
-        worker = SpoolWorker(storage=storage)
-        worker.process_one_job(payload)
-    else:
-        if is_new:
-            # Spawn background detached worker to process queue without blocking host
+        if sync:
+            worker = SpoolWorker(storage=storage)
+            worker.process_one_job(payload)
+        else:
+            if is_new:
+                # Spawn background detached worker to process queue without blocking host
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        sys.stderr.write(f"Hippo Hook capture error: {e}\n")
+    finally:
+        try:
+            resp = adapter.format_response(payload) if (adapter and payload) else "{}\n"
+            sys.stdout.write(resp)
+            sys.stdout.flush()
+        except Exception:
             try:
-                subprocess.Popen(
-                    [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
-                )
+                sys.stdout.write("{}\n")
+                sys.stdout.flush()
             except Exception:
                 pass
 
@@ -493,5 +512,3 @@ def hook_retry(
 
 if __name__ == "__main__":
     app()
-
-

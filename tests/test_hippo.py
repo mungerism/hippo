@@ -142,20 +142,22 @@ class TestHippo(unittest.TestCase):
         self.assertTrue(data["ProgramArguments"][0].endswith("/bin/qdrant"))
 
         # 缺少 qdrant 二进制/配置时应拒绝安装且不触碰 launchctl
+        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(RuntimeError):
-                install_service(home=Path(tmp), load=False)
+            mock_plist = Path(tmp) / f"{SERVICE_LABEL}.plist"
+            with patch("hippo_memory.service.plist_path", return_value=mock_plist):
+                with self.assertRaises(RuntimeError):
+                    install_service(home=Path(tmp), load=False)
 
-            # 文件齐备（load=False 不经过 launchctl）→ 写出 plist
-            (Path(tmp) / "bin").mkdir()
-            (Path(tmp) / "bin" / "qdrant").write_text("#!/bin/sh\n")
-            (Path(tmp) / "config").mkdir()
-            (Path(tmp) / "config" / "qdrant.yaml").write_text("storage: {}\n")
-            install_service(home=Path(tmp), load=False)
-            installed = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
-            self.assertTrue(installed.exists())
-            data2 = plistlib.loads(installed.read_bytes())
-            self.assertEqual(data2["ProgramArguments"][0], str(Path(tmp) / "bin" / "qdrant"))
+                # 文件齐备（load=False 不经过 launchctl）→ 写出 plist 到 mock 路径
+                (Path(tmp) / "bin").mkdir()
+                (Path(tmp) / "bin" / "qdrant").write_text("#!/bin/sh\n")
+                (Path(tmp) / "config").mkdir()
+                (Path(tmp) / "config" / "qdrant.yaml").write_text("storage: {}\n")
+                install_service(home=Path(tmp), load=False)
+                self.assertTrue(mock_plist.exists())
+                data2 = plistlib.loads(mock_plist.read_bytes())
+                self.assertEqual(data2["ProgramArguments"][0], str(Path(tmp) / "bin" / "qdrant"))
 
     def test_doctor_checks_structure(self):
         from unittest.mock import patch
@@ -299,6 +301,23 @@ class TestHippo(unittest.TestCase):
             result = runner.invoke(app, ["migrate-zcode"])
             self.assertEqual(result.exit_code, 0)
             mock_migrate.assert_called_once()
+
+    def test_init_cli_no_hooks(self):
+        """验证 hippo init --no-hooks 参数能正确跳过 hook 配置。"""
+        from unittest.mock import patch
+        from typer.testing import CliRunner
+        from hippo_memory.cli import app
+
+        runner = CliRunner()
+        with patch("hippo_memory.init.run_init") as mock_init:
+            mock_init.return_value = []
+            result = runner.invoke(app, ["init", "--no-hooks", "--skip-global"])
+            self.assertEqual(result.exit_code, 0)
+            mock_init.assert_called_once_with(
+                skip_global=True,
+                skip_project=False,
+                configure_hooks=False,
+            )
 
     def test_init_hooks_refresh_on_command_change(self):
         """验证当 Hippo 可执行文件路径变更时，init 会自动刷新 hooks 中的 command 命令。"""

@@ -256,5 +256,3 @@ function extractTouchedFiles(messages: any[]): string[] {
     dispatchHook("session_shutdown", ctx);
   });
 }
-
-

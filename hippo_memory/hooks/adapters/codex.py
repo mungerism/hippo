@@ -59,7 +59,7 @@ class CodexAdapter(BaseHostAdapter):
 
     def _parse_codex_entry(self, record: Dict[str, Any]) -> Tuple[Optional[str], str, Set[str]]:
         """Unwrap and parse a Codex JSONL record into (role, content, touched_files).
-        
+
         Handles:
         1. Codex Code-mode rollout records:
            - record["response_item"]["payload"]

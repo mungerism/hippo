@@ -71,13 +71,13 @@ def calculate_semantic_cursor(
     turns: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Calculate stable semantic cursor hash to deduplicate across Stop and SessionEnd events.
-    
+
     Includes a digest of the captured conversation turn window to distinguish distinct
     checkpoints with identical goals/replies, while normalizing terminal exit commands
     and goals so normal Stop vs SessionEnd dual-events match reliably.
     """
     sorted_files = sorted(set(touched_files or []))
-    
+
     # Normalize user goal if polluted by terminal shutdown commands
     normalized_goal = last_user_goal.strip()
     if normalized_goal.lower() in SHUTDOWN_COMMANDS:

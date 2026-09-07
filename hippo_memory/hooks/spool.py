@@ -9,10 +9,9 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from hippo_memory.config import get_config
-from hippo_memory.engine import HippoEngine
 from hippo_memory.hooks.adapters import get_adapter
 from hippo_memory.hooks.models import (
     CapturedPayload,
@@ -20,6 +19,9 @@ from hippo_memory.hooks.models import (
     calculate_semantic_cursor,
 )
 from hippo_memory.prompts import SESSION_DISTILLATION_PROMPT_V1
+
+if TYPE_CHECKING:
+    from hippo_memory.engine import HippoEngine
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,7 @@ class SpoolStorage:
 
     def enqueue(self, payload: CapturedPayload) -> Tuple[bool, str]:
         """Atomically enqueue a job using mkdir as create-if-absent.
-        
+
         Returns:
             (is_new, job_id)
         """

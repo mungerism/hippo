@@ -173,4 +173,3 @@ def get_config() -> HippoConfig:
     if _default_config is None:
         _default_config = HippoConfig()
     return _default_config
-

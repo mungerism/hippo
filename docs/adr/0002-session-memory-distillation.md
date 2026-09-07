@@ -1,7 +1,7 @@
 # 0002. 基于双事件容灾与异步 Spool 的会话记忆蒸馏 (Session Memory Distillation)
 
-**状态**: accepted  
-**日期**: 2026-09-07  
+**状态**: accepted (修订 ADR-0001 中的 MCP 参数开放范围，确立 Agent-safe 安全子集)
+**日期**: 2026-09-07
 
 ## 背景与上下文 (Context)
 随着 AI 编码智能体（Codex、pi、ZCode、Antigravity 等）在大型项目中的深度使用，多轮长会话中的关键架构决策、规范变更、踩坑排错经验难以自动沉淀。原有方案依赖 Agent 自主调用 MCP 工具沉淀，存在严重缺陷：
@@ -13,9 +13,10 @@
 
 我们决定将会话级宏观蒸馏移至宿主生命周期切面，并构建基于异步 Spool 状态机的提纯管线：
 
-1. **认知面与系统面物理隔离**：
-   - Hippo MCP Server 专供 Agent 自主交互，彻底剔除 `messages` 参数，仅保留单句事实（`text`，限制 2000 字符），严禁 Agent 序列化对话历史；
-   - 会话级宏观蒸馏完全由外部宿主生命周期 Hook 触发。
+1. **认知面与系统面物理隔离 (修订 ADR-0001)**：
+   - 底层 HippoEngine 继续保持 100% 对齐 Mem0 官方参数；
+   - 面向自主 Agent 的 Hippo MCP Server 专供 Agent 交互，确立 Agent-safe 安全子集：彻底剔除 `messages` 参数，仅保留单句事实（`text`，限制 2000 字符），严禁 Agent 序列化对话历史；
+   - 会话级宏观蒸馏完全由外部宿主生命周期 Hook 触发并移至后台异步 Spool 状态机。
 
 2. **双事件容灾机制 (Dual-Event Resilience)**：
    - 以 `Stop`（一轮回答完成）为主检查点，防止终端意外关闭、锁屏休眠、Ctrl+C 或进程崩溃导致记忆丢失；

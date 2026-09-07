@@ -196,30 +196,25 @@ enabled = true
 
 ---
 
-## 🧠 提升记忆触发率：`hippo init`
+## 🧠 提升记忆触发率与自动化蒸馏：`hippo init`
 
-MCP 记忆工具由模型自主决定何时调用（各客户端均无会话开始自动检索）。Hippo 已通过 server instructions 与工具描述声明调用时机；若需在指令层进一步固化"开始任务前先检索记忆"，运行：
+MCP 记忆工具由模型自主决定何时调用（各客户端均无会话开始自动检索）。Hippo 已通过 server instructions 与工具描述声明调用时机；若需在指令层进一步固化"开始任务前先检索记忆"，并自动配置各 IDE 的生命周期 Hook，运行：
 
 ```bash
 hippo init
 ```
 
-它会幂等地将「记忆检索约定」段落写入两处指令文件（以 `<!-- hippo:memory:start/end -->` 标记包裹，重复执行无副作用）：
-
-- **`~/.codex/AGENTS.md`**（Codex 全局指令，对该客户端所有项目生效）
-- **当前 Git 仓库根目录的 `AGENTS.md`**（ZCode、antigravity、pi 等按工作区读取）
-
-可用 `--skip-global` / `--skip-project` 控制写入范围。
-> Mem0 官方通过 lifecycle hooks 实现强制的会话开始自动检索；Hippo 保持零配置定位，采用指令文件软引导。
-
+它会幂等地执行两部分配置（重复执行无副作用）：
+1. **记忆检索约定**：写入 `~/.codex/AGENTS.md`（Codex 全局指令）与当前 Git 根目录的 `AGENTS.md`（ZCode、antigravity、pi 等按工作区读取），可用 `--skip-global` / `--skip-project` 控制；
+2. **生命周期 Hook 与插件**：自动在 Codex (`~/.codex/hooks.json`)、ZCode (`~/.zcode/cli/config.json`)、Antigravity (`~/.gemini/antigravity-cli/hooks.json`) 挂载 Stop / SessionEnd 异步蒸馏切面，并安装/更新 pi 扩展；可用 `--no-hooks` 跳过。
 
 ---
 
-## 🛠 暴露的标准 MCP 工具集 (专为自主 Agent 极致精简)
+## 🛠 暴露的标准 MCP 工具集 (专为自主 Agent 极致精简的安全子集)
 
 根据 Mem0 官方对自主智能体的最佳实践，Hippo MCP 专为 Agent 暴露两个最纯粹的核心记忆工具，记忆演化与冲突消解全自动处理：
 - **`search_memories(query, ...)`**：基于向量语义与多信号混合检索相关记忆（支持 `filters`、`limit`、`scope`）。
-- **`add_memory(text, ...)`**：沉淀新的个人偏好、技术规范或项目踩坑事实（支持多模态截图与 `messages` 会话记录）。底层由 Mem0 自动判定新增、覆盖更新或消除冲突。
+- **`add_memory(text, ...)`**：沉淀新的个人偏好、技术规范或项目踩坑事实（单句事实 `text`，限制 2000 字符，支持本地截图图片路径）。长多轮会话记忆由后台异步 Hook 蒸馏流水线接管，避免 Agent 序列化全量上下文导致 Token 爆炸。底层由 Mem0 自动判定新增、覆盖更新或消除冲突。
 
 > 💡 **提示**：`list`、`get`、`update`、`delete`、`clear` 等确定性生命周期管理操作由面向人类开发者的 **Hippo CLI** 全权提供，避免 Agent 产生 UUID 幻觉或误操作。
 

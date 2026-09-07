@@ -31,7 +31,7 @@ class BaseHostAdapter(abc.ABC):
     @abc.abstractmethod
     def parse_context(self, raw_input: str, env_cwd: Optional[str] = None) -> CapturedPayload:
         """Parse raw stdin JSON/string into a lightweight CapturedPayload.
-        
+
         Must be extremely fast (< 10ms) without parsing entire huge transcripts.
         """
         pass
@@ -39,7 +39,7 @@ class BaseHostAdapter(abc.ABC):
     @abc.abstractmethod
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
         """Extract structured turns, touched files, and goals from transcript or memory.
-        
+
         Runs asynchronously in the background worker.
         """
         pass

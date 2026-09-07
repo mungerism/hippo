@@ -4,8 +4,9 @@ import os
 import plistlib
 import socket
 import subprocess
+import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from hippo_memory.config import HIPPO_HOME
 
@@ -58,7 +59,7 @@ def is_loaded() -> bool:
     return _launchctl("print", f"gui/{_uid()}/{SERVICE_LABEL}").returncode == 0
 
 
-def install_service(home: Path = HIPPO_HOME, load: bool = True) -> str:
+def install_service(home: Path = HIPPO_HOME, load: bool = True, target_plist: Optional[Path] = None) -> str:
     """安装（或重装）Qdrant LaunchAgent 并加载。返回人类可读结果。"""
     qdrant_bin = home / "bin" / "qdrant"
     qdrant_cfg = home / "config" / "qdrant.yaml"
@@ -70,15 +71,25 @@ def install_service(home: Path = HIPPO_HOME, load: bool = True) -> str:
             + "。请先放置单二进制到 ~/.hippo/bin/qdrant 并准备 ~/.hippo/config/qdrant.yaml。"
         )
 
-    target = plist_path()
+    target = target_plist or plist_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(build_plist_content(home), encoding="utf-8")
 
     if load:
         # 先卸载旧实例再加载，保证幂等重装
-        _launchctl("bootout", f"gui/{_uid()}/{SERVICE_LABEL}")
-        proc = _launchctl("bootstrap", f"gui/{_uid()}", str(target))
-        if proc.returncode != 0:
+        if is_loaded():
+            _launchctl("bootout", f"gui/{_uid()}/{SERVICE_LABEL}")
+            for _ in range(10):
+                if not is_loaded():
+                    break
+                time.sleep(0.1)
+        proc = None
+        for attempt in range(5):
+            proc = _launchctl("bootstrap", f"gui/{_uid()}", str(target))
+            if proc.returncode == 0:
+                break
+            time.sleep(0.2)
+        if proc and proc.returncode != 0:
             raise RuntimeError(
                 f"launchctl bootstrap 失败: {proc.stderr.strip() or proc.stdout.strip()}"
             )

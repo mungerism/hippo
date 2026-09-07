@@ -6,10 +6,9 @@
 
 在修改、扩展或维护本项目代码时，所有 AI 智能体必须严格遵守以下原则：
 
-1. **100% 对标 Mem0 官方规范**：
-   - MCP Server 暴露的工具名称、参数类型、数据结构与交互范式必须与 Mem0 官方标准保持 100% 一致。
-   - 专为自主 Agent 极致精简，仅向智能体暴露核心的检索与沉淀工具：`search_memories` 与 `add_memory`。记忆演化与冲突消解完全交由 Mem0 底层自动处理，严禁向 Agent 暴露冗余脆弱的 ID 级增删改工具。
-   - 严禁自行发明非标的自定义 API 或引入深重抽象层。
+1. **对标 Mem0 规范与 Agent 安全子集**：
+   - 底层 HippoEngine 与 Mem0 官方参数类型、数据结构与交互范式保持 100% 对齐，严禁自行发明非标 API 或深重抽象层。
+   - Agent-facing MCP Server 暴露经过安全审计的极简子集：仅向智能体暴露核心的检索与沉淀工具 `search_memories` 与 `add_memory`（单句事实 `text`，限制 2000 字符，避免 Agent 序列化全量上下文引发 Token 爆炸；长对话记忆由异步 Hook 蒸馏接管）。记忆演化与冲突消解完全交由 Mem0 底层自动处理，严禁向 Agent 暴露冗余脆弱的 ID 级增删改工具。
 
 2. **Hippo 的唯一边界与职责**：
    - **多端协议桥接**：为 antigravity、Codex、ZCode、Zed AI、Cursor、pi 等提供零配置的 MCP stdio 桥接与轻量插件。
