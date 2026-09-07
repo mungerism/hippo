@@ -69,6 +69,17 @@ class BaseHostAdapter(abc.ABC):
             logger.debug(f"Failed to read transcript {filepath}: {e}")
             return []
 
+    def extract_files_from_text(self, text: str) -> Set[str]:
+        """Extract file paths from a string with diff prefixes (a/, b/) stripped."""
+        found = set()
+        if not text:
+            return found
+        for match in FILE_EXT_RE.findall(text):
+            found.add(match)
+            if match.startswith("a/") or match.startswith("b/"):
+                found.add(match[2:])
+        return found
+
     def extract_files_from_dict(self, data: Dict[str, Any]) -> Set[str]:
         """Extract file paths from tool argument dictionaries or shell commands."""
         found = set()
@@ -79,11 +90,27 @@ class BaseHostAdapter(abc.ABC):
         for key in ["command", "CommandLine", "input", "patch"]:
             cmd = data.get(key)
             if isinstance(cmd, str):
-                for match in FILE_EXT_RE.findall(cmd):
-                    found.add(match)
-                    if match.startswith("a/") or match.startswith("b/"):
-                        found.add(match[2:])
+                found.update(self.extract_files_from_text(cmd))
         return found
+
+    def resolve_boundary_and_job_id(
+        self, session_id: str, event: str, transcript_path: Optional[str] = None
+    ) -> Tuple[str, str]:
+        """Resolve file boundary marker (file size or timestamp) and calculate deterministic job ID."""
+        import time
+        from hippo_memory.hooks.models import calculate_job_id
+
+        boundary = "0"
+        if transcript_path and os.path.isfile(transcript_path):
+            try:
+                boundary = str(os.path.getsize(transcript_path))
+            except OSError:
+                boundary = str(time.time())
+        else:
+            boundary = str(int(time.time() * 1000))
+
+        job_id = calculate_job_id(self.host_name, session_id, event, boundary)
+        return boundary, job_id
 
     @staticmethod
     def cap_touched_files(files: Iterable[str], limit: int = 30) -> List[str]:

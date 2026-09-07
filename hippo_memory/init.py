@@ -246,8 +246,12 @@ def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
 
 def upsert_pi_extension(target_path: Optional[Path] = None) -> str:
     """Idempotently install or update the Hippo extension in ~/.pi/agent/extensions/."""
-    src = Path(__file__).resolve().parent.parent / "integrations" / "pi" / "hippo-memory.ts"
-    if not src.exists():
+    candidates = [
+        Path(__file__).resolve().parent / "integrations" / "pi" / "hippo-memory.ts",
+        Path(__file__).resolve().parent.parent / "integrations" / "pi" / "hippo-memory.ts",
+    ]
+    src = next((p for p in candidates if p.exists()), None)
+    if not src:
         return "unchanged"
 
     target = target_path or (Path.home() / ".pi" / "agent" / "extensions" / "hippo-memory.ts")

@@ -40,16 +40,7 @@ class AntigravityAdapter(BaseHostAdapter):
         cwd = str(workspaces[0] if workspaces else (env_cwd or os.getcwd()))
         transcript_path = data.get("transcriptPath") or data.get("transcript_path")
 
-        boundary = "0"
-        if transcript_path and os.path.isfile(transcript_path):
-            try:
-                boundary = str(os.path.getsize(transcript_path))
-            except OSError:
-                boundary = str(time.time())
-        else:
-            boundary = str(int(time.time() * 1000))
-
-        job_id = calculate_job_id(self.host_name, session_id, event, boundary)
+        boundary, job_id = self.resolve_boundary_and_job_id(session_id, event, transcript_path)
 
         return CapturedPayload(
             job_id=job_id,

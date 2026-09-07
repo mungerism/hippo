@@ -386,18 +386,19 @@ def hook_capture(
             worker = SpoolWorker(storage=storage)
             worker.process_one_job(payload)
         else:
-            if is_new:
-                # Spawn background detached worker to process queue without blocking host
-                try:
-                    subprocess.Popen(
-                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        stdin=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
+            # Spawn background detached worker to process queue without blocking host.
+            # Attempting to drain regardless of is_new enables self-healing of any stranded jobs
+            # left by crashed workers (protected by mutual-exclusion kernel flock).
+            try:
+                subprocess.Popen(
+                    [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
     except Exception as e:
         sys.stderr.write(f"Hippo Hook capture error: {e}\n")
     finally:

@@ -29,8 +29,8 @@
    - 后台 Worker 通过 `worker.lock` 内核级排他锁单进程消费，具备 Lease 超时回收、3 次指数退避重试与死信兜底。
 
 4. **两级游标与语义防重 (Semantic Cursor)**：
-   - Raw ID 负责 Hook 投递级物理防重；
-   - Semantic Cursor 基于 `sha256(project_id, session_id, last_user_goal, last_assistant_final, touched_files)` 计算，彻底消除退出元数据追加（如宿主追加 shutdown log）引发的游标漂移，对同一语义状态瞬间拦截跳过，零额外 Token 消耗。
+   - Raw ID 负责 Hook 投递级物理防重（结合转录文件 bytes offset boundary 保证单次会话长历史快照不漂移）；
+   - Semantic Cursor 基于 `sha256(project_id, session_id, last_user_goal, last_assistant_final, touched_files, turns_digest)` 计算，并自动归一化回溯终端退出指令（如 `/exit`、`quit`）。既精准防范长会话滑动窗口跨度下的误去重，又彻底消除退出元数据追加引发的游标漂移，对同一语义状态瞬间拦截跳过，零额外 Token 消耗。
 
 5. **长期事实与 run_id 彻底隔离**：
    - 会话蒸馏产生的长期事实不设置 Mem0 `run_id`，确保跨会话能被 Mem0 Additive 单程抽取管线检索并执行 ADD/UPDATE/DELETE/NOOP 冲突消解；
