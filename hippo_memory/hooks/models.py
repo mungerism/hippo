@@ -147,6 +147,7 @@ class CapturedPayload:
     project_dir: str
     project_id: Optional[str] = None
     transcript_path: Optional[str] = None
+    boundary: Optional[str] = None
     created_at: float = 0.0
     attempt: int = 0
     max_attempts: int = 3

@@ -58,6 +58,7 @@ class AntigravityAdapter(BaseHostAdapter):
             session_id=session_id,
             project_dir=cwd,
             transcript_path=str(transcript_path) if transcript_path else None,
+            boundary=boundary,
             created_at=time.time(),
         )
 
@@ -71,7 +72,8 @@ class AntigravityAdapter(BaseHostAdapter):
         last_assistant_final = ""
 
         try:
-            lines = self.read_transcript_lines(payload.transcript_path)
+            max_bytes = int(payload.boundary) if (payload.boundary and payload.boundary.isdigit()) else None
+            lines = self.read_transcript_lines(payload.transcript_path, max_bytes=max_bytes)
             for line in lines:
                 line_str = line.strip()
                 if not line_str:

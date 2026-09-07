@@ -52,12 +52,18 @@ class BaseHostAdapter(abc.ABC):
         """Standard cleaning for turn content (strip markdown codes, thoughts, and secrets)."""
         return sanitize_text(text).strip()
 
-    def read_transcript_lines(self, filepath: str, max_lines: int = 2000) -> List[str]:
-        """Safely read trailing lines of a transcript file."""
+    def read_transcript_lines(
+        self, filepath: str, max_lines: int = 2000, max_bytes: Optional[int] = None
+    ) -> List[str]:
+        """Safely read trailing lines of a transcript file up to max_bytes."""
         if not filepath or not os.path.isfile(filepath):
             return []
         try:
             with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                if max_bytes is not None and max_bytes > 0:
+                    content = f.read(max_bytes)
+                    lines = content.splitlines(keepends=True)
+                    return lines[-max_lines:]
                 return f.readlines()[-max_lines:]
         except OSError as e:
             logger.debug(f"Failed to read transcript {filepath}: {e}")

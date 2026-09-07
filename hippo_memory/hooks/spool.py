@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Transient short phrases for Delta Skip filtering (case-insensitive)
 TRANSIENT_PATTERNS = [
     re.compile(r"^(好的|收到|明白了|稍等|正在处理|继续|ok|okay|sure|got it|working on it|done)\.?$", re.IGNORECASE),
-    re.compile(r"^(running tests|checking files|analyzing codebase|fetching docs)\.?$", re.IGNORECASE),
+    re.compile(r"^(running tests|checking files|analyzing codebase|fetching docs|运行测试|跑测试|跑下测试|查看代码|检查文件|查看状态)\.?$", re.IGNORECASE),
 ]
 
 
@@ -171,6 +171,47 @@ class SpoolStorage:
                 jobs.append(payload)
         return jobs
 
+    _background_procs: List[Any] = []
+
+    def schedule_recovery_wakeup(self, delay: float = 305.0) -> None:
+        """Schedule a detached background wake-up process to trigger lease recovery if worker crashes."""
+        if os.environ.get("HIPPO_DISABLE_RECOVERY_WAKEUP") == "1":
+            return
+        marker_file = self.base_dir / "recovery_wake.timestamp"
+        now = time.time()
+        target_time = now + delay
+        try:
+            if marker_file.exists():
+                try:
+                    last_scheduled = float(marker_file.read_text().strip())
+                    if now < last_scheduled <= target_time + 5.0:
+                        return
+                except Exception:
+                    pass
+            marker_file.write_text(str(target_time), encoding="utf-8")
+        except Exception:
+            pass
+
+        import subprocess
+        import sys
+        cmd = [
+            sys.executable,
+            "-c",
+            f"import time, subprocess, sys; time.sleep({delay}); "
+            f"subprocess.run([sys.executable, '-m', 'hippo_memory.cli', 'hook', 'worker', '--drain'])",
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            self._background_procs.append(proc)
+        except Exception as e:
+            logger.debug(f"Failed to spawn recovery wakeup: {e}")
+
     def claim_job(self, job_id: str, worker_pid: int) -> bool:
         """Atomically claim a job by moving state from pending to processing."""
         job_dir = self.jobs_dir / job_id
@@ -181,6 +222,10 @@ class SpoolStorage:
             return False
         now = time.time()
         self.update_state(job_id, JobState.PROCESSING, worker_pid=worker_pid, claimed_at=now)
+        try:
+            self.schedule_recovery_wakeup()
+        except Exception:
+            pass
         return True
 
     def complete_job(self, job_id: str, semantic_cursor: str, receipt: Dict[str, Any]) -> None:
@@ -261,6 +306,18 @@ class SpoolStorage:
                 continue
             # Sort chronologically by created_at
             jobs.sort(key=lambda x: x.created_at)
+
+            # Ensure turns are extracted for all candidate jobs before evaluating superset invariant
+            for idx, job in enumerate(jobs):
+                if not job.turns and (job.transcript_path or job.host):
+                    try:
+                        adapter = get_adapter(job.host)
+                        extracted = adapter.extract_session_turns(job)
+                        self.save_payload(extracted)
+                        jobs[idx] = extracted
+                    except Exception as e:
+                        logger.debug(f"Failed to pre-extract turns for job {job.job_id}: {e}")
+
             newest = jobs[-1]
 
             # 严格安全包含不变量 (Safe Coalescing Invariant):
@@ -269,15 +326,11 @@ class SpoolStorage:
                 can_coalesce = False
                 if newest.turns and older.turns:
                     can_coalesce = is_turns_superset(newest.turns, older.turns)
-                elif newest.transcript_path and older.transcript_path:
-                    try:
-                        n_size = os.path.getsize(newest.transcript_path) if os.path.isfile(newest.transcript_path) else 0
-                        o_size = os.path.getsize(older.transcript_path) if os.path.isfile(older.transcript_path) else 0
-                        can_coalesce = n_size >= o_size
-                    except OSError:
-                        can_coalesce = True
+                elif not older.turns and not older.transcript_path:
+                    # Empty dummy jobs without turns or transcripts can be coalesced
+                    can_coalesce = True
                 else:
-                    can_coalesce = newest.created_at >= older.created_at
+                    can_coalesce = False
 
                 if can_coalesce:
                     self.update_state(
@@ -306,6 +359,7 @@ class SpoolWorker:
     @property
     def engine(self) -> HippoEngine:
         if self._engine is None:
+            from hippo_memory.engine import HippoEngine
             self._engine = HippoEngine()
         return self._engine
 
@@ -332,10 +386,23 @@ class SpoolWorker:
             self._lock_fd = None
 
     def is_delta_transient(self, payload: CapturedPayload) -> bool:
-        """Check if assistant final reply is a trivial transient confirmation without file modifications."""
+        """Check if assistant final reply is a trivial transient confirmation without file modifications.
+
+        Preserves acknowledged user decisions and preferences even when no files are touched.
+        """
         if payload.touched_files:
             return False
+
         reply = payload.last_assistant_final.strip()
+        user_goal = payload.last_user_goal.strip()
+
+        # If user provided a substantive goal/decision (not just transient ping-pong/empty),
+        # never skip; leave memory extraction and deduplication to Mem0.
+        if user_goal:
+            is_user_transient = len(user_goal) < 40 and any(pat.search(user_goal) for pat in TRANSIENT_PATTERNS)
+            if not is_user_transient:
+                return False
+
         if not reply:
             return True
         # Less than 40 chars and matches transient patterns

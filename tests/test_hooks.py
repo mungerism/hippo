@@ -30,6 +30,13 @@ class TestHookSpool(unittest.TestCase):
         self.storage = SpoolStorage(base_dir=self.spool_dir)
 
     def tearDown(self):
+        for p in list(self.storage._background_procs):
+            try:
+                p.kill()
+                p.wait(timeout=0.2)
+            except Exception:
+                pass
+        self.storage._background_procs.clear()
         self.tmp_dir.cleanup()
 
     def test_secret_sanitization(self):
@@ -345,6 +352,115 @@ class TestHookSpool(unittest.TestCase):
                 mock_drain.assert_called_once_with(wait_for_retries=False)
                 st = self.storage.load_state(j.job_id)
                 self.assertEqual(st.get("state"), JobState.PENDING.value)
+
+    def test_spool_worker_engine_dynamic_import_runtime(self):
+        """验证未显式注入 engine 时，SpoolWorker.engine 属性可动态加载 HippoEngine 而不报 NameError。"""
+        worker = SpoolWorker(storage=self.storage)
+        self.assertIsNone(worker._engine)
+        with patch("hippo_memory.engine.HippoEngine") as mock_engine_cls:
+            mock_inst = MagicMock()
+            mock_engine_cls.return_value = mock_inst
+            engine = worker.engine
+            self.assertEqual(engine, mock_inst)
+            mock_engine_cls.assert_called_once()
+
+    def test_preserve_file_backed_turn_windows_before_coalescing(self):
+        """验证同一个 session 的两个 file-backed pending jobs 在转录窗口发生漂移时，不会被错误折叠。"""
+        transcript_file = Path(self.tmp_dir.name) / "codex_transcript.jsonl"
+        # 写入前 5 轮
+        early_records = [
+            {"role": "user", "content": f"early goal {i}"}
+            for i in range(5)
+        ]
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            for r in early_records:
+                f.write(json.dumps(r) + "\n")
+        boundary_1 = str(os.path.getsize(transcript_file))
+
+        # 写入后续 25 轮，导致 early turns 滑出后续的 20 轮窗口
+        later_records = [
+            {"role": "user", "content": f"later goal {i}"}
+            for i in range(25)
+        ]
+        with open(transcript_file, "a", encoding="utf-8") as f:
+            for r in later_records:
+                f.write(json.dumps(r) + "\n")
+        boundary_2 = str(os.path.getsize(transcript_file))
+
+        job1 = CapturedPayload(
+            job_id="job-early",
+            host="codex",
+            event="Stop",
+            session_id="sess-file-window",
+            project_dir=self.tmp_dir.name,
+            transcript_path=str(transcript_file),
+            boundary=boundary_1,
+            created_at=100.0,
+        )
+        job2 = CapturedPayload(
+            job_id="job-later",
+            host="codex",
+            event="Stop",
+            session_id="sess-file-window",
+            project_dir=self.tmp_dir.name,
+            transcript_path=str(transcript_file),
+            boundary=boundary_2,
+            created_at=200.0,
+        )
+        self.storage.enqueue(job1)
+        self.storage.enqueue(job2)
+
+        # 执行 coalesce
+        coalesced = self.storage.coalesce_pending_jobs()
+        self.assertEqual(coalesced, 0, "因滑动窗口截断且超集不变量未满足，早期作业绝不能被错误折叠")
+
+        st1 = self.storage.load_state(job1.job_id)
+        st2 = self.storage.load_state(job2.job_id)
+        self.assertEqual(st1.get("state"), JobState.PENDING.value)
+        self.assertEqual(st2.get("state"), JobState.PENDING.value)
+
+    def test_delta_skip_preserves_substantive_user_decisions(self):
+        """验证用户陈述实质偏好或架构规则时，即使 assistant 仅简短回复且无文件修改，也绝不被跳过。"""
+        mock_engine = MagicMock()
+        mock_engine.add.return_value = {"id": "m1"}
+        mock_engine.router.resolve_project.return_value = "test_repo"
+        worker = SpoolWorker(storage=self.storage, engine=mock_engine)
+
+        j = CapturedPayload(
+            job_id="job-user-decision",
+            host="codex",
+            event="Stop",
+            session_id="sess-decision",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "以后所有新脚本都要使用 Python 3.12 并配置 uv"},
+                {"role": "assistant", "content": "好的。"},
+            ],
+            last_user_goal="以后所有新脚本都要使用 Python 3.12 并配置 uv",
+            last_assistant_final="好的",
+            touched_files=[],  # 无文件改动
+        )
+        self.storage.enqueue(j)
+        worker.drain()
+
+        st = self.storage.load_state(j.job_id)
+        self.assertEqual(st.get("state"), JobState.COMPLETED.value, "实质用户偏好决策必须被正常消费蒸馏，绝不能被跳过")
+        mock_engine.add.assert_called_once()
+
+    def test_claim_job_schedules_recovery_wakeup(self):
+        """验证 claim_job 时自动调度 recovery wake-up 防止 worker crash 后作业永久处于 processing 状态。"""
+        j = CapturedPayload(
+            job_id="job-claim-wake",
+            host="codex",
+            event="Stop",
+            session_id="sess-wake",
+            project_dir="/tmp/repo",
+        )
+        self.storage.enqueue(j)
+        with patch.object(self.storage, "schedule_recovery_wakeup") as mock_wake:
+            claimed = self.storage.claim_job(j.job_id, worker_pid=1234)
+            self.assertTrue(claimed)
+            mock_wake.assert_called_once()
 
 
 class TestHostAdapters(unittest.TestCase):
