@@ -130,6 +130,22 @@ class CapturedPayload:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    def merge_state(self, st: Dict[str, Any]) -> None:
+        """Merge state dictionary attributes into this payload instance."""
+        if not st:
+            return
+        self.state = st.get("state", self.state)
+        self.attempt = st.get("attempt", self.attempt)
+        self.worker_pid = st.get("worker_pid", self.worker_pid)
+        self.claimed_at = st.get("claimed_at", self.claimed_at)
+        self.updated_at = st.get("updated_at", self.updated_at)
+        self.not_before = st.get("not_before", self.not_before)
+        self.error = st.get("error", self.error)
+        self.skip_reason = st.get("skip_reason", self.skip_reason)
+        self.superseded_by = st.get("superseded_by", self.superseded_by)
+        if "semantic_cursor" in st and st["semantic_cursor"]:
+            self.semantic_cursor = st["semantic_cursor"]
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> CapturedPayload:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})

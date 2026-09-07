@@ -149,7 +149,7 @@ def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
 
 
 def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
-    """Idempotently configure Stop hook in .agents/hooks.json."""
+    """Idempotently configure Stop hook in ~/.gemini/antigravity-cli/hooks.json."""
     import json
 
     target = path or (Path.home() / ".gemini" / "antigravity-cli" / "hooks.json")
@@ -177,6 +177,24 @@ def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
         target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return "created" if is_new else "updated"
     return "unchanged"
+
+
+def upsert_pi_extension(target_path: Optional[Path] = None) -> str:
+    """Idempotently install or update the Hippo extension in ~/.pi/agent/extensions/."""
+    src = Path(__file__).resolve().parent.parent / "integrations" / "pi" / "hippo-memory.ts"
+    if not src.exists():
+        return "unchanged"
+
+    target = target_path or (Path.home() / ".pi" / "agent" / "extensions" / "hippo-memory.ts")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not target.exists()
+
+    content = src.read_text(encoding="utf-8")
+    if target.exists() and target.read_text(encoding="utf-8") == content:
+        return "unchanged"
+
+    target.write_text(content, encoding="utf-8")
+    return "created" if is_new else "updated"
 
 
 def run_init(
@@ -217,5 +235,10 @@ def run_init(
         agy_hooks = Path.home() / ".gemini" / "antigravity-cli" / "hooks.json"
         if agy_hooks.parent.exists():
             results.append((agy_hooks, upsert_antigravity_hooks(agy_hooks)))
+
+        pi_dir = Path.home() / ".pi" / "agent" / "extensions"
+        if pi_dir.parent.exists() or pi_dir.exists():
+            pi_target = pi_dir / "hippo-memory.ts"
+            results.append((pi_target, upsert_pi_extension(pi_target)))
 
     return results

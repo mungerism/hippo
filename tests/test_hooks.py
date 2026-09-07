@@ -62,12 +62,14 @@ class TestHookSpool(unittest.TestCase):
 
     def test_coalesce_pending_jobs(self):
         # Create two jobs for same session
+        # 1. 正常递增超集折叠
         j1 = CapturedPayload(
             job_id="job-sess-1-old",
             host="codex",
             event="Stop",
             session_id="sess-xyz",
             project_dir="/tmp",
+            turns=[{"role": "user", "content": "hello"}],
             created_at=100.0,
         )
         j2 = CapturedPayload(
@@ -76,6 +78,7 @@ class TestHookSpool(unittest.TestCase):
             event="Stop",
             session_id="sess-xyz",
             project_dir="/tmp",
+            turns=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "world"}],
             created_at=200.0,
         )
         self.storage.enqueue(j1)
@@ -89,6 +92,32 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(st1.get("state"), JobState.COALESCED.value)
         self.assertEqual(st1.get("superseded_by"), j2.job_id)
         self.assertEqual(st2.get("state"), JobState.PENDING.value)
+
+        # 2. 异常截断防护：若新作业 turns 变少，不满足超集不变量，拒绝折叠
+        j3_rich = CapturedPayload(
+            job_id="job-sess-2-rich",
+            host="codex",
+            event="Stop",
+            session_id="sess-trunc",
+            project_dir="/tmp",
+            turns=[{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}],
+            created_at=300.0,
+        )
+        j4_truncated = CapturedPayload(
+            job_id="job-sess-2-truncated",
+            host="codex",
+            event="Stop",
+            session_id="sess-trunc",
+            project_dir="/tmp",
+            turns=[{"role": "user", "content": "a"}],  # 截断了
+            created_at=400.0,
+        )
+        self.storage.enqueue(j3_rich)
+        self.storage.enqueue(j4_truncated)
+
+        coalesced2 = self.storage.coalesce_pending_jobs()
+        self.assertEqual(coalesced2, 0)  # 拒绝折叠，保留两者
+        self.assertEqual(self.storage.load_state(j3_rich.job_id).get("state"), JobState.PENDING.value)
 
     def test_semantic_cursor_dedup_across_events(self):
         mock_engine = MagicMock()

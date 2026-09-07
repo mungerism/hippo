@@ -1,12 +1,55 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const HIPPO_BIN = "/Users/munger/Code/Repos/Personal/hippo/.venv/bin/hippo";
+
+function resolveHippoBin(): string {
+  if (process.env.HIPPO_BIN) return process.env.HIPPO_BIN;
+  const candidates = [
+    join(process.cwd(), ".venv", "bin", "hippo"),
+    join(homedir(), ".hippo", "bin", "hippo"),
+    "/opt/homebrew/bin/hippo",
+    "/usr/local/bin/hippo",
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return "hippo";
+}
+
+/**
+ * 提取会话中的对话轮次（对齐 Mem0 官方 pi-agent-plugin 抽取规范）
+ */
+function extractConversation(messages: any[]): Array<{ role: "user" | "assistant"; content: string }> {
+  const result: Array<{ role: "user" | "assistant"; content: string }> = [];
+  if (!Array.isArray(messages)) return result;
+
+  for (const msg of messages) {
+    if (!msg || (msg.role !== "user" && msg.role !== "assistant")) continue;
+    let text = "";
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      text = msg.content
+        .filter((b: any) => b && (b.type === "text" || typeof b.text === "string"))
+        .map((b: any) => b.text || "")
+        .join("\n");
+    }
+    if (text && text.trim()) {
+      result.push({ role: msg.role, content: text.trim() });
+    }
+  }
+  return result;
+}
 
 export default function (pi: ExtensionAPI) {
+  const hippoBin = resolveHippoBin();
+
   // 1. 语义与混合记忆检索工具 (Mem0 标准: search_memories)
   pi.registerTool({
     name: "search_memories",
@@ -39,7 +82,7 @@ export default function (pi: ExtensionAPI) {
         if (params.limit) args.push("--limit", String(params.limit));
         if (params.project) args.push("--project", params.project);
 
-        const { stdout } = await execFileAsync(HIPPO_BIN, args);
+        const { stdout } = await execFileAsync(hippoBin, args);
         return {
           content: [{ type: "text", text: stdout.trim() || "未找到相关记忆。" }],
           details: {},
@@ -80,7 +123,7 @@ export default function (pi: ExtensionAPI) {
           args.push("--project", params.project);
         }
 
-        const { stdout } = await execFileAsync(HIPPO_BIN, args);
+        const { stdout } = await execFileAsync(hippoBin, args);
         return {
           content: [{ type: "text", text: stdout.trim() }],
           details: {},
@@ -100,7 +143,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       try {
         const cmdArgs = args ? args.split(" ") : ["status"];
-        const { stdout } = await execFileAsync(HIPPO_BIN, cmdArgs);
+        const { stdout } = await execFileAsync(hippoBin, cmdArgs);
         ctx.ui.notify(stdout.trim(), "info");
       } catch (err: any) {
         ctx.ui.notify(`Hippo 执行失败: ${err.message}`, "error");
@@ -125,15 +168,28 @@ export default function (pi: ExtensionAPI) {
         } catch {}
       }
 
+      // 提取内存直传消息，免扫磁盘
+      let rawMsgs: any[] = [];
+      if (Array.isArray(ctx?.messages)) {
+        rawMsgs = ctx.messages;
+      } else if (typeof sessionManager?.getMessages === "function") {
+        try {
+          rawMsgs = sessionManager.getMessages() || [];
+        } catch {}
+      }
+      const extractedTurns = extractConversation(rawMsgs);
+      const lastAssistant = extractedTurns.filter((t) => t.role === "assistant").pop()?.content || "";
+
       const payload = JSON.stringify({
         session_id: sessionId,
         event: eventName,
         project_dir: ctx?.cwd || process.cwd(),
         transcript_path: transcriptPath,
+        turns: extractedTurns.slice(-20),
+        last_assistant_message: lastAssistant,
       });
 
-      const { spawn } = require("node:child_process");
-      const child = spawn(HIPPO_BIN, ["hook", "capture", "--host", "pi"], {
+      const child = spawn(hippoBin, ["hook", "capture", "--host", "pi"], {
         detached: true,
         stdio: ["pipe", "ignore", "ignore"],
       });

@@ -249,6 +249,13 @@ class TestHippo(unittest.TestCase):
             self.assertIn("hippo-memory-distill", adata)
             self.assertEqual(upsert_antigravity_hooks(agy_file), "unchanged")
 
+            # Pi Extension
+            from hippo_memory.init import upsert_pi_extension
+            pi_file = tmp_path / "hippo-memory.ts"
+            self.assertEqual(upsert_pi_extension(pi_file), "created")
+            self.assertIn("agent_settled", pi_file.read_text(encoding="utf-8"))
+            self.assertEqual(upsert_pi_extension(pi_file), "unchanged")
+
 
 if __name__ == "__main__":
     unittest.main()

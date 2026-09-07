@@ -62,18 +62,16 @@ class AntigravityAdapter(BaseHostAdapter):
         )
 
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
-        if not payload.transcript_path or not os.path.isfile(payload.transcript_path):
+        if not payload.transcript_path:
             return payload
 
         turns: List[Dict[str, str]] = []
-        touched_files: List[str] = []
+        touched_files: Set[str] = set()
         last_user_goal = ""
         last_assistant_final = ""
 
         try:
-            with open(payload.transcript_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()[-2000:]
-
+            lines = self.read_transcript_lines(payload.transcript_path)
             for line in lines:
                 line_str = line.strip()
                 if not line_str:
@@ -95,9 +93,8 @@ class AntigravityAdapter(BaseHostAdapter):
                 tool_calls = record.get("tool_calls") or []
                 for tc in tool_calls:
                     args = tc.get("args") or tc.get("parameters") or {}
-                    for key in ["TargetFile", "AbsolutePath", "SearchPath", "target_file", "path"]:
-                        if key in args and isinstance(args[key], str):
-                            touched_files.append(args[key])
+                    if isinstance(args, dict):
+                        touched_files.update(self.extract_files_from_dict(args))
 
                 cleaned_content = self.clean_turn_text(content)
                 if not cleaned_content:

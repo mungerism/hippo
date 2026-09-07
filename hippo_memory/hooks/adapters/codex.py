@@ -58,19 +58,16 @@ class CodexAdapter(BaseHostAdapter):
         )
 
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
-        if not payload.transcript_path or not os.path.isfile(payload.transcript_path):
+        if not payload.transcript_path:
             return payload
 
         turns: List[Dict[str, str]] = []
-        touched_files: List[str] = []
+        touched_files: Set[str] = set()
         last_user_goal = ""
         last_assistant_final = ""
 
         try:
-            with open(payload.transcript_path, "r", encoding="utf-8", errors="replace") as f:
-                # Read last 2000 lines at most
-                lines = f.readlines()[-2000:]
-
+            lines = self.read_transcript_lines(payload.transcript_path)
             for line in lines:
                 line_str = line.strip()
                 if not line_str:
@@ -81,7 +78,6 @@ class CodexAdapter(BaseHostAdapter):
                     continue
 
                 role = record.get("role")
-                # Normalize messages
                 content = ""
                 raw_content = record.get("content")
                 if isinstance(raw_content, str):
@@ -94,9 +90,8 @@ class CodexAdapter(BaseHostAdapter):
                                 parts.append(block.get("text", ""))
                             elif block.get("type") == "tool_use":
                                 input_data = block.get("input", {})
-                                for key in ["path", "file_path", "target_file", "file"]:
-                                    if key in input_data and isinstance(input_data[key], str):
-                                        touched_files.append(input_data[key])
+                                if isinstance(input_data, dict):
+                                    touched_files.update(self.extract_files_from_dict(input_data))
                     content = "\n".join(parts)
 
                 # Tool use parsing in direct fields
@@ -104,9 +99,8 @@ class CodexAdapter(BaseHostAdapter):
                 if isinstance(tool_calls, list):
                     for tc in tool_calls:
                         args = tc.get("args") or tc.get("parameters") or {}
-                        for key in ["path", "file_path", "target_file", "file"]:
-                            if key in args and isinstance(args[key], str):
-                                touched_files.append(args[key])
+                        if isinstance(args, dict):
+                            touched_files.update(self.extract_files_from_dict(args))
 
                 cleaned_content = self.clean_turn_text(content)
                 if not cleaned_content:

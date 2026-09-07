@@ -123,45 +123,21 @@ def collect_checks() -> List[dict]:
     add("客户端", "pi 扩展", pi_ext.exists(), str(pi_ext))
 
     # --- 生命周期 Hook 挂载 ---
-    home = Path.home()
-    codex_h = home / ".codex" / "hooks.json"
-    codex_hook_ok = False
-    if codex_h.exists():
-        try:
-            content = codex_h.read_text(encoding="utf-8")
-            codex_hook_ok = "hook capture --host codex" in content
-        except OSError:
-            pass
-    add("Hook 挂载", "Codex (Stop/SessionEnd)", codex_hook_ok, "已挂载" if codex_hook_ok else "未挂载 (可运行 hippo init)")
-
-    zcode_c = home / ".zcode" / "cli" / "config.json"
-    zcode_hook_ok = False
-    if zcode_c.exists():
-        try:
-            content = zcode_c.read_text(encoding="utf-8")
-            zcode_hook_ok = "hook capture --host zcode" in content
-        except OSError:
-            pass
-    add("Hook 挂载", "ZCode (Stop)", zcode_hook_ok, "已挂载" if zcode_hook_ok else "未挂载 (可运行 hippo init)")
-
-    pi_hook_ok = False
-    if pi_ext.exists():
-        try:
-            content = pi_ext.read_text(encoding="utf-8")
-            pi_hook_ok = "agent_settled" in content and "session_shutdown" in content
-        except OSError:
-            pass
-    add("Hook 挂载", "Pi (agent_settled/session_shutdown)", pi_hook_ok, "已挂载" if pi_hook_ok else "未挂载")
-
-    agy_h = home / ".gemini" / "antigravity-cli" / "hooks.json"
-    agy_hook_ok = False
-    if agy_h.exists():
-        try:
-            content = agy_h.read_text(encoding="utf-8")
-            agy_hook_ok = "hook capture --host antigravity" in content
-        except OSError:
-            pass
-    add("Hook 挂载", "Antigravity (Stop)", agy_hook_ok, "已挂载" if agy_hook_ok else "未挂载 (可运行 hippo init)")
+    hook_checks = [
+        ("Codex (Stop/SessionEnd)", Path.home() / ".codex" / "hooks.json", ["hook capture --host codex"]),
+        ("ZCode (Stop)", Path.home() / ".zcode" / "cli" / "config.json", ["hook capture --host zcode"]),
+        ("Pi (agent_settled/session_shutdown)", pi_ext, ["agent_settled", "session_shutdown"]),
+        ("Antigravity (Stop)", Path.home() / ".gemini" / "antigravity-cli" / "hooks.json", ["hook capture --host antigravity"]),
+    ]
+    for name, path, needles in hook_checks:
+        ok = False
+        if path.exists():
+            try:
+                content = path.read_text(encoding="utf-8")
+                ok = all(n in content for n in needles)
+            except OSError:
+                pass
+        add("Hook 挂载", name, ok, "已挂载" if ok else "未挂载 (可运行 hippo init)")
 
     # --- Spool 队列巡检 ---
     try:

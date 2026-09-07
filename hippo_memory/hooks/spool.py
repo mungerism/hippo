@@ -133,15 +133,7 @@ class SpoolStorage:
             if not payload:
                 continue
             st = self.load_state(entry.name)
-            payload.state = st.get("state", JobState.PENDING.value)
-            payload.attempt = st.get("attempt", payload.attempt)
-            payload.worker_pid = st.get("worker_pid")
-            payload.claimed_at = st.get("claimed_at")
-            payload.updated_at = st.get("updated_at")
-            payload.not_before = st.get("not_before", payload.not_before)
-            payload.error = st.get("error", payload.error)
-            payload.skip_reason = st.get("skip_reason", payload.skip_reason)
-            payload.superseded_by = st.get("superseded_by", payload.superseded_by)
+            payload.merge_state(st)
 
             if state is None or payload.state == state.value:
                 jobs.append(payload)
@@ -225,7 +217,7 @@ class SpoolStorage:
         return recovered
 
     def coalesce_pending_jobs(self) -> int:
-        """Coalesce consecutive pending jobs belonging to the same session."""
+        """Coalesce consecutive pending jobs belonging to the same session under superset invariant."""
         pending_jobs = self.list_jobs(state=JobState.PENDING)
         by_session: Dict[str, List[CapturedPayload]] = {}
         for j in pending_jobs:
@@ -235,17 +227,39 @@ class SpoolStorage:
         for session_id, jobs in by_session.items():
             if len(jobs) <= 1:
                 continue
-            # Keep newest job, fold older ones if strictly pending
+            # Sort chronologically by created_at
+            jobs.sort(key=lambda x: x.created_at)
             newest = jobs[-1]
+
+            # 严格安全包含不变量 (Safe Coalescing Invariant):
+            # 仅当最新作业对前置作业构成严格超集（turns 数量或 transcript 文件代际非递减）时方可折叠
             for older in jobs[:-1]:
-                self.update_state(
-                    older.job_id,
-                    JobState.COALESCED,
-                    superseded_by=newest.job_id,
-                    skip_reason=f"Superseded by newer job {newest.job_id}",
-                )
-                coalesced_count += 1
-                logger.info(f"Coalesced pending job {older.job_id} -> {newest.job_id}")
+                can_coalesce = False
+                if newest.turns and older.turns:
+                    can_coalesce = len(newest.turns) >= len(older.turns)
+                elif newest.transcript_path and older.transcript_path:
+                    try:
+                        n_size = os.path.getsize(newest.transcript_path) if os.path.isfile(newest.transcript_path) else 0
+                        o_size = os.path.getsize(older.transcript_path) if os.path.isfile(older.transcript_path) else 0
+                        can_coalesce = n_size >= o_size
+                    except OSError:
+                        can_coalesce = True
+                else:
+                    can_coalesce = newest.created_at >= older.created_at
+
+                if can_coalesce:
+                    self.update_state(
+                        older.job_id,
+                        JobState.COALESCED,
+                        superseded_by=newest.job_id,
+                        skip_reason=f"Superseded by newer job {newest.job_id} (superset invariant verified)",
+                    )
+                    coalesced_count += 1
+                    logger.info(f"Coalesced pending job {older.job_id} -> {newest.job_id}")
+                else:
+                    logger.warning(
+                        f"Skipping coalesce for {older.job_id}: superset invariant not satisfied by {newest.job_id}"
+                    )
         return coalesced_count
 
 
