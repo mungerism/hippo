@@ -104,7 +104,11 @@ export default function (pi: ExtensionAPI) {
       "向持久化长期记忆沉淀新内容 (兼容 Mem0 官方 add_memory 规范)。当用户表达偏好、做出值得保留的决策、纠正你的行为、或明确要求记住某事时调用；跨项目的个人习惯用 scope='global'，其余默认沉淀到当前项目。",
     promptSnippet: "沉淀用户偏好、重要决策或项目踩坑经验到长时记忆",
     parameters: Type.Object({
-      text: Type.String({ description: "要记录的事实经验、技术规范或个人偏好" }),
+      text: Type.String({
+        maxLength: 2000,
+        description:
+          "要记录的事实经验、技术规范或个人偏好 (最多 2000 字符，单句事实；长多轮会话记忆由系统异步 Hook 自动蒸馏)",
+      }),
       scope: Type.Optional(
         Type.String({
           description: "存储范围: 'project'(默认，当前项目) | 'global'(个人跨项目全局习惯)",
@@ -116,7 +120,26 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       try {
-        const args = ["add", params.text];
+        const text = params.text?.trim() || "";
+        if (!text) {
+          return {
+            content: [{ type: "text", text: "保存记忆失败: text 不能为空" }],
+            details: { error: "text is empty" },
+          };
+        }
+        if (text.length > 2000) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `保存记忆失败: text 长度超过 2000 字符限制 (当前 ${text.length} 字符)。请提炼为简明单句事实，长对话记忆由系统异步 Hook 自动蒸馏。`,
+              },
+            ],
+            details: { error: "text exceeds 2000 characters limit" },
+          };
+        }
+
+        const args = ["add", text];
         if (params.scope === "global") {
           args.push("--global");
         } else if (params.project) {

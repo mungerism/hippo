@@ -70,10 +70,13 @@ class BaseHostAdapter(abc.ABC):
             val = data.get(key)
             if isinstance(val, str) and val.strip():
                 found.add(val.strip())
-        cmd = data.get("command") or data.get("CommandLine")
-        if isinstance(cmd, str):
-            for match in FILE_EXT_RE.findall(cmd):
-                found.add(match)
+        for key in ["command", "CommandLine", "input", "patch"]:
+            cmd = data.get(key)
+            if isinstance(cmd, str):
+                for match in FILE_EXT_RE.findall(cmd):
+                    found.add(match)
+                    if match.startswith("a/") or match.startswith("b/"):
+                        found.add(match[2:])
         return found
 
     @staticmethod

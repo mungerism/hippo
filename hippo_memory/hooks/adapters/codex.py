@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from hippo_memory.hooks.adapters.base import BaseHostAdapter
+from hippo_memory.hooks.adapters.base import BaseHostAdapter, FILE_EXT_RE
 from hippo_memory.hooks.models import CapturedPayload, HookEvent, HostType, SHUTDOWN_COMMANDS, calculate_job_id
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,7 @@ class CodexAdapter(BaseHostAdapter):
         content = "\n".join(parts)
 
         # Step 4: Tool calls extraction from message and record
+        # 4a. Container-level tool_calls lists
         for container in (msg_obj, resp_item, record):
             if not isinstance(container, dict):
                 continue
@@ -140,11 +141,40 @@ class CodexAdapter(BaseHostAdapter):
                     args = tc.get("args") or tc.get("parameters") or tc.get("arguments") or tc.get("input") or {}
                     if isinstance(args, str):
                         try:
-                            args = json.loads(args)
+                            parsed_args = json.loads(args)
+                            if isinstance(parsed_args, dict):
+                                args = parsed_args
                         except Exception:
-                            args = {}
+                            pass
                     if isinstance(args, dict):
                         touched.update(self.extract_files_from_dict(args))
+                    elif isinstance(args, str):
+                        for match in FILE_EXT_RE.findall(args):
+                            touched.add(match)
+                            if match.startswith("a/") or match.startswith("b/"):
+                                touched.add(match[2:])
+
+        # 4b. Top-level tool call record (e.g. Codex Code-mode custom_tool_call / tool_call)
+        for obj in (msg_obj, resp_item, record):
+            if not isinstance(obj, dict):
+                continue
+            obj_type = obj.get("type")
+            if obj_type in ("custom_tool_call", "tool_call", "function_call", "tool_use"):
+                input_data = obj.get("input") or obj.get("arguments") or obj.get("args") or {}
+                if isinstance(input_data, str):
+                    try:
+                        parsed_input = json.loads(input_data)
+                        if isinstance(parsed_input, dict):
+                            input_data = parsed_input
+                    except Exception:
+                        pass
+                if isinstance(input_data, dict):
+                    touched.update(self.extract_files_from_dict(input_data))
+                elif isinstance(input_data, str):
+                    for match in FILE_EXT_RE.findall(input_data):
+                        touched.add(match)
+                        if match.startswith("a/") or match.startswith("b/"):
+                            touched.add(match[2:])
 
         final_role = role or inferred_role_from_blocks
         return final_role, content, touched

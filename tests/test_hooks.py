@@ -480,6 +480,56 @@ class TestHostAdapters(unittest.TestCase):
             if transcript_file.exists():
                 transcript_file.unlink()
 
+    def test_codex_adapter_top_level_custom_tool_call(self):
+        """验证 Codex Code-mode 顶层 custom_tool_call 记录能正确提取 touched_files，防止 Done 回复被 Delta Skip 误跳过。"""
+        adapter = get_adapter("codex")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            transcript_file = Path(f.name)
+            # 1. User message
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "重构数据库连接池"}]
+                }
+            }) + "\n")
+            # 2. Top-level custom_tool_call record (e.g. apply_patch or exec)
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_test_123",
+                    "name": "apply_patch",
+                    "input": "diff --git a/src/infrastructure/db.ts b/src/infrastructure/db.ts\n--- a/src/infrastructure/db.ts\n+++ b/src/infrastructure/db.ts"
+                }
+            }) + "\n")
+            # 3. Assistant final short response
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}]
+                }
+            }) + "\n")
+
+        try:
+            payload = adapter.parse_context(json.dumps({
+                "session_id": "codex-ctc-sess",
+                "transcript_path": str(transcript_file),
+            }))
+            extracted = adapter.extract_session_turns(payload)
+            self.assertEqual(len(extracted.turns), 2)
+            self.assertEqual(extracted.last_assistant_final, "Done.")
+            self.assertIn("src/infrastructure/db.ts", extracted.touched_files)
+
+            # 验证 Delta Skip 检测：由于存在 touched_files，绝不能被当作 transient 短确认跳过
+            from hippo_memory.hooks.spool import SpoolWorker
+            worker = SpoolWorker()
+            self.assertFalse(worker.is_delta_transient(extracted))
+        finally:
+            if transcript_file.exists():
+                transcript_file.unlink()
+
     def test_pi_adapter_in_memory(self):
         adapter = get_adapter("pi")
         self.assertIsInstance(adapter, PiAdapter)
