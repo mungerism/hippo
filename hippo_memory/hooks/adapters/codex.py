@@ -57,6 +57,98 @@ class CodexAdapter(BaseHostAdapter):
             created_at=time.time(),
         )
 
+    def _parse_codex_entry(self, record: Dict[str, Any]) -> Tuple[Optional[str], str, Set[str]]:
+        """Unwrap and parse a Codex JSONL record into (role, content, touched_files).
+        
+        Handles:
+        1. Codex Code-mode rollout records:
+           - record["response_item"]["payload"]
+           - blocks with type: "input_text", "output_text", "text", "tool_use", etc.
+        2. Standard OpenAI-compatible message objects:
+           - record["role"] / record["content"]
+        """
+        touched: Set[str] = set()
+
+        # Step 1: Unwrap target message container
+        # Codex Code-mode stores message data inside response_item.payload
+        msg_obj = record
+        resp_item = record.get("response_item")
+        if isinstance(resp_item, dict):
+            payload = resp_item.get("payload")
+            if isinstance(payload, dict):
+                msg_obj = payload
+            else:
+                msg_obj = resp_item
+        elif isinstance(record.get("payload"), dict):
+            msg_obj = record["payload"]
+
+        # Step 2: Role resolution
+        role = msg_obj.get("role") or (isinstance(resp_item, dict) and resp_item.get("role")) or record.get("role")
+        if role:
+            role = str(role).lower()
+            if role in ("model",):
+                role = "assistant"
+
+        # Step 3: Content and block extraction
+        parts: List[str] = []
+        raw_content = msg_obj.get("content")
+        if raw_content is None and "text" in msg_obj:
+            raw_content = msg_obj["text"]
+
+        inferred_role_from_blocks: Optional[str] = None
+
+        if isinstance(raw_content, str):
+            parts.append(raw_content)
+        elif isinstance(raw_content, list):
+            for block in raw_content:
+                if not isinstance(block, dict):
+                    if isinstance(block, str):
+                        parts.append(block)
+                    continue
+
+                b_type = block.get("type", "")
+                if b_type in ("text", "input_text", "output_text"):
+                    text_val = block.get("text") or block.get("content") or ""
+                    if text_val:
+                        parts.append(str(text_val))
+                    if b_type == "input_text" and not role:
+                        inferred_role_from_blocks = "user"
+                    elif b_type == "output_text" and not role:
+                        inferred_role_from_blocks = "assistant"
+
+                elif b_type in ("tool_use", "tool_call", "custom_tool_call"):
+                    input_data = block.get("input") or block.get("arguments") or block.get("args") or {}
+                    if isinstance(input_data, str):
+                        try:
+                            input_data = json.loads(input_data)
+                        except Exception:
+                            input_data = {}
+                    if isinstance(input_data, dict):
+                        touched.update(self.extract_files_from_dict(input_data))
+
+        content = "\n".join(parts)
+
+        # Step 4: Tool calls extraction from message and record
+        for container in (msg_obj, resp_item, record):
+            if not isinstance(container, dict):
+                continue
+            tool_calls = container.get("tool_calls") or container.get("tools")
+            if isinstance(tool_calls, list):
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    args = tc.get("args") or tc.get("parameters") or tc.get("arguments") or tc.get("input") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+                    if isinstance(args, dict):
+                        touched.update(self.extract_files_from_dict(args))
+
+        final_role = role or inferred_role_from_blocks
+        return final_role, content, touched
+
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
         if not payload.transcript_path:
             return payload
@@ -77,33 +169,14 @@ class CodexAdapter(BaseHostAdapter):
                 except Exception:
                     continue
 
-                role = record.get("role")
-                content = ""
-                raw_content = record.get("content")
-                if isinstance(raw_content, str):
-                    content = raw_content
-                elif isinstance(raw_content, list):
-                    parts = []
-                    for block in raw_content:
-                        if isinstance(block, dict):
-                            if block.get("type") == "text":
-                                parts.append(block.get("text", ""))
-                            elif block.get("type") == "tool_use":
-                                input_data = block.get("input", {})
-                                if isinstance(input_data, dict):
-                                    touched_files.update(self.extract_files_from_dict(input_data))
-                    content = "\n".join(parts)
+                if not isinstance(record, dict):
+                    continue
 
-                # Tool use parsing in direct fields
-                tool_calls = record.get("tool_calls") or record.get("tools")
-                if isinstance(tool_calls, list):
-                    for tc in tool_calls:
-                        args = tc.get("args") or tc.get("parameters") or {}
-                        if isinstance(args, dict):
-                            touched_files.update(self.extract_files_from_dict(args))
+                role, content, record_files = self._parse_codex_entry(record)
+                touched_files.update(record_files)
 
                 cleaned_content = self.clean_turn_text(content)
-                if not cleaned_content:
+                if not cleaned_content or not role:
                     continue
 
                 if role == "user":

@@ -427,6 +427,59 @@ class TestHostAdapters(unittest.TestCase):
         self.assertEqual(extracted.last_assistant_final, "好的，已迁移并生成 pyproject.toml。")
         self.assertIn("pyproject.toml", extracted.touched_files)
 
+    def test_codex_adapter_rollout_response_item_payload(self):
+        """验证 Codex Code-mode rollout (response_item.payload + input_text/output_text) 格式能被正确解包蒸馏。"""
+        adapter = get_adapter("codex")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            transcript_file = Path(f.name)
+            # 1. 真实 Codex rollout user turn (嵌套在 response_item.payload 且 content 为 input_text)
+            f.write(json.dumps({
+                "type": "response_item",
+                "response_item": {
+                    "type": "message",
+                    "payload": {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "重构存储层并引入缓存"}
+                        ]
+                    }
+                }
+            }) + "\n")
+            # 2. 带有嵌套 tool_use 的 rollout 记录
+            f.write(json.dumps({
+                "type": "response_item",
+                "response_item": {
+                    "type": "message",
+                    "payload": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "input": {"file_path": "hippo_memory/storage.py"}
+                            },
+                            {
+                                "type": "output_text",
+                                "text": "已重构完成存储层并添加测试。"
+                            }
+                        ]
+                    }
+                }
+            }) + "\n")
+
+        try:
+            payload = adapter.parse_context(json.dumps({
+                "session_id": "codex-rollout-1",
+                "transcript_path": str(transcript_file),
+            }))
+            extracted = adapter.extract_session_turns(payload)
+            self.assertEqual(len(extracted.turns), 2)
+            self.assertEqual(extracted.last_user_goal, "重构存储层并引入缓存")
+            self.assertEqual(extracted.last_assistant_final, "已重构完成存储层并添加测试。")
+            self.assertIn("hippo_memory/storage.py", extracted.touched_files)
+        finally:
+            if transcript_file.exists():
+                transcript_file.unlink()
+
     def test_pi_adapter_in_memory(self):
         adapter = get_adapter("pi")
         self.assertIsInstance(adapter, PiAdapter)
