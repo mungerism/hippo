@@ -221,7 +221,7 @@ class TestHookSpool(unittest.TestCase):
                 {"role": "assistant", "content": "好的，正在运行测试。"},
             ],
             last_user_goal="运行测试",
-            last_assistant_final="好的",
+            last_assistant_final="好的。",
             touched_files=[],  # No files modified
         )
         self.storage.enqueue(j)

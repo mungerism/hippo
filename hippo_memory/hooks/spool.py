@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 # Transient short phrases for Delta Skip filtering (case-insensitive)
 TRANSIENT_PATTERNS = [
-    re.compile(r"^(好的|收到|明白了|稍等|正在处理|继续|ok|okay|sure|got it|working on it|done)\.?$", re.IGNORECASE),
-    re.compile(r"^(running tests|checking files|analyzing codebase|fetching docs|运行测试|跑测试|跑下测试|查看代码|检查文件|查看状态)\.?$", re.IGNORECASE),
+    re.compile(r"^(好的|收到|明白了|稍等|正在处理|继续|ok|okay|sure|got it|working on it|done)[.。!！~]?$", re.IGNORECASE),
+    re.compile(r"^(running tests|checking files|analyzing codebase|fetching docs|运行测试|跑测试|跑下测试|查看代码|检查文件|查看状态)[.。!！~]?$", re.IGNORECASE),
 ]
 
 
