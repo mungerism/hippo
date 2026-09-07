@@ -365,6 +365,7 @@ class SpoolWorker:
                 last_user_goal=extracted.last_user_goal,
                 last_assistant_final=extracted.last_assistant_final,
                 touched_files=extracted.touched_files,
+                turns=extracted.turns,
             )
             extracted.semantic_cursor = cursor
             self.storage.save_payload(extracted)

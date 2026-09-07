@@ -57,25 +57,50 @@ def sanitize_text(text: str) -> str:
     return text
 
 
+_SHUTDOWN_COMMANDS = {
+    "/exit", "exit", "quit", ":q", "/quit", "bye", "exit()", "quit()"
+}
+
+
 def calculate_semantic_cursor(
     project_id: str,
     session_id: str,
     last_user_goal: str,
     last_assistant_final: str,
     touched_files: Optional[List[str]] = None,
+    turns: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Calculate stable semantic cursor hash to deduplicate across Stop and SessionEnd events.
     
-    Even if host appends shutdown markers/logs to transcript file on exit,
-    the semantic cursor of the actual assistant work and user goal remains identical.
+    Includes a digest of the captured conversation turn window to distinguish distinct
+    checkpoints with identical goals/replies, while normalizing terminal exit commands
+    so normal Stop vs SessionEnd dual-events match reliably.
     """
     sorted_files = sorted(set(touched_files or []))
+    
+    normalized_turns: List[str] = []
+    if turns:
+        for t in turns:
+            role = str(t.get("role") or "").strip().lower()
+            content = str(t.get("content") or "").strip()
+            if not content:
+                continue
+            # Normalizing known shutdown / exit metadata
+            if role == "user" and content.lower() in _SHUTDOWN_COMMANDS:
+                continue
+            normalized_turns.append(f"{role}:{content}")
+
+    turns_digest = ""
+    if normalized_turns:
+        turns_digest = hashlib.sha256("\n".join(normalized_turns).encode("utf-8")).hexdigest()[:16]
+
     raw = (
         f"proj={project_id.strip()}\n"
         f"sess={session_id.strip()}\n"
         f"goal={last_user_goal.strip()}\n"
         f"reply={last_assistant_final.strip()}\n"
-        f"files={','.join(sorted_files)}"
+        f"files={','.join(sorted_files)}\n"
+        f"turns={turns_digest}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

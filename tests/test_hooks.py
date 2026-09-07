@@ -483,6 +483,99 @@ class TestHostAdapters(unittest.TestCase):
         # 即使消息简短如 Done.，只要存在 touched_files 就绝对不能被当作 delta transient 跳过
         self.assertFalse(worker.is_delta_transient(extracted))
 
+    def test_touched_files_deterministic_sorting(self):
+        """验证超过 30 个文件时，不同输入顺序均能确定性排序截断，杜绝跨进程 hash 种子分歧。"""
+        adapter = get_adapter("codex")
+        files_a = [f"file_{i:03d}.py" for i in range(50)]
+        files_b = list(reversed(files_a))
+
+        res_a = adapter.cap_touched_files(files_a, limit=30)
+        res_b = adapter.cap_touched_files(files_b, limit=30)
+
+        self.assertEqual(len(res_a), 30)
+        self.assertEqual(res_a, res_b)
+        self.assertEqual(res_a, sorted(files_a)[:30])
+
+    def test_pi_boundary_distinct_on_capped_turns_sliding_window(self):
+        """验证 Pi 会话超过 100 轮时，滑动窗口内容变化会生成不同的 boundary 和 job_id，防止 enqueue 静默丢弃。"""
+        adapter = get_adapter("pi")
+        # 构造第 1 批 100 轮对话
+        turns_window_1 = [{"role": "user", "content": f"Turn {i}"} for i in range(100)]
+        payload_1 = adapter.parse_context(json.dumps({
+            "session_id": "sess-pi-long",
+            "turns": turns_window_1,
+            "total_turns": 100,
+        }))
+
+        # 构造第 2 批滑动窗口（第 1 轮滑出，加入第 101 轮，总长度仍为 100）
+        turns_window_2 = turns_window_1[1:] + [{"role": "user", "content": "Turn 100"}]
+        payload_2 = adapter.parse_context(json.dumps({
+            "session_id": "sess-pi-long",
+            "turns": turns_window_2,
+            "total_turns": 101,
+        }))
+
+        self.assertNotEqual(payload_1.job_id, payload_2.job_id)
+
+        # 验证加入队列时，两者均可被 enqueue 接收为新作业
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = SpoolStorage(base_dir=Path(tmp_dir) / "spool")
+            is_new_1, jid_1 = storage.enqueue(payload_1)
+            is_new_2, jid_2 = storage.enqueue(payload_2)
+            self.assertTrue(is_new_1)
+            self.assertTrue(is_new_2)
+
+    def test_semantic_cursor_turn_window_digest_and_shutdown_normalization(self):
+        """验证 Semantic Cursor 包含 turns window 摘要，能区分相同 goal/reply 的不同对话，且正常归一化退出指令。"""
+        # 场景 1: 相同 goal/reply/files，但 turns 内部内容不同
+        turns_v1 = [
+            {"role": "user", "content": "帮我优化下代码"},
+            {"role": "assistant", "content": "好，已经重构完成。"},
+        ]
+        turns_v2 = [
+            {"role": "user", "content": "增加缓存支持"},
+            {"role": "assistant", "content": "好，已经重构完成。"},
+        ]
+        cursor_1 = calculate_semantic_cursor(
+            project_id="test_repo",
+            session_id="sess-cursor-1",
+            last_user_goal="修复",
+            last_assistant_final="好，已经重构完成。",
+            touched_files=["app.py"],
+            turns=turns_v1,
+        )
+        cursor_2 = calculate_semantic_cursor(
+            project_id="test_repo",
+            session_id="sess-cursor-1",
+            last_user_goal="修复",
+            last_assistant_final="好，已经重构完成。",
+            touched_files=["app.py"],
+            turns=turns_v2,
+        )
+        self.assertNotEqual(cursor_1, cursor_2, "不同对话窗口绝不能产生相同 cursor 导致新记忆被误跳过")
+
+        # 场景 2: Stop 事件 vs SessionEnd 事件（包含退出命令 /exit）
+        turns_stop = list(turns_v1)
+        turns_session_end = turns_v1 + [{"role": "user", "content": "/exit"}]
+
+        cursor_stop = calculate_semantic_cursor(
+            project_id="test_repo",
+            session_id="sess-cursor-1",
+            last_user_goal="优化代码",
+            last_assistant_final="好，已经重构完成。",
+            touched_files=["app.py"],
+            turns=turns_stop,
+        )
+        cursor_session_end = calculate_semantic_cursor(
+            project_id="test_repo",
+            session_id="sess-cursor-1",
+            last_user_goal="优化代码",
+            last_assistant_final="好，已经重构完成。",
+            touched_files=["app.py"],
+            turns=turns_session_end,
+        )
+        self.assertEqual(cursor_stop, cursor_session_end, "Stop 与 SessionEnd 退出元数据归一化后必须生成相同 cursor")
+
 
 if __name__ == "__main__":
     unittest.main()

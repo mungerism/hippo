@@ -181,7 +181,7 @@ function extractTouchedFiles(messages: any[]): string[] {
       }
     }
   }
-  return Array.from(files);
+  return Array.from(files).sort();
 }
 
   // 4. 双事件生命周期自动蒸馏 (agent_settled 主检查点 + session_shutdown 退出兜底)
@@ -220,6 +220,7 @@ function extractTouchedFiles(messages: any[]): string[] {
         project_dir: ctx?.cwd || process.cwd(),
         transcript_path: transcriptPath,
         turns: extractedTurns.slice(-100),
+        total_turns: extractedTurns.length,
         last_assistant_message: lastAssistant,
         touched_files: touchedFiles,
       });

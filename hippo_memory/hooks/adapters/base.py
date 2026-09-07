@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from hippo_memory.hooks.models import CapturedPayload, sanitize_text
 
@@ -75,3 +75,8 @@ class BaseHostAdapter(abc.ABC):
             for match in FILE_EXT_RE.findall(cmd):
                 found.add(match)
         return found
+
+    @staticmethod
+    def cap_touched_files(files: Iterable[str], limit: int = 30) -> List[str]:
+        """Deterministically sort and cap touched files to prevent hash seed divergence across processes."""
+        return sorted(set(files))[:limit]

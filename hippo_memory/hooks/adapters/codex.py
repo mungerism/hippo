@@ -117,7 +117,7 @@ class CodexAdapter(BaseHostAdapter):
             logger.error(f"Error extracting Codex transcript {payload.transcript_path}: {e}")
 
         payload.turns = turns[-20:]  # Keep recent 20 turns
-        payload.touched_files = list(set(touched_files))[:30]
+        payload.touched_files = self.cap_touched_files(touched_files)
         payload.last_user_goal = last_user_goal
         payload.last_assistant_final = last_assistant_final
         return payload

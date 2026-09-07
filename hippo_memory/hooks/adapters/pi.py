@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -44,11 +45,15 @@ class PiAdapter(BaseHostAdapter):
 
         # In-memory turns or message snapshot passed from extension
         raw_turns = data.get("turns") or []
+        total_turns = data.get("total_turns")
         last_assistant_msg = str(data.get("last_assistant_message") or "")
 
         boundary = "0"
         if raw_turns:
-            boundary = str(len(raw_turns))
+            turns_repr = json.dumps(raw_turns, sort_keys=True, ensure_ascii=False)
+            turns_digest = hashlib.sha256(turns_repr.encode("utf-8")).hexdigest()[:16]
+            count_label = str(total_turns) if total_turns is not None else str(len(raw_turns))
+            boundary = f"{count_label}:{turns_digest}"
         elif transcript_path and os.path.isfile(transcript_path):
             try:
                 boundary = str(os.path.getsize(transcript_path))
@@ -114,7 +119,7 @@ class PiAdapter(BaseHostAdapter):
                 # 正则匹配整行中的代码文件名
                 for m in FILE_EXT_RE.findall(line_str):
                     found.add(m)
-        return list(found)[:30]
+        return self.cap_touched_files(found)
 
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
         # 若已有内存直传轮次，但缺少修改文件列表且有 transcript 日志，做快速文件补充，防御 Delta Skip 误杀
@@ -173,7 +178,7 @@ class PiAdapter(BaseHostAdapter):
             logger.error(f"Error extracting Pi transcript {payload.transcript_path}: {e}")
 
         payload.turns = turns[-100:]
-        payload.touched_files = list(touched_files)[:30]
+        payload.touched_files = self.cap_touched_files(touched_files)
         if not payload.last_user_goal:
             payload.last_user_goal = last_user_goal
         if not payload.last_assistant_final:
