@@ -26,7 +26,8 @@ mcp_server = MCPServer(
         "user preferences, or earlier conversations. Do not rely on the chat window alone. "
         "When the user states a preference, makes a decision worth keeping, corrects your "
         "behavior, or asks you to remember something, persist it with add_memory; use "
-        "scope='global' only for cross-project personal habits."
+        "scope='global' only for cross-project personal habits. "
+        "Memory updates and conflict resolution are handled automatically by Mem0 via add_memory."
     ),
 )
 _engine: Optional[HippoEngine] = None
@@ -52,16 +53,13 @@ def add_memory(
     text: Annotated[
         str,
         Field(
+            max_length=2000,
             description=(
-                "Plain sentence summarizing what to store, e.g. '项目偏好使用 uv 代替 poetry', "
-                "'代码风格偏好紧凑'."
-            )
+                "One concise fact, preference, rule, or decision to store into long-term memory "
+                "(max 2000 chars), e.g. '项目偏好使用 uv 代替 poetry', '代码风格偏好紧凑'."
+            ),
         ),
     ],
-    messages: Annotated[
-        Optional[list[Dict[str, str]]],
-        Field(description="Optional structured conversation history with role/content keys."),
-    ] = None,
     user_id: Annotated[
         Optional[str], Field(description="Optional user identifier (defaults to current user).")
     ] = None,
@@ -100,8 +98,7 @@ def add_memory(
     """Store a new preference, fact, or conversation snippet into persistent long-term memory.
 
     Args:
-        text: Plain sentence summarizing what to store (e.g. '项目偏好使用 uv 代替 poetry', '代码风格偏好紧凑').
-        messages: Optional structured conversation history with role/content.
+        text: One concise fact, preference, rule, or decision to store (max 2000 chars).
         user_id: Optional user identifier (defaults to current user).
         agent_id: Optional agent or project identifier (e.g. 'global' for personal habits, or project name).
         run_id: Optional run identifier.
@@ -118,7 +115,6 @@ def add_memory(
         res = engine.add(
             content=text,
             text=text,
-            messages=messages,
             user_id=user_id,
             agent_id=agent_id,
             run_id=run_id,
@@ -233,268 +229,6 @@ def search_memories(
         return "\n".join(lines)
     except Exception as e:
         return f"记忆检索失败: {str(e)}"
-
-
-@mcp_server.tool(
-    description=(
-        "List and page through memories using structured filters or scope. Use this when the "
-        "user asks to enumerate or browse memories (e.g. project guidelines, personal "
-        "preferences) rather than to find a semantic match."
-    )
-)
-def get_memories(
-    filters: Annotated[
-        Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
-    ] = None,
-    limit: Annotated[
-        int, Field(description="Maximum number of memories to return (default 20).")
-    ] = 20,
-    user_id: Annotated[
-        Optional[str], Field(description="Optional user identifier.")
-    ] = None,
-    agent_id: Annotated[
-        Optional[str],
-        Field(
-            description=(
-                "Optional agent or project identifier, e.g. 'global' for personal preferences; "
-                "omit to auto-route to the current Git repository."
-            )
-        ),
-    ] = None,
-    scope: Annotated[
-        str,
-        Field(
-            description=(
-                "Scope: 'all' (default) | 'global' (personal preferences) | 'project' "
-                "(current Git repository)."
-            )
-        ),
-    ] = "all",
-    project_id: Annotated[
-        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
-    ] = None,
-) -> str:
-    """List memories using structured filters or scope.
-
-    Args:
-        filters: Optional structured filters dictionary.
-        limit: Maximum number of memories to return (default: 20).
-        user_id: Optional user identifier.
-        agent_id: Optional agent or project identifier (e.g. 'global' for personal preferences).
-        scope: Scope: 'all' (default) | 'global' (personal preferences) | 'project'.
-        project_id: Optional explicit project name.
-
-    Returns:
-        Markdown-formatted list of memories.
-    """
-    try:
-        engine = get_engine()
-        items = engine.get_memories(
-            filters=filters,
-            limit=limit,
-            user_id=user_id,
-            agent_id=agent_id,
-            scope=scope,
-            project_id=project_id,
-        )
-        if not items:
-            return f"当前指定范围暂无记忆记录 (Scope: {scope})。"
-
-        lines = [f"### 持久化记忆列表 (共 {len(items)} 条，Scope: {scope}):"]
-        for idx, item in enumerate(items, 1):
-            mem_text = item.get("memory", "")
-            aid = item.get("agent_id", "global")
-            tag = "Global" if aid == "global" else f"Project: {aid}"
-            mem_id = item.get("id", "")
-            lines.append(f"{idx}. [{tag}] {mem_text} (ID: `{mem_id}`)")
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"获取记忆列表失败: {str(e)}"
-
-
-@mcp_server.tool(
-    description=(
-        "Fetch a single memory once you know its memory_id, e.g. from search_memories or "
-        "get_memories results."
-    )
-)
-def get_memory(
-    memory_id: Annotated[
-        str, Field(description="The exact unique identifier of the memory to fetch.")
-    ],
-) -> str:
-    """Retrieve a single memory by its memory ID.
-
-    Args:
-        memory_id: The exact unique identifier of the memory.
-
-    Returns:
-        Markdown details of the memory.
-    """
-    try:
-        engine = get_engine()
-        item = engine.get(memory_id)
-        if not item:
-            return f"未找到 ID 为 `{memory_id}` 的记忆记录。"
-        aid = item.get("agent_id", "global")
-        tag = "Global" if aid == "global" else f"Project: {aid}"
-        return (
-            f"### 记忆详情 (`{memory_id}`)\n"
-            f"- **作用域**: [{tag}]\n"
-            f"- **记忆事实**: {item.get('memory', '')}\n"
-            f"- **用户**: `{item.get('user_id', '')}`\n"
-            f"- **创建时间**: {item.get('created_at', '')}\n"
-            f"- **更新时间**: {item.get('updated_at', '')}\n"
-            f"- **元数据**: {json.dumps(item.get('metadata', {}), ensure_ascii=False)}"
-        )
-    except Exception as e:
-        return f"获取记忆详情失败: {str(e)}"
-
-
-@mcp_server.tool(
-    description=(
-        "Overwrite an existing memory's text or metadata after confirming its memory_id. Use "
-        "this when the user asks to update or correct a stored memory."
-    )
-)
-def update_memory(
-    memory_id: Annotated[
-        str, Field(description="Exact memory_id to overwrite, from search_memories or get_memories.")
-    ],
-    text: Annotated[str, Field(description="Replacement text for the memory.")],
-    metadata: Annotated[
-        Optional[Dict[str, Any]], Field(description="Optional metadata to update.")
-    ] = None,
-) -> str:
-    """Overwrite an existing memory's text or metadata.
-
-    Args:
-        memory_id: Exact memory_id to overwrite.
-        text: Replacement text for the memory.
-        metadata: Optional metadata to update.
-
-    Returns:
-        Update result status.
-    """
-    try:
-        engine = get_engine()
-        res = engine.update(memory_id=memory_id, text=text, metadata=metadata)
-        return f"记忆 `{memory_id}` 已成功更新。\n详情: {json.dumps(res, ensure_ascii=False)}"
-    except Exception as e:
-        return f"更新记忆失败: {str(e)}"
-
-
-@mcp_server.tool(
-    description=(
-        "Delete one memory after the user confirms its memory_id. Never guess a memory_id; "
-        "resolve it via search_memories or get_memories first."
-    )
-)
-def delete_memory(
-    memory_id: Annotated[
-        str, Field(description="The unique identifier of the memory to delete.")
-    ],
-) -> str:
-    """Delete a memory once the user explicitly confirms the memory_id to remove.
-
-    Args:
-        memory_id: The unique identifier of the memory to delete.
-
-    Returns:
-        Status message of the deletion.
-    """
-    try:
-        engine = get_engine()
-        ok = engine.delete(memory_id)
-        if ok:
-            return f"记忆 `{memory_id}` 已成功删除。"
-        else:
-            return f"删除记忆 `{memory_id}` 失败或该记忆不存在。"
-    except Exception as e:
-        return f"删除记忆失败: {str(e)}"
-
-
-@mcp_server.tool(
-    description=(
-        "Delete every memory in the given user/agent/project scope. Destructive: call only "
-        "when the user explicitly asks to wipe memories and the scope is unambiguous."
-    )
-)
-def delete_all_memories(
-    user_id: Annotated[
-        Optional[str], Field(description="User scope to delete (defaults to current user).")
-    ] = None,
-    agent_id: Annotated[
-        Optional[str],
-        Field(
-            description=(
-                "Optional agent or project identifier, e.g. 'global'; omit to auto-route to "
-                "the current Git repository."
-            )
-        ),
-    ] = None,
-    run_id: Annotated[
-        Optional[str], Field(description="Optional run/session identifier.")
-    ] = None,
-    scope: Annotated[
-        Optional[str],
-        Field(description="Storage scope to wipe: 'project' | 'global' | 'all'."),
-    ] = None,
-    project_id: Annotated[
-        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
-    ] = None,
-) -> str:
-    """Bulk delete memories within a confirmed scope.
-
-    Args:
-        user_id: User scope to delete (defaults to current user).
-        agent_id: Optional agent or project identifier.
-        run_id: Optional run identifier.
-        scope: Storage scope: 'project' | 'global' | 'all'.
-        project_id: Optional explicit project name.
-
-    Returns:
-        Status message.
-    """
-    try:
-        engine = get_engine()
-        ok = engine.delete_all(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            scope=scope,
-            project_id=project_id,
-        )
-        if ok:
-            return f"已成功清空指定作用域内的所有记忆。"
-        else:
-            return "批量清空记忆失败。"
-    except Exception as e:
-        return f"批量删除记忆异常: {str(e)}"
-
-
-@mcp_server.tool(
-    description=(
-        "List which users and agents/projects currently hold persistent memories. Use this "
-        "before delete_all_memories or when the user asks what memory namespaces exist."
-    )
-)
-def list_entities() -> str:
-    """List users and agents/projects currently stored in memories."""
-    try:
-        engine = get_engine()
-        entities = engine.list_entities()
-        users_str = ", ".join(entities["users"]) if entities["users"] else "无"
-        agents_str = ", ".join(entities["agents"]) if entities["agents"] else "无"
-        return (
-            f"### 存储实体概览 (Mem0 Entities)\n"
-            f"- **用户 (Users)**: {users_str}\n"
-            f"- **智能体/项目 (Agents/Projects)**: {agents_str}\n"
-            f"- **已索引记录采样数**: {entities['total_memories_sampled']}"
-        )
-    except Exception as e:
-        return f"获取实体列表失败: {str(e)}"
 
 
 def main():

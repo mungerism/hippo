@@ -94,108 +94,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // 3. 列出记忆列表/画像工具 (Mem0 标准: get_memories)
-  pi.registerTool({
-    name: "get_memories",
-    label: "Mem0 Get Memories",
-    description:
-      "列出指定作用域内的记忆列表或全局偏好画像 (完全兼容 Mem0 官方 get_memories 规范)。",
-    promptSnippet: "获取指定作用域的记忆列表或全局开发偏好",
-    parameters: Type.Object({
-      scope: Type.Optional(
-        Type.String({
-          description: "获取范围: 'all'(默认) | 'global'(全局偏好画像) | 'project'(当前项目)",
-        })
-      ),
-      limit: Type.Optional(
-        Type.Number({
-          description: "最大返回条数，默认 20",
-        })
-      ),
-      project: Type.Optional(
-        Type.String({ description: "可选指定项目名" })
-      ),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        if (params.scope === "global") {
-          const { stdout } = await execFileAsync(HIPPO_BIN, ["profile"]);
-          return {
-            content: [{ type: "text", text: stdout.trim() || "暂无全局画像记录。" }],
-            details: {},
-          };
-        }
-        const args = ["list"];
-        if (params.scope) args.push("--scope", params.scope);
-        if (params.limit) args.push("--limit", String(params.limit));
-        if (params.project) args.push("--project", params.project);
-
-        const { stdout } = await execFileAsync(HIPPO_BIN, args);
-        return {
-          content: [{ type: "text", text: stdout.trim() || "指定范围暂无记忆记录。" }],
-          details: {},
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text", text: `获取记忆列表失败: ${err.message}` }],
-          details: { error: String(err) },
-        };
-      }
-    },
-  });
-
-  // 4. 获取单条记忆详情工具 (Mem0 标准: get_memory)
-  pi.registerTool({
-    name: "get_memory",
-    label: "Mem0 Get Memory",
-    description: "通过记忆 ID 查看单条记忆的详细信息 (Mem0 官方 get_memory 规范)。",
-    promptSnippet: "查看指定 ID 的单条记忆详细信息",
-    parameters: Type.Object({
-      memory_id: Type.String({ description: "要获取的记忆唯一 ID" }),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const { stdout } = await execFileAsync(HIPPO_BIN, ["get", params.memory_id]);
-        return {
-          content: [{ type: "text", text: stdout.trim() }],
-          details: {},
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text", text: `获取记忆失败: ${err.message}` }],
-          details: { error: String(err) },
-        };
-      }
-    },
-  });
-
-  // 5. 删除单条记忆工具 (Mem0 标准: delete_memory)
-  pi.registerTool({
-    name: "delete_memory",
-    label: "Mem0 Delete Memory",
-    description:
-      "根据记忆 ID 删除一条记忆 (Mem0 官方 delete_memory 规范)。仅在用户确认要删除该条记忆时调用，memory_id 必须来自检索结果，禁止凭空猜测。",
-    promptSnippet: "根据 ID 删除一条过期或冗余的记忆",
-    parameters: Type.Object({
-      memory_id: Type.String({ description: "要删除的记忆唯一 ID" }),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const { stdout } = await execFileAsync(HIPPO_BIN, ["delete", params.memory_id]);
-        return {
-          content: [{ type: "text", text: stdout.trim() }],
-          details: {},
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text", text: `删除记忆失败: ${err.message}` }],
-          details: { error: String(err) },
-        };
-      }
-    },
-  });
-
-  // 6. 注册 /hippo 便捷斜杠命令
+  // 3. 注册 /hippo 便捷斜杠命令
   pi.registerCommand("hippo", {
     description: "快速查看 Hippo 记忆库状态或执行检索",
     handler: async (args, ctx) => {
@@ -208,4 +107,51 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  // 4. 双事件生命周期自动蒸馏 (agent_settled 主检查点 + session_shutdown 退出兜底)
+  const dispatchHook = (eventName: string, ctx: any) => {
+    try {
+      const sessionManager = ctx?.sessionManager;
+      let sessionId = "unknown_pi_session";
+      if (typeof sessionManager?.getSessionId === "function") {
+        try {
+          sessionId = String(sessionManager.getSessionId() || "");
+        } catch {}
+      }
+      let transcriptPath = "";
+      if (typeof sessionManager?.getSessionFile === "function") {
+        try {
+          transcriptPath = String(sessionManager.getSessionFile() || "");
+        } catch {}
+      }
+
+      const payload = JSON.stringify({
+        session_id: sessionId,
+        event: eventName,
+        project_dir: ctx?.cwd || process.cwd(),
+        transcript_path: transcriptPath,
+      });
+
+      const { spawn } = require("node:child_process");
+      const child = spawn(HIPPO_BIN, ["hook", "capture", "--host", "pi"], {
+        detached: true,
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      child.stdin.write(payload);
+      child.stdin.end();
+      child.unref();
+    } catch {
+      // 静默容灾，绝不阻塞用户终端与交互
+    }
+  };
+
+  pi.on("agent_settled", (_event, ctx) => {
+    dispatchHook("agent_settled", ctx);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    dispatchHook("session_shutdown", ctx);
+  });
 }
+
+

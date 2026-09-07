@@ -43,6 +43,7 @@ qdrant_storage/
 .DS_Store
 .vscode/
 .idea/
+.zcode/
 *.swp
 *.swo
 .qdrant-initialized

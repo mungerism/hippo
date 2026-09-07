@@ -43,18 +43,19 @@ class TestHippo(unittest.TestCase):
         from hippo_memory.server import mcp_server
 
         tools = asyncio.run(mcp_server.list_tools())
-        tool_names = {t.name for t in tools}
+        tool_dict = {t.name: t for t in tools}
         expected_tools = {
             "add_memory",
             "search_memories",
-            "get_memories",
-            "get_memory",
-            "update_memory",
-            "delete_memory",
-            "delete_all_memories",
-            "list_entities",
         }
-        self.assertEqual(tool_names, expected_tools)
+        self.assertEqual(set(tool_dict.keys()), expected_tools)
+
+        # 契约核验：add_memory 绝不暴露 messages，text 限制 2000 字符
+        add_tool = tool_dict["add_memory"]
+        properties = add_tool.input_schema.get("properties", {})
+        self.assertNotIn("messages", properties)
+        self.assertIn("text", properties)
+        self.assertEqual(properties["text"].get("maxLength"), 2000)
 
     def test_mcp_server_instructions(self):
         import asyncio
@@ -63,6 +64,31 @@ class TestHippo(unittest.TestCase):
         instructions = mcp_server.instructions or ""
         self.assertIn("search_memories", instructions)
         self.assertIn("add_memory", instructions)
+
+    def test_engine_add_passthrough(self):
+        from unittest.mock import MagicMock
+        from hippo_memory.engine import HippoEngine
+
+        engine = HippoEngine()
+        mock_mem0 = MagicMock()
+        mock_mem0.add.return_value = {"results": [{"id": "m1"}]}
+        engine._memory = mock_mem0
+
+        engine.add(
+            text="测试事实",
+            prompt="自定义抽取提示词",
+            infer=False,
+            expiration_date="2026-12-31",
+            run_id="run-123",
+        )
+
+        mock_mem0.add.assert_called_once()
+        call_args, call_kwargs = mock_mem0.add.call_args
+        self.assertEqual(call_args[0], [{"role": "user", "content": "测试事实"}])
+        self.assertEqual(call_kwargs.get("prompt"), "自定义抽取提示词")
+        self.assertEqual(call_kwargs.get("infer"), False)
+        self.assertEqual(call_kwargs.get("expiration_date"), "2026-12-31")
+        self.assertEqual(call_kwargs.get("run_id"), "run-123")
 
     def test_build_conversation_combinations(self):
         from hippo_memory.engine import build_conversation
@@ -188,6 +214,40 @@ class TestHippo(unittest.TestCase):
             text = other.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("原始内容\n"))
             self.assertIn(build_memory_section(), text)
+
+    def test_init_hooks_idempotent(self):
+        import tempfile
+        import json
+        from hippo_memory.init import (
+            upsert_codex_hooks,
+            upsert_zcode_hooks,
+            upsert_antigravity_hooks,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            # Codex
+            codex_file = tmp_path / "codex_hooks.json"
+            self.assertEqual(upsert_codex_hooks(codex_file), "created")
+            data = json.loads(codex_file.read_text(encoding="utf-8"))
+            self.assertIn("Stop", data["hooks"])
+            self.assertIn("SessionEnd", data["hooks"])
+            self.assertEqual(upsert_codex_hooks(codex_file), "unchanged")
+
+            # ZCode
+            zcode_file = tmp_path / "zcode_config.json"
+            self.assertEqual(upsert_zcode_hooks(zcode_file), "created")
+            zdata = json.loads(zcode_file.read_text(encoding="utf-8"))
+            self.assertIn("Stop", zdata["hooks"]["events"])
+            self.assertEqual(upsert_zcode_hooks(zcode_file), "unchanged")
+
+            # Antigravity
+            agy_file = tmp_path / "agy_hooks.json"
+            self.assertEqual(upsert_antigravity_hooks(agy_file), "created")
+            adata = json.loads(agy_file.read_text(encoding="utf-8"))
+            self.assertIn("hippo-memory-distill", adata)
+            self.assertEqual(upsert_antigravity_hooks(agy_file), "unchanged")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
 """
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 SECTION_START = "<!-- hippo:memory:start -->"
 SECTION_END = "<!-- hippo:memory:end -->"
@@ -20,7 +20,6 @@ def build_memory_section() -> str:
         "（scope: 'all'），不要只依赖当前对话。\n"
         "- 用户表达偏好、做出值得保留的决策、纠正你的行为或明确要求记住某事时，"
         "调用 `add_memory` 沉淀；跨项目的个人习惯用 scope='global'。\n"
-        "- 删除或更新记忆必须使用检索结果中的 memory_id，禁止凭空猜测。\n"
         f"{SECTION_END}"
     )
 
@@ -52,24 +51,171 @@ def upsert_hippo_section(path: Path) -> str:
     return "appended"
 
 
-def run_init(skip_global: bool = False, skip_project: bool = False) -> List[Tuple[Path, str]]:
-    """Write the Hippo section into global and project instruction files.
+def resolve_hippo_command(host: str) -> str:
+    """Resolve executable hippo command string for hook invocation."""
+    import shutil
+    import sys
+
+    bin_path = shutil.which("hippo")
+    if bin_path:
+        return f"'{bin_path}' hook capture --host {host}"
+    return f"'{sys.executable}' -m hippo_memory.cli hook capture --host {host}"
+
+
+def upsert_codex_hooks(path: Optional[Path] = None) -> str:
+    """Idempotently configure Stop and SessionEnd hooks in ~/.codex/hooks.json."""
+    import json
+
+    target = path or (Path.home() / ".codex" / "hooks.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not target.exists()
+
+    data = {"hooks": {}}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"hooks": {}}
+
+    hooks_obj = data.setdefault("hooks", {})
+    cmd_str = resolve_hippo_command("codex")
+    changed = False
+
+    for event in ["Stop", "SessionEnd"]:
+        event_list = hooks_obj.setdefault(event, [])
+        # Check if already installed
+        exists = any(
+            any("hook capture --host codex" in h.get("command", "") for h in entry.get("hooks", []))
+            for entry in event_list if isinstance(entry, dict)
+        )
+        if not exists:
+            event_list.append({
+                "hooks": [
+                    {
+                        "command": cmd_str,
+                        "timeout": 5,
+                        "type": "command",
+                    }
+                ]
+            })
+            changed = True
+
+    if changed:
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return "created" if is_new else "updated"
+    return "unchanged"
+
+
+def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
+    """Idempotently configure Stop hook in ~/.zcode/cli/config.json."""
+    import json
+
+    target = path or (Path.home() / ".zcode" / "cli" / "config.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not target.exists()
+
+    data = {}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+
+    hooks_sec = data.setdefault("hooks", {})
+    hooks_sec["enabled"] = True
+    events = hooks_sec.setdefault("events", {})
+    stop_list = events.setdefault("Stop", [])
+
+    cmd_str = resolve_hippo_command("zcode")
+    exists = any(
+        any("hook capture --host zcode" in h.get("command", "") for h in entry.get("hooks", []))
+        for entry in stop_list if isinstance(entry, dict)
+    )
+
+    if not exists:
+        stop_list.append({
+            "hooks": [
+                {
+                    "async": False,
+                    "command": cmd_str,
+                    "type": "command",
+                }
+            ],
+            "matcher": ".*",
+        })
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return "created" if is_new else "updated"
+    return "unchanged"
+
+
+def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
+    """Idempotently configure Stop hook in .agents/hooks.json."""
+    import json
+
+    target = path or (Path.home() / ".gemini" / "antigravity-cli" / "hooks.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not target.exists()
+
+    data = {}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+
+    cmd_str = resolve_hippo_command("antigravity")
+    hippo_group = data.setdefault("hippo-memory-distill", {})
+    stop_list = hippo_group.setdefault("Stop", [])
+
+    exists = any("hook capture --host antigravity" in h.get("command", "") for h in stop_list if isinstance(h, dict))
+    if not exists:
+        stop_list.append({
+            "command": cmd_str,
+            "type": "command",
+            "timeout": 5,
+        })
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return "created" if is_new else "updated"
+    return "unchanged"
+
+
+def run_init(
+    skip_global: bool = False,
+    skip_project: bool = False,
+    configure_hooks: bool = True,
+) -> List[Tuple[Path, str]]:
+    """Write the Hippo section into global and project instruction files and configure host hooks.
 
     Global target is Codex's ~/.codex/AGENTS.md (project-agnostic, applies to
     every Codex session). Project target is the AGENTS.md at the current Git
     repository root (read workspace-wide by ZCode, antigravity, pi, etc.).
     """
-    targets: List[Path] = []
+    results: List[Tuple[Path, str]] = []
+
+    # 1. Instruction documents (AGENTS.md)
     if not skip_global:
-        targets.append(Path.home() / ".codex" / "AGENTS.md")
+        codex_agents = Path.home() / ".codex" / "AGENTS.md"
+        results.append((codex_agents, upsert_hippo_section(codex_agents)))
 
     if not skip_project:
         from hippo_memory.router import detect_git_project
 
         _, git_root = detect_git_project()
-        targets.append((git_root or Path.cwd()) / "AGENTS.md")
+        proj_agents = (git_root or Path.cwd()) / "AGENTS.md"
+        results.append((proj_agents, upsert_hippo_section(proj_agents)))
 
-    results: List[Tuple[Path, str]] = []
-    for target in targets:
-        results.append((target, upsert_hippo_section(target)))
+    # 2. Host hooks auto-wiring
+    if configure_hooks:
+        codex_hooks = Path.home() / ".codex" / "hooks.json"
+        if codex_hooks.parent.exists():
+            results.append((codex_hooks, upsert_codex_hooks(codex_hooks)))
+
+        zcode_cfg = Path.home() / ".zcode" / "cli" / "config.json"
+        if zcode_cfg.parent.exists():
+            results.append((zcode_cfg, upsert_zcode_hooks(zcode_cfg)))
+
+        agy_hooks = Path.home() / ".gemini" / "antigravity-cli" / "hooks.json"
+        if agy_hooks.parent.exists():
+            results.append((agy_hooks, upsert_antigravity_hooks(agy_hooks)))
+
     return results

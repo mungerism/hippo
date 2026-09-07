@@ -68,6 +68,9 @@ class HippoEngine:
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        prompt: Optional[str] = None,
+        infer: bool = True,
+        expiration_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add a memory (text or multimodal) matching Mem0 specifications.
 
@@ -84,6 +87,9 @@ class HippoEngine:
             user_id: Optional user identifier override.
             agent_id: Optional agent or project identifier override.
             run_id: Optional run identifier.
+            prompt: Optional custom extraction prompt for Mem0 LLM distillation.
+            infer: Whether to distill memories using LLM (default True).
+            expiration_date: Optional expiration date string (e.g. YYYY-MM-DD).
 
         Returns:
             Dict containing the added memory results.
@@ -109,6 +115,12 @@ class HippoEngine:
         )
         if run_id:
             params["run_id"] = run_id
+        if prompt is not None:
+            params["prompt"] = prompt
+        if not infer:
+            params["infer"] = infer
+        if expiration_date is not None:
+            params["expiration_date"] = expiration_date
 
         full_content = raw_text
         if image_path:

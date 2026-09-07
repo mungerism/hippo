@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 # Base paths
 HIPPO_HOME = Path(os.getenv("HIPPO_HOME", "~/.hippo")).expanduser()
 DEFAULT_STORAGE_DIR = HIPPO_HOME / "storage"
+DEFAULT_SPOOL_DIR = HIPPO_HOME / "spool"
 DEFAULT_ENV_FILE = HIPPO_HOME / ".env"
 
 # Auto-load .env from ~/.hippo/.env and project root .env
@@ -161,3 +162,15 @@ class HippoConfig:
 
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
+
+
+_default_config: Optional[HippoConfig] = None
+
+
+def get_config() -> HippoConfig:
+    """Get or create singleton HippoConfig instance."""
+    global _default_config
+    if _default_config is None:
+        _default_config = HippoConfig()
+    return _default_config
+

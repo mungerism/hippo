@@ -324,9 +324,152 @@ def migrate_zcode():
     """一键将 ZCode 本地 ~/.zcode/cli/memories/ 中的精细记忆迁移至 Hippo。"""
     from hippo_memory.migrate_zcode import migrate_zcode_all
 
-    migrate_zcode_all()
+hook_app = typer.Typer(
+    name="hook",
+    help="🪝 宿主生命周期 Hook 与异步 Spool 蒸馏流水线。",
+    no_args_is_help=True,
+)
+app.add_typer(hook_app, name="hook")
+
+
+@hook_app.command("capture")
+def hook_capture(
+    host: str = typer.Option(..., "--host", "-h", help="宿主类型: codex | pi | zcode | antigravity"),
+    sync: bool = typer.Option(False, "--sync", help="同步执行蒸馏（调试与单测使用）"),
+    cwd: Optional[str] = typer.Option(None, "--cwd", help="覆盖运行目录"),
+):
+    """从 stdin 极速捕获宿主 Hook 上下文并压入 Spool 队列（<50ms 立即退出）。"""
+    import sys
+    import subprocess
+    from hippo_memory.hooks import SpoolStorage, SpoolWorker, get_adapter
+
+    raw_input = ""
+    try:
+        # If piped via stdin, read all
+        if not sys.stdin.isatty():
+            raw_input = sys.stdin.read()
+    except Exception:
+        pass
+
+    try:
+        adapter = get_adapter(host)
+    except ValueError as e:
+        console.print(f"[bold red]✗[/bold red] {e}", file=sys.stderr)
+        sys.stdout.write("{}\n")
+        sys.stdout.flush()
+        raise typer.Exit(1)
+
+    payload = adapter.parse_context(raw_input, env_cwd=cwd)
+    storage = SpoolStorage()
+    is_new, job_id = storage.enqueue(payload)
+
+    # Output host-clean JSON response immediately to release host terminal
+    sys.stdout.write(adapter.format_response(payload))
+    sys.stdout.flush()
+
+    if sync:
+        worker = SpoolWorker(storage=storage)
+        worker.process_one_job(payload)
+    else:
+        if is_new:
+            # Spawn background detached worker to process queue without blocking host
+            try:
+                subprocess.Popen(
+                    [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+
+@hook_app.command("worker")
+def hook_worker(
+    drain: bool = typer.Option(False, "--drain", help="消费完当前就绪作业后立即退出"),
+    daemon: bool = typer.Option(False, "--daemon", help="以常驻守护进程模式持续监听消费"),
+    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="最大消费作业数"),
+    interval: float = typer.Option(2.0, "--interval", "-i", help="常驻轮询间隔秒数"),
+):
+    """后台单 Worker 互斥消费 Spool 作业队列。"""
+    from hippo_memory.hooks import SpoolStorage, SpoolWorker
+
+    storage = SpoolStorage()
+    worker = SpoolWorker(storage=storage)
+
+    if daemon:
+        console.print(f"[bold cyan]启动 Hippo Spool 常驻守护 Worker (轮询间隔: {interval}s)...[/bold cyan]")
+        worker.daemon(poll_interval=interval)
+    else:
+        count = worker.drain(limit=limit)
+        console.print(f"[green]✓ Spool 消费完成，共处理 {count} 项作业。[/green]")
+
+
+@hook_app.command("status")
+def hook_status():
+    """查看 Spool 队列统计状态与作业流水。"""
+    import datetime
+    from hippo_memory.hooks import SpoolStorage, JobState
+
+    storage = SpoolStorage()
+    jobs = storage.list_jobs()
+
+    counts = {st.value: 0 for st in JobState}
+    for j in jobs:
+        counts[j.state] = counts.get(j.state, 0) + 1
+
+    summary_table = Table(title="Hippo Hook Spool 队列统计")
+    summary_table.add_column("状态 (State)", style="bold")
+    summary_table.add_column("作业数量", style="cyan")
+    for st, cnt in counts.items():
+        color = "green" if st == "completed" else "yellow" if st in ("pending", "processing") else "dim" if st in ("skipped", "coalesced") else "red"
+        summary_table.add_row(f"[{color}]{st}[/{color}]", str(cnt))
+    console.print(summary_table)
+
+    if jobs:
+        recent = jobs[-10:]
+        recent.reverse()
+        detail_table = Table(title=f"最近作业详情 (最新 {len(recent)} 条)")
+        detail_table.add_column("Job ID", style="dim", width=18)
+        detail_table.add_column("宿主", width=10)
+        detail_table.add_column("事件", width=12)
+        detail_table.add_column("状态", width=12)
+        detail_table.add_column("Session ID", style="dim", width=16)
+        detail_table.add_column("说明 / 原因", style="dim")
+
+        for j in recent:
+            color = "green" if j.state == "completed" else "yellow" if j.state in ("pending", "processing") else "dim" if j.state in ("skipped", "coalesced") else "red"
+            note = j.skip_reason or j.error or (f"Cursor: {j.semantic_cursor[:12]}" if j.semantic_cursor else "-")
+            detail_table.add_row(
+                j.job_id,
+                j.host,
+                j.event,
+                f"[{color}]{j.state}[/{color}]",
+                j.session_id[:16],
+                note,
+            )
+        console.print(detail_table)
+
+
+@hook_app.command("retry")
+def hook_retry(
+    job_id: str = typer.Argument(..., help="要重试的作业 ID"),
+):
+    """将指定已失败 (dead) 或被跳过 (skipped) 的作业重新加入队列。"""
+    from hippo_memory.hooks import SpoolStorage, JobState
+
+    storage = SpoolStorage()
+    payload = storage.load_payload(job_id)
+    if not payload:
+        console.print(f"[bold red]✗ 未找到作业: {job_id}[/bold red]")
+        raise typer.Exit(1)
+
+    storage.update_state(job_id, JobState.PENDING, attempt=0, not_before=0.0, error=None)
+    console.print(f"[bold green]✓ 作业 {job_id} 已重置为 pending 状态。[/bold green]")
 
 
 if __name__ == "__main__":
     app()
+
 

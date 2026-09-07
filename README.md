@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > **项目重要原则（Core Philosophy）**：**Hippo 只是对 Mem0 的轻量工程封装（Thin Wrapper over Mem0）**。
-> 1. **100% 规范对标**：所有 MCP 工具名（`add_memory`、`search_memories`、`get_memories` 等）与参数类型与 Mem0 官方规范完全一致，拒绝二次发明非标 API。
+> 1. **100% 规范对标**：所有暴露的 MCP 工具名（`search_memories`、`add_memory`）与参数类型与 Mem0 官方规范完全一致，专为自主 Agent 极致精简。
 > 2. **专注工程边界**：Hippo 仅专注于多端 IDE 的 MCP 协议挂载、Git 目录自动路由（无需手动管理 `agent_id`）以及本地单二进制 Qdrant 常驻服务。
 
 ---
@@ -78,7 +78,27 @@ hippo delete <memory_id>
 
 # 7. 启动 MCP Server (stdio 模式)
 hippo serve
+
+# 8. 自动生命周期 Hook 与异步 Spool 队列管理
+hippo hook status                     # 查看 Spool 队列各状态作业与积压流水
+hippo hook worker --drain             # 立即单次排他消费当前就绪的待办作业
+hippo hook worker --daemon            # 以常驻守护进程持续消费 Spool 作业
+hippo hook retry <job_id>             # 将死信 (dead) 作业重置重新入队
 ```
+
+---
+
+## 🧠 会话记忆蒸馏流水线 (Session Distillation)
+
+Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机**机制：
+- **认知面与系统面物理隔离**：MCP Server 面向智能体保持绝对纯粹，仅保留 `search_memories` 与 `add_memory`（限制单句事实 2000 字符），杜绝 Agent 尝试序列化完整长会话历史；
+- **双事件容灾挂载**：在宿主切面以 `Stop`（一轮交互完成）为主检查点防丢，以 `SessionEnd`（会话结束）为对账兜底；
+  - **Codex & pi**：启用完整双事件模式；
+  - **ZCode & Antigravity**：按宿主原生能力以 Stop-only 模式运行；
+- **极速 Spool 入队**：Hook 在 `< 50ms` 内原子占位入队并 `exit 0` 返回宿主，绝不卡顿终端交互；
+- **语义游标防重 (Semantic Cursor)**：基于目标与最终陈述哈希，跨事件瞬时拦截重复投递，消灭关闭日志追加导致的游标漂移；
+- **免维护自愈**：后台单 Worker 进程利用 `worker.lock` 互斥消费，具备 Lease 超时回收、3次退避重试与死信保护。
+
 
 ---
 
@@ -172,7 +192,7 @@ enabled = true
 
 ### 5. pi-coding-agent (pi)
 扩展文件：`~/.pi/agent/extensions/hippo-memory.ts`
-> 自动加载为原生工具：`search_memories`、`add_memory`、`get_memories`、`get_memory`、`delete_memory` 及 `/hippo` 快捷命令。
+> 自动加载为原生工具：`search_memories`、`add_memory` 及 `/hippo` 快捷命令。
 
 ---
 
@@ -195,17 +215,13 @@ hippo init
 
 ---
 
-## 🛠 暴露的标准 MCP 工具集 (100% 对标 Mem0 官方规范)
+## 🛠 暴露的标准 MCP 工具集 (专为自主 Agent 极致精简)
 
-任何接入的 Agent 均可调用与 Mem0 官方完全一致的标准工具：
-- **`add_memory(text, ...)`**：沉淀新的个人偏好、技术规范或项目踩坑事实（支持多模态截图与 `messages` 会话记录）。
+根据 Mem0 官方对自主智能体的最佳实践，Hippo MCP 专为 Agent 暴露两个最纯粹的核心记忆工具，记忆演化与冲突消解全自动处理：
 - **`search_memories(query, ...)`**：基于向量语义与多信号混合检索相关记忆（支持 `filters`、`limit`、`scope`）。
-- **`get_memories(...)`**：列出记忆列表或全局偏好画像（支持结构化过滤与分页）。
-- **`get_memory(memory_id)`**：根据记忆唯一 ID 获取单条事实的详细上下文与元数据。
-- **`update_memory(memory_id, text, ...)`**：精确覆盖/更新某条已存在记忆的文本内容或元数据。
-- **`delete_memory(memory_id)`**：根据记忆 ID 删除一条不再需要或过期的记忆。
-- **`delete_all_memories(...)`**：在确认的作用域（用户/项目/智能体）内批量清理记忆。
-- **`list_entities()`**：枚举当前记忆库中持久化的所有用户与项目/智能体实体。
+- **`add_memory(text, ...)`**：沉淀新的个人偏好、技术规范或项目踩坑事实（支持多模态截图与 `messages` 会话记录）。底层由 Mem0 自动判定新增、覆盖更新或消除冲突。
+
+> 💡 **提示**：`list`、`get`、`update`、`delete`、`clear` 等确定性生命周期管理操作由面向人类开发者的 **Hippo CLI** 全权提供，避免 Agent 产生 UUID 幻觉或误操作。
 
 ---
 

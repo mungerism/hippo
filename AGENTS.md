@@ -7,8 +7,8 @@
 在修改、扩展或维护本项目代码时，所有 AI 智能体必须严格遵守以下原则：
 
 1. **100% 对标 Mem0 官方规范**：
-   - MCP Server 暴露的工具名称、参数类型、数据结构与交互范式必须与 Mem0 官方标准 MCP Server 保持 100% 一致。
-   - 工具名必须为：`add_memory`、`search_memories`、`get_memories`、`get_memory`、`update_memory`、`delete_memory`、`delete_all_memories`、`list_entities`。
+   - MCP Server 暴露的工具名称、参数类型、数据结构与交互范式必须与 Mem0 官方标准保持 100% 一致。
+   - 专为自主 Agent 极致精简，仅向智能体暴露核心的检索与沉淀工具：`search_memories` 与 `add_memory`。记忆演化与冲突消解完全交由 Mem0 底层自动处理，严禁向 Agent 暴露冗余脆弱的 ID 级增删改工具。
    - 严禁自行发明非标的自定义 API 或引入深重抽象层。
 
 2. **Hippo 的唯一边界与职责**：
@@ -26,5 +26,4 @@
 
 - 开始处理任务前，先调用 `search_memories` 检索当前项目记忆与个人偏好（scope: 'all'），不要只依赖当前对话。
 - 用户表达偏好、做出值得保留的决策、纠正你的行为或明确要求记住某事时，调用 `add_memory` 沉淀；跨项目的个人习惯用 scope='global'。
-- 删除或更新记忆必须使用检索结果中的 memory_id，禁止凭空猜测。
 <!-- hippo:memory:end -->

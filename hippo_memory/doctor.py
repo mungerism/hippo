@@ -122,6 +122,63 @@ def collect_checks() -> List[dict]:
     pi_ext = Path.home() / ".pi" / "agent" / "extensions" / "hippo-memory.ts"
     add("客户端", "pi 扩展", pi_ext.exists(), str(pi_ext))
 
+    # --- 生命周期 Hook 挂载 ---
+    home = Path.home()
+    codex_h = home / ".codex" / "hooks.json"
+    codex_hook_ok = False
+    if codex_h.exists():
+        try:
+            content = codex_h.read_text(encoding="utf-8")
+            codex_hook_ok = "hook capture --host codex" in content
+        except OSError:
+            pass
+    add("Hook 挂载", "Codex (Stop/SessionEnd)", codex_hook_ok, "已挂载" if codex_hook_ok else "未挂载 (可运行 hippo init)")
+
+    zcode_c = home / ".zcode" / "cli" / "config.json"
+    zcode_hook_ok = False
+    if zcode_c.exists():
+        try:
+            content = zcode_c.read_text(encoding="utf-8")
+            zcode_hook_ok = "hook capture --host zcode" in content
+        except OSError:
+            pass
+    add("Hook 挂载", "ZCode (Stop)", zcode_hook_ok, "已挂载" if zcode_hook_ok else "未挂载 (可运行 hippo init)")
+
+    pi_hook_ok = False
+    if pi_ext.exists():
+        try:
+            content = pi_ext.read_text(encoding="utf-8")
+            pi_hook_ok = "agent_settled" in content and "session_shutdown" in content
+        except OSError:
+            pass
+    add("Hook 挂载", "Pi (agent_settled/session_shutdown)", pi_hook_ok, "已挂载" if pi_hook_ok else "未挂载")
+
+    agy_h = home / ".gemini" / "antigravity-cli" / "hooks.json"
+    agy_hook_ok = False
+    if agy_h.exists():
+        try:
+            content = agy_h.read_text(encoding="utf-8")
+            agy_hook_ok = "hook capture --host antigravity" in content
+        except OSError:
+            pass
+    add("Hook 挂载", "Antigravity (Stop)", agy_hook_ok, "已挂载" if agy_hook_ok else "未挂载 (可运行 hippo init)")
+
+    # --- Spool 队列巡检 ---
+    try:
+        from hippo_memory.hooks import SpoolStorage, JobState
+        storage = SpoolStorage()
+        pending_jobs = storage.list_jobs(state=JobState.PENDING)
+        dead_jobs = storage.list_jobs(state=JobState.DEAD)
+        receipt_count = len(list(storage.receipts_dir.glob("*.json"))) if storage.receipts_dir.exists() else 0
+
+        pending_ok = len(pending_jobs) < 10
+        add("Spool 队列", "待消费积压", pending_ok, f"当前 pending: {len(pending_jobs)} 个" + (" (正常)" if pending_ok else " (较多，可执行 hippo hook worker --drain)"))
+        dead_ok = len(dead_jobs) == 0
+        add("Spool 队列", "死信作业 (dead)", dead_ok, f"当前 dead: {len(dead_jobs)} 个" + ("" if dead_ok else "；可执行 hippo hook retry <job_id> 重新入队"))
+        add("Spool 队列", "累计蒸馏收据", True, f"已沉淀 {receipt_count} 个会话状态")
+    except Exception as e:
+        add("Spool 队列", "队列状态", False, f"探测异常: {e}")
+
     # --- 依赖 ---
     try:
         version = importlib.metadata.version("mem0ai")
