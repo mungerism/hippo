@@ -116,12 +116,18 @@ def upsert_codex_hooks(path: Optional[Path] = None) -> str:
 
     for event in ["Stop", "SessionEnd"]:
         event_list = hooks_obj.setdefault(event, [])
-        # Check if already installed
-        exists = any(
-            any("hook capture --host codex" in h.get("command", "") for h in entry.get("hooks", []))
-            for entry in event_list if isinstance(entry, dict)
-        )
-        if not exists:
+        found_hippo = False
+        for entry in event_list:
+            if not isinstance(entry, dict):
+                continue
+            for h in entry.get("hooks", []):
+                if isinstance(h, dict) and "hook capture --host codex" in h.get("command", ""):
+                    found_hippo = True
+                    if h.get("command") != cmd_str:
+                        h["command"] = cmd_str
+                        changed = True
+
+        if not found_hippo:
             event_list.append({
                 "hooks": [
                     {
@@ -154,21 +160,31 @@ def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
         logger.warning(f"配置文件 {target} 中的 hooks 字段非字典，已中止写入以防清空配置。")
         return "aborted (malformed JSON)"
 
-    hooks_sec["enabled"] = True
+    changed = False
+    if hooks_sec.get("enabled") is not True:
+        hooks_sec["enabled"] = True
+        changed = True
+
     events = hooks_sec.setdefault("events", {})
     if not isinstance(events, dict):
         logger.warning(f"配置文件 {target} 中的 events 字段非字典，已中止写入以防清空配置。")
         return "aborted (malformed JSON)"
 
     stop_list = events.setdefault("Stop", [])
-
     cmd_str = resolve_hippo_command("zcode")
-    exists = any(
-        any("hook capture --host zcode" in h.get("command", "") for h in entry.get("hooks", []))
-        for entry in stop_list if isinstance(entry, dict)
-    )
 
-    if not exists:
+    found_hippo = False
+    for entry in stop_list:
+        if not isinstance(entry, dict):
+            continue
+        for h in entry.get("hooks", []):
+            if isinstance(h, dict) and "hook capture --host zcode" in h.get("command", ""):
+                found_hippo = True
+                if h.get("command") != cmd_str:
+                    h["command"] = cmd_str
+                    changed = True
+
+    if not found_hippo:
         stop_list.append({
             "hooks": [
                 {
@@ -179,6 +195,9 @@ def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
             ],
             "matcher": ".*",
         })
+        changed = True
+
+    if changed:
         target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return "created" if is_new else "updated"
     return "unchanged"
@@ -201,14 +220,25 @@ def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
         return "aborted (malformed JSON)"
 
     stop_list = hippo_group.setdefault("Stop", [])
+    changed = False
 
-    exists = any("hook capture --host antigravity" in h.get("command", "") for h in stop_list if isinstance(h, dict))
-    if not exists:
+    found_hippo = False
+    for h in stop_list:
+        if isinstance(h, dict) and "hook capture --host antigravity" in h.get("command", ""):
+            found_hippo = True
+            if h.get("command") != cmd_str:
+                h["command"] = cmd_str
+                changed = True
+
+    if not found_hippo:
         stop_list.append({
             "command": cmd_str,
             "type": "command",
             "timeout": 5,
         })
+        changed = True
+
+    if changed:
         target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return "created" if is_new else "updated"
     return "unchanged"

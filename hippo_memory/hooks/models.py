@@ -57,7 +57,7 @@ def sanitize_text(text: str) -> str:
     return text
 
 
-_SHUTDOWN_COMMANDS = {
+SHUTDOWN_COMMANDS = {
     "/exit", "exit", "quit", ":q", "/quit", "bye", "exit()", "quit()"
 }
 
@@ -74,10 +74,22 @@ def calculate_semantic_cursor(
     
     Includes a digest of the captured conversation turn window to distinguish distinct
     checkpoints with identical goals/replies, while normalizing terminal exit commands
-    so normal Stop vs SessionEnd dual-events match reliably.
+    and goals so normal Stop vs SessionEnd dual-events match reliably.
     """
     sorted_files = sorted(set(touched_files or []))
     
+    # Normalize user goal if polluted by terminal shutdown commands
+    normalized_goal = last_user_goal.strip()
+    if normalized_goal.lower() in SHUTDOWN_COMMANDS:
+        normalized_goal = ""
+        if turns:
+            for t in reversed(turns):
+                role = str(t.get("role") or "").strip().lower()
+                content = str(t.get("content") or "").strip()
+                if role == "user" and content and content.lower() not in SHUTDOWN_COMMANDS:
+                    normalized_goal = content
+                    break
+
     normalized_turns: List[str] = []
     if turns:
         for t in turns:
@@ -86,7 +98,7 @@ def calculate_semantic_cursor(
             if not content:
                 continue
             # Normalizing known shutdown / exit metadata
-            if role == "user" and content.lower() in _SHUTDOWN_COMMANDS:
+            if role == "user" and content.lower() in SHUTDOWN_COMMANDS:
                 continue
             normalized_turns.append(f"{role}:{content}")
 
@@ -97,7 +109,7 @@ def calculate_semantic_cursor(
     raw = (
         f"proj={project_id.strip()}\n"
         f"sess={session_id.strip()}\n"
-        f"goal={last_user_goal.strip()}\n"
+        f"goal={normalized_goal}\n"
         f"reply={last_assistant_final.strip()}\n"
         f"files={','.join(sorted_files)}\n"
         f"turns={turns_digest}"

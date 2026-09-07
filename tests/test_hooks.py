@@ -561,7 +561,7 @@ class TestHostAdapters(unittest.TestCase):
         cursor_stop = calculate_semantic_cursor(
             project_id="test_repo",
             session_id="sess-cursor-1",
-            last_user_goal="优化代码",
+            last_user_goal="帮我优化下代码",
             last_assistant_final="好，已经重构完成。",
             touched_files=["app.py"],
             turns=turns_stop,
@@ -569,12 +569,23 @@ class TestHostAdapters(unittest.TestCase):
         cursor_session_end = calculate_semantic_cursor(
             project_id="test_repo",
             session_id="sess-cursor-1",
-            last_user_goal="优化代码",
+            last_user_goal="帮我优化下代码",
             last_assistant_final="好，已经重构完成。",
             touched_files=["app.py"],
             turns=turns_session_end,
         )
         self.assertEqual(cursor_stop, cursor_session_end, "Stop 与 SessionEnd 退出元数据归一化后必须生成相同 cursor")
+
+        # 场景 3: SessionEnd 捕获中 last_user_goal 被终端退出指令污染为 /exit
+        cursor_polluted_goal = calculate_semantic_cursor(
+            project_id="test_repo",
+            session_id="sess-cursor-1",
+            last_user_goal="/exit",  # 模拟 adapter 接收到退出命令作为目标
+            last_assistant_final="好，已经重构完成。",
+            touched_files=["app.py"],
+            turns=turns_session_end,
+        )
+        self.assertEqual(cursor_stop, cursor_polluted_goal, "退出目标 /exit 被自动归一化回溯，必须与正常 Stop 的 cursor 一致")
 
 
 if __name__ == "__main__":

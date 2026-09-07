@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hippo_memory.hooks.adapters.base import BaseHostAdapter
-from hippo_memory.hooks.models import CapturedPayload, HookEvent, HostType, calculate_job_id
+from hippo_memory.hooks.models import CapturedPayload, HookEvent, HostType, SHUTDOWN_COMMANDS, calculate_job_id
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,8 @@ class CodexAdapter(BaseHostAdapter):
 
                 if role == "user":
                     turns.append({"role": "user", "content": cleaned_content})
-                    last_user_goal = cleaned_content
+                    if cleaned_content.lower() not in SHUTDOWN_COMMANDS:
+                        last_user_goal = cleaned_content
                 elif role in ("assistant", "model"):
                     turns.append({"role": "assistant", "content": cleaned_content})
                     last_assistant_final = cleaned_content

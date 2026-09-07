@@ -300,6 +300,94 @@ class TestHippo(unittest.TestCase):
             self.assertEqual(result.exit_code, 0)
             mock_migrate.assert_called_once()
 
+    def test_init_hooks_refresh_on_command_change(self):
+        """验证当 Hippo 可执行文件路径变更时，init 会自动刷新 hooks 中的 command 命令。"""
+        import tempfile
+        import json
+        from unittest.mock import patch
+        from hippo_memory.init import (
+            upsert_codex_hooks,
+            upsert_zcode_hooks,
+            upsert_antigravity_hooks,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            # 1. 模拟旧路径
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'/old/bin/hippo' hook capture --host codex"):
+                c_file = tmp_path / "codex_hooks.json"
+                self.assertEqual(upsert_codex_hooks(c_file), "created")
+
+            # 2. 模拟新路径运行 init，必须更新为新路径并返回 updated
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'/new/bin/hippo' hook capture --host codex"):
+                self.assertEqual(upsert_codex_hooks(c_file), "updated")
+                c_data = json.loads(c_file.read_text(encoding="utf-8"))
+                for event in ("Stop", "SessionEnd"):
+                    cmd = c_data["hooks"][event][0]["hooks"][0]["command"]
+                    self.assertEqual(cmd, "'/new/bin/hippo' hook capture --host codex")
+
+            # 3. ZCode 刷新测试
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'/old/bin/hippo' hook capture --host zcode"):
+                z_file = tmp_path / "zcode_config.json"
+                self.assertEqual(upsert_zcode_hooks(z_file), "created")
+
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'/new/bin/hippo' hook capture --host zcode"):
+                self.assertEqual(upsert_zcode_hooks(z_file), "updated")
+                z_data = json.loads(z_file.read_text(encoding="utf-8"))
+                cmd = z_data["hooks"]["events"]["Stop"][0]["hooks"][0]["command"]
+                self.assertEqual(cmd, "'/new/bin/hippo' hook capture --host zcode")
+
+            # 4. Antigravity 刷新测试
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'/old/bin/hippo' hook capture --host antigravity"):
+                a_file = tmp_path / "agy_hooks.json"
+                self.assertEqual(upsert_antigravity_hooks(a_file), "created")
+
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'/new/bin/hippo' hook capture --host antigravity"):
+                self.assertEqual(upsert_antigravity_hooks(a_file), "updated")
+                a_data = json.loads(a_file.read_text(encoding="utf-8"))
+                cmd = a_data["hippo-memory-distill"]["Stop"][0]["command"]
+                self.assertEqual(cmd, "'/new/bin/hippo' hook capture --host antigravity")
+
+    def test_init_zcode_persists_reenabled_hook(self):
+        """验证当 ZCode 现有配置包含 hook 但 hooks.enabled 为 false 时，init 会将其设为 true 并持久化保存。"""
+        import tempfile
+        import json
+        from unittest.mock import patch
+        from hippo_memory.init import upsert_zcode_hooks
+
+        with tempfile.TemporaryDirectory() as tmp:
+            z_file = Path(tmp) / "zcode_config.json"
+            # 预置包含 hook 但被禁用的配置
+            initial_cfg = {
+                "hooks": {
+                    "enabled": False,
+                    "events": {
+                        "Stop": [
+                            {
+                                "hooks": [
+                                    {
+                                        "command": "'hippo' hook capture --host zcode",
+                                        "type": "command",
+                                        "async": False,
+                                    }
+                                ],
+                                "matcher": ".*",
+                            }
+                        ]
+                    }
+                }
+            }
+            z_file.write_text(json.dumps(initial_cfg, indent=2), encoding="utf-8")
+
+            # 模拟执行 init（此时 command 相同，但 enabled 应被重新持久化为 true）
+            with patch("hippo_memory.init.resolve_hippo_command", return_value="'hippo' hook capture --host zcode"):
+                result = upsert_zcode_hooks(z_file)
+                self.assertEqual(result, "updated")
+
+                saved = json.loads(z_file.read_text(encoding="utf-8"))
+                self.assertTrue(saved["hooks"]["enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()
