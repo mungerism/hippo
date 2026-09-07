@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from hippo_memory.hooks.models import (
     CapturedPayload,
@@ -319,6 +319,32 @@ class TestHookSpool(unittest.TestCase):
         st = self.storage.load_state(j.job_id)
         self.assertEqual(st.get("state"), JobState.COMPLETED.value)
         self.assertEqual(mock_engine.add.call_count, 2)
+
+    def test_hook_retry_triggers_worker_drain(self):
+        """验证 hippo hook retry 命令重置作业后自动触发 worker 消费。"""
+        from typer.testing import CliRunner
+        from hippo_memory.cli import app
+
+        j = CapturedPayload(
+            job_id="job-dead-retry",
+            host="codex",
+            event="Stop",
+            session_id="sess-dead",
+            project_dir="/tmp/repo",
+            turns=[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            last_assistant_final="a",
+        )
+        self.storage.enqueue(j)
+        self.storage.update_state(j.job_id, JobState.DEAD, error="Simulated failure")
+
+        runner = CliRunner()
+        with patch("hippo_memory.hooks.SpoolStorage", return_value=self.storage):
+            with patch("hippo_memory.hooks.SpoolWorker.drain", return_value=1) as mock_drain:
+                res = runner.invoke(app, ["hook", "retry", j.job_id])
+                self.assertEqual(res.exit_code, 0)
+                mock_drain.assert_called_once_with(wait_for_retries=False)
+                st = self.storage.load_state(j.job_id)
+                self.assertEqual(st.get("state"), JobState.PENDING.value)
 
 
 class TestHostAdapters(unittest.TestCase):

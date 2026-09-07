@@ -464,9 +464,10 @@ def hook_status():
 @hook_app.command("retry")
 def hook_retry(
     job_id: str = typer.Argument(..., help="要重试的作业 ID"),
+    drain: bool = typer.Option(True, "--drain/--no-drain", help="重置状态后立即触发消费"),
 ):
-    """将指定已失败 (dead) 或被跳过 (skipped) 的作业重新加入队列。"""
-    from hippo_memory.hooks import SpoolStorage, JobState
+    """将指定已失败 (dead) 或被跳过 (skipped) 的作业重新加入队列并触发消费。"""
+    from hippo_memory.hooks import SpoolStorage, SpoolWorker, JobState
 
     storage = SpoolStorage()
     payload = storage.load_payload(job_id)
@@ -476,6 +477,18 @@ def hook_retry(
 
     storage.update_state(job_id, JobState.PENDING, attempt=0, not_before=0.0, error=None)
     console.print(f"[bold green]✓ 作业 {job_id} 已重置为 pending 状态。[/bold green]")
+
+    if drain:
+        worker = SpoolWorker(storage=storage)
+        worker.drain(wait_for_retries=False)
+        st = storage.load_state(job_id)
+        final_state = st.get("state")
+        if final_state == JobState.COMPLETED.value:
+            console.print(f"[bold green]✓ 作业 {job_id} 消费重试成功！[/bold green]")
+        elif final_state == JobState.SKIPPED.value:
+            console.print(f"[yellow]⚡ 作业 {job_id} 被跳过: {st.get('skip_reason')}[/yellow]")
+        else:
+            console.print(f"[dim]Spool 消费已触发，当前状态: {final_state}[/dim]")
 
 
 if __name__ == "__main__":
