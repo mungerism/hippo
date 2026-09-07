@@ -46,12 +46,26 @@ class ScopeRouter:
         """Detect Git repository root and project name."""
         return detect_git_project(start_path)
 
-    def resolve_project(self, project_id: Optional[str] = None) -> str:
-        """Resolve current project ID from explicit arg or Git environment."""
+    def resolve_project(
+        self,
+        project_id: Optional[str] = None,
+        cwd: Optional[str | Path] = None,
+    ) -> str:
+        """Resolve current project ID from explicit arg, given directory, or Git environment."""
         if project_id and project_id.strip():
+            # If project_id is a filesystem directory, derive clean Git repository name
+            try:
+                p = Path(project_id.strip())
+                if p.exists() and p.is_dir():
+                    detected, _ = detect_git_project(p)
+                    if detected:
+                        return detected
+            except Exception:
+                pass
             return project_id.strip()
 
-        detected_name, _ = detect_git_project()
+        start_path = Path(cwd).resolve() if cwd else None
+        detected_name, _ = detect_git_project(start_path)
         return detected_name or "default_project"
 
     def build_add_params(
