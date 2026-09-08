@@ -23,13 +23,16 @@ class TestHostContracts(unittest.TestCase):
         for c in contracts:
             self.assertTrue(bool(c.display_name))
             self.assertIsInstance(c.canonical_config_path, Path)
+            self.assertIsInstance(c.events, tuple)
             self.assertTrue(len(c.events) > 0)
             self.assertTrue(all(isinstance(e, HookEvent) for e in c.events))
+            self.assertIsInstance(c.sibling_fingerprints, tuple)
             self.assertTrue(len(c.sibling_fingerprints) > 0)
             self.assertTrue(all(isinstance(fp, str) for fp in c.sibling_fingerprints))
-            self.assertIsInstance(c.legacy_trap_paths, list)
+            self.assertIsInstance(c.legacy_trap_paths, tuple)
             self.assertTrue(all(isinstance(tp, Path) for tp in c.legacy_trap_paths))
             self.assertTrue(bool(c.spec_reference))
+            self.assertIsInstance(c.hook_needles, tuple)
             self.assertTrue(len(c.hook_needles) > 0)
 
             # 单独查表一致性
@@ -129,6 +132,31 @@ class TestHostContracts(unittest.TestCase):
             self.assertNotIn("hippo-memory-distill", remaining_data)
             self.assertIn("user_custom_tool", remaining_data)
 
+            # 4. 验证 ZCode 嵌套结构 (hooks.events.Stop) 能够被正确清洗
+            zcode_contract = get_contract(HostType.ZCODE, home=tmp_home)
+            ztrap = zcode_contract.legacy_trap_paths[0]
+            ztrap.parent.mkdir(parents=True, exist_ok=True)
+            ztrap_content = {
+                "hooks": {
+                    "enabled": True,
+                    "events": {
+                        "Stop": [
+                            {
+                                "matcher": ".*",
+                                "hooks": [
+                                    {"command": "'hippo' hook capture --host zcode", "type": "command"}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+            ztrap.write_text(json.dumps(ztrap_content), encoding="utf-8")
+            self.assertIn(ztrap, zcode_contract.detect_zombies())
+            cleaned_z = zcode_contract.clean_zombies()
+            self.assertIn(ztrap, cleaned_z)
+            self.assertFalse(ztrap.exists())
+
     def test_doctor_defensive_probes(self):
         """验证 doctor 巡检在缺失指纹或发现僵尸文件时触发警告与失败。"""
         from hippo_memory import doctor
@@ -202,3 +230,28 @@ class TestHostContracts(unittest.TestCase):
 
             # 验证僵尸文件已被自动清理
             self.assertFalse(trap.exists())
+
+    def test_run_init_cleans_zombies_even_if_host_directory_missing(self):
+        """验证即使用户未安装某宿主（标准目录不存在），其历史残留僵尸文件仍被彻底清理。"""
+        from hippo_memory.init import run_init
+        from hippo_memory.hosts import get_contract
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_home = Path(tmp)
+            agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
+
+            # 标准目录不存在！
+            self.assertFalse(agy_contract.canonical_config_path.parent.exists())
+
+            # 但历史遗留陷阱存在
+            trap = agy_contract.legacy_trap_paths[0]
+            trap.parent.mkdir(parents=True, exist_ok=True)
+            trap.write_text(json.dumps({"hippo-memory-distill": {}}), encoding="utf-8")
+
+            with patch("pathlib.Path.home", return_value=tmp_home), \
+                 patch("hippo_memory.router.detect_git_project", return_value=("test_proj", tmp_home)):
+                run_init()
+
+            # 陷阱文件已被清理，且不会凭空创建虚假的合法目录
+            self.assertFalse(trap.exists())
+            self.assertFalse(agy_contract.canonical_config_path.exists())

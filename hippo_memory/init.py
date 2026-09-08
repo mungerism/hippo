@@ -269,6 +269,14 @@ def upsert_pi_extension(target_path: Optional[Path] = None) -> str:
     return "created" if is_new else "updated"
 
 
+HOOK_INSTALLERS = {
+    HostType.CODEX: upsert_codex_hooks,
+    HostType.ZCODE: upsert_zcode_hooks,
+    HostType.ANTIGRAVITY: upsert_antigravity_hooks,
+    HostType.PI: upsert_pi_extension,
+}
+
+
 def run_init(
     skip_global: bool = False,
     skip_project: bool = False,
@@ -297,26 +305,16 @@ def run_init(
     # 2. Host hooks auto-wiring driven by Host Contract Matrix
     if configure_hooks:
         for contract in get_host_contracts():
-            if not contract.is_host_environment_present():
-                continue
-
-            target = contract.canonical_config_path
-            status = "unchanged"
-
-            if contract.host == HostType.CODEX:
-                status = upsert_codex_hooks(target)
-            elif contract.host == HostType.ZCODE:
-                status = upsert_zcode_hooks(target)
-            elif contract.host == HostType.ANTIGRAVITY:
-                status = upsert_antigravity_hooks(target)
-            elif contract.host == HostType.PI:
-                status = upsert_pi_extension(target)
-
-            results.append((target, status))
-
-            # 安全清理反向捕获的废弃历史路径残留 (Zombie Traps)
+            # (a) 无条件安全清理反向捕获的废弃历史路径残留 (Zombie Traps)
             cleaned = contract.clean_zombies()
             for cz in cleaned:
                 logger.info(f"[{contract.display_name}] 已安全清理废弃历史残留配置: {cz}")
+
+            # (b) 若宿主环境就绪，执行权威标准路径挂载
+            if contract.is_host_environment_present():
+                target = contract.canonical_config_path
+                installer = HOOK_INSTALLERS.get(contract.host)
+                status = installer(target) if installer else "unchanged"
+                results.append((target, status))
 
     return results
