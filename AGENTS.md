@@ -20,6 +20,10 @@
    - 依赖管理：全量使用 `uv`，禁止引入冗余的重型依赖。
    - 模型选型：优先兼容免费/高性价比模型（如 Google Gemini 免费层），内置优雅降级机制（429/503 自动容灾）。
 
+## 📝 文档规范 (Documentation)
+
+- **项目文档归档**：本项目的架构设计、技术决策与评估报告等长效文档统一存放至 Obsidian 对应的项目目录下（`Obsidian/02-PROJECTS/hippo/`），使用 `obsidian-cli` 管理，不在代码仓库内零散堆放文档。
+
 <!-- hippo:memory:start -->
 ## 记忆检索约定 (Hippo)
 
