@@ -62,12 +62,24 @@ def search(
     scope: str = typer.Option("all", "--scope", "-s", help="检索范围: all | global | project"),
     limit: int = typer.Option(5, "--limit", "-n", help="返回的最大条数"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
+    threshold: Optional[float] = typer.Option(
+        None,
+        "--threshold",
+        "-t",
+        help="Mem0 语义初筛阈值 (0.0~1.0，留空则使用配置默认值)",
+    ),
 ):
     """在记忆中枢中进行语义与多信号混合检索。"""
     engine = _get_engine()
     with console.status(f"[bold cyan]正在检索与 '{query}' 相关的记忆 (Scope: {scope})...[/bold cyan]"):
         try:
-            results = engine.search(query=query, scope=scope, project_id=project, limit=limit)
+            results = engine.search(
+                query=query,
+                scope=scope,
+                project_id=project,
+                limit=limit,
+                threshold=threshold,
+            )
             if not results:
                 console.print(f"[yellow]未找到与 '{query}' 相关的记忆。[/yellow]")
                 return
@@ -76,15 +88,19 @@ def search(
             table.add_column("#", style="dim", width=4)
             table.add_column("作用域 (Scope)", style="cyan", width=18)
             table.add_column("记忆事实 (Memory Fact)", style="bold")
+            table.add_column("相关度", style="green", width=8)
             table.add_column("Memory ID", style="dim", width=36)
 
             for idx, item in enumerate(results, 1):
                 agent_id = item.get("agent_id", "global")
                 tag = "Global" if agent_id == "global" else f"Project:{agent_id}"
+                score = item.get("score")
+                score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "-"
                 table.add_row(
                     str(idx),
                     tag,
                     item.get("memory", ""),
+                    score_str,
                     item.get("id", ""),
                 )
 

@@ -607,7 +607,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "google-genai", specifier = ">=2.22.0" },
     { name = "mcp", specifier = ">=1.0.0" },
-    { name = "mem0ai", specifier = ">=0.1.40" },
+    { name = "mem0ai", specifier = ">=2.0.20" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "qdrant-client", specifier = ">=1.19.0" },

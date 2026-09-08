@@ -92,6 +92,27 @@ class HippoConfig:
         else:
             self.provider = configured_provider
 
+        # Relevance gate & retrieval thresholds
+        self.semantic_threshold = float(os.getenv("HIPPO_SEMANTIC_THRESHOLD", "0.1"))
+        self.final_threshold = float(os.getenv("HIPPO_FINAL_THRESHOLD", "0.32"))
+        self.dense_only_threshold = float(os.getenv("HIPPO_DENSE_ONLY_THRESHOLD", "0.62"))
+        self.relative_threshold_ratio = float(os.getenv("HIPPO_RELATIVE_RATIO", "0.50"))
+        self.max_injected = int(os.getenv("HIPPO_MAX_INJECTED", "3"))
+        self.gate_enabled = os.getenv("HIPPO_GATE_ENABLED", "1").lower() in ("1", "true", "yes")
+
+        from hippo_memory.gate import SearchGateConfig
+
+        self.gate_config = SearchGateConfig(
+            final_threshold=self.final_threshold,
+            dense_only_threshold=self.dense_only_threshold,
+            relative_threshold_ratio=self.relative_threshold_ratio,
+            enabled=self.gate_enabled,
+        )
+
+    def get_gate_config(self):
+        """Get the pre-constructed SearchGateConfig object."""
+        return self.gate_config
+
     def get_mem0_config(self) -> Dict[str, Any]:
         """Generate Mem0 configuration dictionary based on active provider."""
         if self.provider == "gemini":
