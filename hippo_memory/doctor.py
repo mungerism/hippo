@@ -127,7 +127,7 @@ def collect_checks() -> List[dict]:
         ("Codex (Stop/SessionEnd)", Path.home() / ".codex" / "hooks.json", ["hook capture --host codex"]),
         ("ZCode (Stop)", Path.home() / ".zcode" / "cli" / "config.json", ["hook capture --host zcode"]),
         ("Pi (agent_settled/session_shutdown)", pi_ext, ["agent_settled", "session_shutdown"]),
-        ("Antigravity (Stop)", Path.home() / ".gemini" / "antigravity-cli" / "hooks.json", ["hook capture --host antigravity"]),
+        ("Antigravity (Stop)", Path.home() / ".gemini" / "config" / "hooks.json", ["hook capture --host antigravity"]),
     ]
     for name, path, needles in hook_checks:
         ok = False

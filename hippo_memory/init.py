@@ -204,8 +204,8 @@ def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
 
 
 def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
-    """Idempotently configure Stop hook in ~/.gemini/antigravity-cli/hooks.json."""
-    target = path or (Path.home() / ".gemini" / "antigravity-cli" / "hooks.json")
+    """Idempotently configure Stop hook in ~/.gemini/config/hooks.json."""
+    target = path or (Path.home() / ".gemini" / "config" / "hooks.json")
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
@@ -301,9 +301,18 @@ def run_init(
         if zcode_cfg.parent.exists():
             results.append((zcode_cfg, upsert_zcode_hooks(zcode_cfg)))
 
-        agy_hooks = Path.home() / ".gemini" / "antigravity-cli" / "hooks.json"
+        agy_hooks = Path.home() / ".gemini" / "config" / "hooks.json"
         if agy_hooks.parent.exists():
             results.append((agy_hooks, upsert_antigravity_hooks(agy_hooks)))
+            # 清理历史遗留的错误路径配置文件 (若仅包含 hippo-memory-distill)
+            legacy_agy = Path.home() / ".gemini" / "antigravity-cli" / "hooks.json"
+            if legacy_agy.exists():
+                try:
+                    legacy_data, _ = _safe_load_json_config(legacy_agy, dict)
+                    if legacy_data and set(legacy_data.keys()) == {"hippo-memory-distill"}:
+                        legacy_agy.unlink()
+                except Exception:
+                    pass
 
         pi_dir = Path.home() / ".pi" / "agent" / "extensions"
         if pi_dir.parent.exists() or pi_dir.exists():
