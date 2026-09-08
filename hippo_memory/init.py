@@ -9,6 +9,9 @@ import logging
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from hippo_memory.hooks.models import HostType
+from hippo_memory.hosts import get_contract, get_host_contracts
+
 logger = logging.getLogger("hippo.init")
 
 SECTION_START = "<!-- hippo:memory:start -->"
@@ -98,7 +101,7 @@ def _safe_load_json_config(target: Path, default_factory: Callable[[], dict]) ->
 
 def upsert_codex_hooks(path: Optional[Path] = None) -> str:
     """Idempotently configure Stop and SessionEnd hooks in ~/.codex/hooks.json."""
-    target = path or (Path.home() / ".codex" / "hooks.json")
+    target = path or get_contract(HostType.CODEX).canonical_config_path
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
@@ -147,7 +150,7 @@ def upsert_codex_hooks(path: Optional[Path] = None) -> str:
 
 def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
     """Idempotently configure Stop hook in ~/.zcode/cli/config.json."""
-    target = path or (Path.home() / ".zcode" / "cli" / "config.json")
+    target = path or get_contract(HostType.ZCODE).canonical_config_path
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
@@ -205,7 +208,7 @@ def upsert_zcode_hooks(path: Optional[Path] = None) -> str:
 
 def upsert_antigravity_hooks(path: Optional[Path] = None) -> str:
     """Idempotently configure Stop hook in ~/.gemini/config/hooks.json."""
-    target = path or (Path.home() / ".gemini" / "config" / "hooks.json")
+    target = path or get_contract(HostType.ANTIGRAVITY).canonical_config_path
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
@@ -254,7 +257,7 @@ def upsert_pi_extension(target_path: Optional[Path] = None) -> str:
     if not src:
         return "unchanged"
 
-    target = target_path or (Path.home() / ".pi" / "agent" / "extensions" / "hippo-memory.ts")
+    target = target_path or get_contract(HostType.PI).canonical_config_path
     target.parent.mkdir(parents=True, exist_ok=True)
     is_new = not target.exists()
 
@@ -291,32 +294,29 @@ def run_init(
         proj_agents = (git_root or Path.cwd()) / "AGENTS.md"
         results.append((proj_agents, upsert_hippo_section(proj_agents)))
 
-    # 2. Host hooks auto-wiring
+    # 2. Host hooks auto-wiring driven by Host Contract Matrix
     if configure_hooks:
-        codex_hooks = Path.home() / ".codex" / "hooks.json"
-        if codex_hooks.parent.exists():
-            results.append((codex_hooks, upsert_codex_hooks(codex_hooks)))
+        for contract in get_host_contracts():
+            if not contract.is_host_environment_present():
+                continue
 
-        zcode_cfg = Path.home() / ".zcode" / "cli" / "config.json"
-        if zcode_cfg.parent.exists():
-            results.append((zcode_cfg, upsert_zcode_hooks(zcode_cfg)))
+            target = contract.canonical_config_path
+            status = "unchanged"
 
-        agy_hooks = Path.home() / ".gemini" / "config" / "hooks.json"
-        if agy_hooks.parent.exists():
-            results.append((agy_hooks, upsert_antigravity_hooks(agy_hooks)))
-            # 清理历史遗留的错误路径配置文件 (若仅包含 hippo-memory-distill)
-            legacy_agy = Path.home() / ".gemini" / "antigravity-cli" / "hooks.json"
-            if legacy_agy.exists():
-                try:
-                    legacy_data, _ = _safe_load_json_config(legacy_agy, dict)
-                    if legacy_data and set(legacy_data.keys()) == {"hippo-memory-distill"}:
-                        legacy_agy.unlink()
-                except Exception:
-                    pass
+            if contract.host == HostType.CODEX:
+                status = upsert_codex_hooks(target)
+            elif contract.host == HostType.ZCODE:
+                status = upsert_zcode_hooks(target)
+            elif contract.host == HostType.ANTIGRAVITY:
+                status = upsert_antigravity_hooks(target)
+            elif contract.host == HostType.PI:
+                status = upsert_pi_extension(target)
 
-        pi_dir = Path.home() / ".pi" / "agent" / "extensions"
-        if pi_dir.parent.exists() or pi_dir.exists():
-            pi_target = pi_dir / "hippo-memory.ts"
-            results.append((pi_target, upsert_pi_extension(pi_target)))
+            results.append((target, status))
+
+            # 安全清理反向捕获的废弃历史路径残留 (Zombie Traps)
+            cleaned = contract.clean_zombies()
+            for cz in cleaned:
+                logger.info(f"[{contract.display_name}] 已安全清理废弃历史残留配置: {cz}")
 
     return results
