@@ -198,12 +198,20 @@ def search_memories(
     Returns:
         Markdown-formatted list of matching memories.
     """
+    if limit <= 0:
+        return (
+            f"未找到与 '{query}' 相关的记忆事实 (Scope: {scope})。"
+            "可尝试换用更具体的关键词，或放宽 scope（如 'global' 查跨项目个人偏好）。"
+        )
+
     try:
         engine = get_engine()
+        max_injected = getattr(engine.config, "max_injected", 3)
+        effective_limit = min(limit, max_injected)
         results = engine.search(
             query=query,
             filters=filters,
-            limit=limit,
+            limit=effective_limit,
             user_id=user_id,
             agent_id=agent_id,
             scope=scope,
