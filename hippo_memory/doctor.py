@@ -119,25 +119,40 @@ def collect_checks() -> List[dict]:
             ok, detail = False, f"读取失败: {e}"
         add("客户端", name, ok, f"{detail} ({path})")
 
-    pi_ext = Path.home() / ".pi" / "agent" / "extensions" / "hippo-memory.ts"
-    add("客户端", "pi 扩展", pi_ext.exists(), str(pi_ext))
+    from hippo_memory.hooks.models import HostType
+    from hippo_memory.hosts import get_contract, get_host_contracts
 
-    # --- 生命周期 Hook 挂载 ---
-    hook_checks = [
-        ("Codex (Stop/SessionEnd)", Path.home() / ".codex" / "hooks.json", ["hook capture --host codex"]),
-        ("ZCode (Stop)", Path.home() / ".zcode" / "cli" / "config.json", ["hook capture --host zcode"]),
-        ("Pi (agent_settled/session_shutdown)", pi_ext, ["agent_settled", "session_shutdown"]),
-        ("Antigravity (Stop)", Path.home() / ".gemini" / "config" / "hooks.json", ["hook capture --host antigravity"]),
-    ]
-    for name, path, needles in hook_checks:
-        ok = False
-        if path.exists():
-            try:
-                content = path.read_text(encoding="utf-8")
-                ok = all(n in content for n in needles)
-            except OSError:
-                pass
-        add("Hook 挂载", name, ok, "已挂载" if ok else "未挂载 (可运行 hippo init)")
+    home = Path.home()
+    pi_contract = get_contract(HostType.PI, home=home)
+    add("客户端", "pi 扩展", pi_contract.canonical_config_path.exists(), str(pi_contract.canonical_config_path))
+
+    # --- 生命周期 Hook 挂载与防呆巡检 ---
+    for contract in get_host_contracts(home=home):
+        event_names = "/".join(e.value for e in contract.events)
+        name = f"{contract.display_name} ({event_names})"
+
+        if contract.is_hook_installed():
+            # 1. 正向同级指纹交叉核验 (Sibling Verification)
+            if contract.verify_sibling_fingerprints():
+                add("Hook 挂载", name, True, "已挂载")
+            else:
+                add(
+                    "Hook 挂载",
+                    name,
+                    False,
+                    "[WARN] 配置文件存在但同目录缺少宿主核心指纹，疑似挂载至非标准目录",
+                )
+        else:
+            add("Hook 挂载", name, False, "未挂载 (可运行 hippo init)")
+
+        # 2. 反向僵尸文件探测 (Zombie Configuration Probe)
+        for zombie in contract.detect_zombies():
+            add(
+                "Hook 挂载",
+                f"{contract.display_name} 遗留陷阱",
+                False,
+                f"[WARN] 检测到废弃历史路径残留配置 ({zombie})，宿主不会读取，请运行 hippo init 清理",
+            )
 
     # --- Spool 队列巡检 ---
     try:
