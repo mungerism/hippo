@@ -206,7 +206,7 @@ hippo init
 
 它会幂等地执行两部分配置（重复执行无副作用）：
 1. **记忆检索约定**：写入 `~/.codex/AGENTS.md`（Codex 全局指令）与当前 Git 根目录的 `AGENTS.md`（ZCode、antigravity、pi 等按工作区读取），可用 `--skip-global` / `--skip-project` 控制；
-2. **生命周期 Hook 与插件**：自动在 Codex (`~/.codex/hooks.json`)、ZCode (`~/.zcode/cli/config.json`)、Antigravity (`~/.gemini/antigravity-cli/hooks.json`) 挂载 Stop / SessionEnd 异步蒸馏切面，并安装/更新 pi 扩展；可用 `--no-hooks` 跳过。
+2. **生命周期 Hook 与插件**：自动在 Codex (`~/.codex/hooks.json`)、ZCode (`~/.zcode/cli/config.json`)、Antigravity (`~/.gemini/config/hooks.json`) 挂载 Stop / SessionEnd 异步蒸馏切面，并安装/更新 pi 扩展；可用 `--no-hooks` 跳过。
 
 ---
 
