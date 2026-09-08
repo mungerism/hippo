@@ -132,7 +132,7 @@ class TestHostContracts(unittest.TestCase):
             self.assertNotIn("hippo-memory-distill", remaining_data)
             self.assertIn("user_custom_tool", remaining_data)
 
-            # 4. 验证 ZCode 嵌套结构 (hooks.events.Stop) 能够被正确清洗
+            # 4. 验证 ZCode 嵌套结构中，非事件设置 (如 enabled: true) 在清理 Hippo 后完好保留而不被误删
             zcode_contract = get_contract(HostType.ZCODE, home=tmp_home)
             ztrap = zcode_contract.legacy_trap_paths[0]
             ztrap.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +155,23 @@ class TestHostContracts(unittest.TestCase):
             self.assertIn(ztrap, zcode_contract.detect_zombies())
             cleaned_z = zcode_contract.clean_zombies()
             self.assertIn(ztrap, cleaned_z)
-            self.assertFalse(ztrap.exists())
+            self.assertTrue(ztrap.exists())  # 关键断言：包含 enabled 设置，文件严禁被删除！
+            z_data = json.loads(ztrap.read_text(encoding="utf-8"))
+            self.assertTrue(z_data["hooks"]["enabled"])
+            self.assertEqual(z_data["hooks"]["events"], {})
+
+            # 5. 验证纯净且无任何非事件设置的专用 hooks.json 陷阱会被彻底 unlink
+            codex_contract = get_contract(HostType.CODEX, home=tmp_home)
+            pure_trap = codex_contract.legacy_trap_paths[0]
+            pure_trap.parent.mkdir(parents=True, exist_ok=True)
+            pure_trap.write_text(
+                json.dumps({"hooks": {"Stop": [{"command": "hook capture --host codex"}]}}),
+                encoding="utf-8",
+            )
+            self.assertIn(pure_trap, codex_contract.detect_zombies())
+            cleaned_pure = codex_contract.clean_zombies()
+            self.assertIn(pure_trap, cleaned_pure)
+            self.assertFalse(pure_trap.exists())
 
     def test_doctor_defensive_probes(self):
         """验证 doctor 巡检在缺失指纹或发现僵尸文件时触发警告与失败。"""

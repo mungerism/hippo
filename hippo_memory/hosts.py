@@ -166,11 +166,27 @@ class HostContract:
 
                         if changed:
                             cleaned.append(trap)
-                            has_remaining = any(bool(v) for v in events_dict.values() if isinstance(v, list))
-                            non_hook_keys = set(data.keys()) - {"hooks"}
-                            if not has_remaining and not non_hook_keys:
+                            # 1. 检查 events 内部是否还有其他宿主事件
+                            has_remaining_events = any(bool(v) for v in events_dict.values() if isinstance(v, list))
+                            # 2. 检查 hooks 节点内是否有非事件元数据 (例如 enabled: true, logging 等)
+                            hooks_non_event_keys = {
+                                k for k, v in hooks_val.items()
+                                if k != "events" and v not in (None, {}, [])
+                            }
+                            # 3. 检查顶层其他配置键
+                            top_level_non_hook_keys = set(data.keys()) - {"hooks"}
+
+                            is_file_empty = (
+                                not has_remaining_events
+                                and not hooks_non_event_keys
+                                and not top_level_non_hook_keys
+                            )
+
+                            if is_file_empty:
                                 trap.unlink(missing_ok=True)
                             else:
+                                if isinstance(hooks_val.get("events"), dict) and not has_remaining_events:
+                                    hooks_val["events"] = {}
                                 trap.write_text(
                                     json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                                     encoding="utf-8",
