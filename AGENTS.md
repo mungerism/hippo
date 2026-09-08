@@ -1,28 +1,16 @@
 # Hippo Agent Guidelines
 
-## 🌟 核心架构原则 (Core Tenet)
+## 🌟 核心原则 (Core Tenet)
 
-> **Hippo 只是对 Mem0 的轻量工程封装，绝不重新发明轮子。**
+> **Hippo 是 Mem0 的轻量工程封装：对齐官方规范，补齐开源短板。**
+> - 原生支持的（数据结构、基础存储、基础检索），100% 保持对齐，不重复造轮子；
+> - 开源版缺失或不完善的（如检索防污染门禁、瞬态短语清洗、多端自动路由），在 Hippo 网关层做必要补齐。
 
-在修改、扩展或维护本项目代码时，所有 AI 智能体必须严格遵守以下原则：
+## 📋 开发与接口规范
 
-1. **对标 Mem0 规范与 Agent 安全子集**：
-   - 底层 HippoEngine 与 Mem0 官方参数类型、数据结构与交互范式保持 100% 对齐，严禁自行发明非标 API 或深重抽象层。
-   - Agent-facing MCP Server 暴露经过安全审计的极简子集：仅向智能体暴露核心的检索与沉淀工具 `search_memories` 与 `add_memory`（单句事实 `text`，限制 2000 字符，避免 Agent 序列化全量上下文引发 Token 爆炸；长对话记忆由异步 Hook 蒸馏接管）。记忆演化与冲突消解完全交由 Mem0 底层自动处理，严禁向 Agent 暴露冗余脆弱的 ID 级增删改工具。
-
-2. **Hippo 的唯一边界与职责**：
-   - **多端协议桥接**：为 antigravity、Codex、ZCode、Zed AI、Cursor、pi 等提供零配置的 MCP stdio 桥接与轻量插件。
-   - **自动化作用域路由**：根据执行目录自动探测 Git 根仓库，智能映射 `agent_id` 实现项目级记忆隔离，无需调用方手动传递。
-   - **本地服务高可靠**：单二进制 Qdrant Server (`127.0.0.1:6333`) 按需自愈拉起；`hippo service install` 可升级为 LaunchAgent 常驻保活（dev.hippo.qdrant），`hippo doctor` 提供一键巡检。
-   - **终端交互 CLI**：提供面向人类开发者的 `hippo` 极简命令行工具。
-
-3. **依赖与模型选型**：
-   - 依赖管理：全量使用 `uv`，禁止引入冗余的重型依赖。
-   - 模型选型：优先兼容免费/高性价比模型（如 Google Gemini 免费层），内置优雅降级机制（429/503 自动容灾）。
-
-## 📝 文档规范 (Documentation)
-
-- **项目文档归档**：本项目的架构设计、技术决策与评估报告等长效文档统一存放至 Obsidian 对应的项目目录下（`Obsidian/02-PROJECTS/hippo/`），使用 `obsidian-cli` 管理，不在代码仓库内零散堆放文档。
+1. **Agent 安全子集**：面向 Agent 的 MCP 仅暴露经过安全审计的极简工具（`add_memory` 事实文本限 2000 字符；`search_memories` 由部署端把控安全门禁与注入预算，绝不对 Agent 暴露底层微调参数）。
+2. **轻量依赖与服务**：全量使用 `uv`，禁止引入冗余重依赖（如重型本地 Cross-Encoder）；底层依赖单二进制 Qdrant (`127.0.0.1:6333`) 本地自愈与保活。
+3. **文档归档**：项目文档统一存放在 Obsidian 对应目录（`02-PROJECTS/hippo/`），使用 `obsidian-cli` 管理，不污染代码仓库。
 
 <!-- hippo:memory:start -->
 ## 记忆检索约定 (Hippo)

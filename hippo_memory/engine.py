@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -5,6 +6,8 @@ from typing import Any, Dict, List, Optional
 from mem0 import Memory
 from hippo_memory.config import HippoConfig
 from hippo_memory.router import ScopeRouter
+
+logger = logging.getLogger(__name__)
 
 
 def build_conversation(
@@ -162,8 +165,9 @@ class HippoEngine:
         filters: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
+        threshold: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Search relevant memories using multi-signal hybrid retrieval.
+        """Search relevant memories using multi-signal hybrid retrieval and relevance gating.
 
         Args:
             query: The search term or natural language question.
@@ -173,10 +177,14 @@ class HippoEngine:
             filters: Structured filters dictionary (official Mem0 argument).
             user_id: Optional user identifier.
             agent_id: Optional agent or project identifier.
+            threshold: Optional semantic relevance threshold passed to Mem0 (defaults to config value).
 
         Returns:
-            List of matching memory objects.
+            List of matching memory objects passing the relevance gate.
         """
+        if limit <= 0:
+            return []
+
         uid = user_id or self.config.user_id
         if filters:
             computed_filters = filters.copy()
@@ -191,12 +199,36 @@ class HippoEngine:
                 project_id=project_id,
             )
 
+        # Determine effective semantic threshold (preserve explicit 0.0)
+        effective_threshold = (
+            getattr(self.config, "semantic_threshold", 0.1)
+            if threshold is None
+            else threshold
+        )
+
+        candidate_pool_size = max(limit * 4, 20)
+
         results = self.memory.search(
             query=query,
             filters=computed_filters,
-            top_k=limit,
+            top_k=candidate_pool_size,
+            threshold=effective_threshold,
+            explain=True,
         )
-        return results if isinstance(results, list) else results.get("results", [])
+        raw_list = results if isinstance(results, list) else results.get("results", [])
+
+        from hippo_memory.gate import filter_search_results
+
+        gate_cfg = (
+            self.config.get_gate_config()
+            if hasattr(self.config, "get_gate_config")
+            else None
+        )
+        try:
+            return filter_search_results(raw_list, config=gate_cfg, limit=limit)
+        except Exception as e:
+            logger.error("Error applying relevance gate to search results: %s", e)
+            return []
 
     def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a single memory by its ID."""
