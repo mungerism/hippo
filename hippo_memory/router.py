@@ -136,3 +136,9 @@ class ScopeRouter:
                     {"agent_id": resolved_proj},
                 ],
             }
+
+    def get_active_scope_name(self, project_id: Optional[str] = None) -> str:
+        """Resolve and return active scope descriptor for telemetry and diagnostics."""
+        resolved = self.resolve_project(project_id)
+        return resolved or "global"
+
