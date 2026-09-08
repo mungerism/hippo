@@ -51,6 +51,12 @@ def ensure_qdrant_server():
             time.sleep(1.0)
 
 
+DEFAULT_CUSTOM_INSTRUCTIONS = (
+    "所有提取的记忆事实必须使用简体中文输出。"
+    "保留关键技术专有名词（如编程语言、框架、工具名、API、配置项等）的原名，生成清晰、独立、精炼的中文事实陈述句。"
+)
+
+
 class HippoConfig:
     """Hippo unified memory configuration."""
 
@@ -122,6 +128,7 @@ class HippoConfig:
                 },
                 "history_db_path": self.history_db_path,
                 "version": "v1.1",
+                "custom_instructions": DEFAULT_CUSTOM_INSTRUCTIONS,
             }
 
         elif self.provider == "openai":
@@ -158,6 +165,7 @@ class HippoConfig:
                 },
                 "history_db_path": self.history_db_path,
                 "version": "v1.1",
+                "custom_instructions": DEFAULT_CUSTOM_INSTRUCTIONS,
             }
 
         else:
