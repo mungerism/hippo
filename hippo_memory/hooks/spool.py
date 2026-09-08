@@ -25,11 +25,61 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Transient short phrases for Delta Skip filtering (case-insensitive)
+# Pure transient short phrases for Delta Skip filtering (normalized, case-insensitive)
+TRANSIENT_PHRASES: set[str] = {
+    # 确认答复类
+    "好的",
+    "收到",
+    "明白了",
+    "稍等",
+    "正在处理",
+    "继续",
+    "ok",
+    "okay",
+    "sure",
+    "got it",
+    "done",
+    "working on it",
+    # 临时探测类
+    "运行测试",
+    "跑测试",
+    "跑下测试",
+    "查看代码",
+    "检查文件",
+    "查看状态",
+    "running tests",
+    "checking files",
+    "analyzing codebase",
+    "fetching docs",
+}
+
+# Backward compatibility alias
 TRANSIENT_PATTERNS = [
     re.compile(r"^(好的|收到|明白了|稍等|正在处理|继续|ok|okay|sure|got it|working on it|done)[.。!！~]?$", re.IGNORECASE),
     re.compile(r"^(running tests|checking files|analyzing codebase|fetching docs|运行测试|跑测试|跑下测试|查看代码|检查文件|查看状态)[.。!！~]?$", re.IGNORECASE),
 ]
+
+_TRANSIENT_WRAPPERS = "*_`\"'“”‘’「」『』()（）[]【】#~～ \t\r\n"
+
+
+def clean_transient_text(text: str) -> str:
+    """Normalize and clean transient interaction text.
+
+    Strips Markdown wrapping characters (e.g. *, _, `), quotes, and brackets from ends,
+    and strips trailing non-alphanumeric symbols (continuous punctuation, ellipses,
+    emojis, emoticons, and spaces) to yield the pure core phrase.
+    """
+    if not text:
+        return ""
+    s = text.strip()
+    prev = None
+    while prev != s:
+        prev = s
+        s = s.strip(_TRANSIENT_WRAPPERS)
+        while s and not s[-1].isalnum():
+            s = s[:-1]
+    return s.strip()
+
 
 
 def is_turns_superset(newer_turns: List[Dict[str, Any]], older_turns: List[Dict[str, Any]]) -> bool:
@@ -399,18 +449,19 @@ class SpoolWorker:
         # If user provided a substantive goal/decision (not just transient ping-pong/empty),
         # never skip; leave memory extraction and deduplication to Mem0.
         if user_goal:
-            is_user_transient = len(user_goal) < 40 and any(pat.search(user_goal) for pat in TRANSIENT_PATTERNS)
+            cleaned_user = clean_transient_text(user_goal).lower()
+            is_user_transient = len(user_goal) < 40 and (cleaned_user in TRANSIENT_PHRASES)
             if not is_user_transient:
                 return False
 
         if not reply:
             return True
-        # Less than 40 chars and matches transient patterns
-        if len(reply) < 40:
-            for pat in TRANSIENT_PATTERNS:
-                if pat.search(reply):
-                    return True
-        return False
+
+        cleaned_reply = clean_transient_text(reply).lower()
+        if not cleaned_reply:
+            return True
+
+        return len(reply) < 40 and cleaned_reply in TRANSIENT_PHRASES
 
     def process_one_job(self, payload: CapturedPayload) -> bool:
         """Execute distillation for a single claimed job. Returns True if handled."""

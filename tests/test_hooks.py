@@ -15,7 +15,7 @@ from hippo_memory.hooks.models import (
     calculate_semantic_cursor,
     sanitize_text,
 )
-from hippo_memory.hooks.spool import SpoolStorage, SpoolWorker
+from hippo_memory.hooks.spool import SpoolStorage, SpoolWorker, clean_transient_text
 from hippo_memory.hooks.adapters import get_adapter
 from hippo_memory.hooks.adapters.codex import CodexAdapter
 from hippo_memory.hooks.adapters.pi import PiAdapter
@@ -231,6 +231,173 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(st.get("state"), JobState.SKIPPED.value)
         self.assertIn("Delta skip", st.get("skip_reason", ""))
         mock_engine.add.assert_not_called()
+
+    def test_delta_skip_transient_end_to_end_normalized(self):
+        """端到端验证包含 Markdown 包裹与 Emoji 的瞬态交互在 drain 时被正确跳过。"""
+        mock_engine = MagicMock()
+        worker = SpoolWorker(storage=self.storage, engine=mock_engine)
+
+        j = CapturedPayload(
+            job_id="job-transient-normalized",
+            host="antigravity",
+            event="Stop",
+            session_id="sess-norm",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "运行测试"},
+                {"role": "assistant", "content": "**`好的 👍`**"},
+            ],
+            last_user_goal="运行测试",
+            last_assistant_final="**`好的 👍`**",
+            touched_files=[],
+        )
+        self.storage.enqueue(j)
+        worker.drain()
+
+        st = self.storage.load_state(j.job_id)
+        self.assertEqual(st.get("state"), JobState.SKIPPED.value)
+        self.assertIn("Delta skip", st.get("skip_reason", ""))
+        mock_engine.add.assert_not_called()
+
+    def test_clean_transient_text(self):
+        """验证 clean_transient_text 归一化清洗：剥离全角标点、连续省略号、Emoji、Markdown 包裹，并保留实质内容。"""
+        # 1. 全角波浪号与问号
+        self.assertEqual(clean_transient_text("好的～"), "好的")
+        self.assertEqual(clean_transient_text("继续？"), "继续")
+
+        # 2. 连续英文点与中文省略号、感叹号
+        self.assertEqual(clean_transient_text("正在处理..."), "正在处理")
+        self.assertEqual(clean_transient_text("好的……"), "好的")
+        self.assertEqual(clean_transient_text("好的！！"), "好的")
+
+        # 3. 常见 Emoji 表情与颜文字
+        self.assertEqual(clean_transient_text("好的 👍"), "好的")
+        self.assertEqual(clean_transient_text("收到 😊"), "收到")
+        self.assertEqual(clean_transient_text("ok :)"), "ok")
+
+        # 4. Markdown 格式包裹与引号
+        self.assertEqual(clean_transient_text("**好的**"), "好的")
+        self.assertEqual(clean_transient_text("`done`"), "done")
+        self.assertEqual(clean_transient_text("「收到」"), "收到")
+        self.assertEqual(clean_transient_text("“正在处理...”"), "正在处理")
+        self.assertEqual(clean_transient_text("**`好的 👍`**"), "好的")
+
+        # 5. 实质性决策保护（内部标点与语句完整保留）
+        self.assertEqual(clean_transient_text("好的，我们决定采用 Redis 存储"), "好的，我们决定采用 Redis 存储")
+        self.assertEqual(clean_transient_text("以后所有新脚本都要使用 Python 3.12 并配置 uv"), "以后所有新脚本都要使用 Python 3.12 并配置 uv")
+        self.assertEqual(clean_transient_text(""), "")
+        self.assertEqual(clean_transient_text("   "), "")
+
+    def test_delta_skip_normalized_variations(self):
+        """验证 is_delta_transient 对全角符号、省略号、Emoji、Markdown 包裹等的归一化跳过及底线保护。"""
+        mock_engine = MagicMock()
+        worker = SpoolWorker(storage=self.storage, engine=mock_engine)
+
+        # 1. 瞬态交互应被成功识别并跳过 (is_delta_transient == True)
+        transient_pairs = [
+            ("运行测试", "好的～"),
+            ("继续？", "好的……"),
+            ("checking files", "正在处理..."),
+            ("跑下测试", "好的！！"),
+            ("查看状态", "好的 👍"),
+            ("ok", "收到 😊"),
+            ("稍等", "ok :)"),
+            ("查看代码", "**好的**"),
+            ("analyzing codebase", "`done`"),
+            ("运行测试", "「收到」"),
+            ("fetching docs", "“正在处理...”"),
+            ("运行测试", "**`好的 👍`**"),
+        ]
+        for idx, (user_msg, assistant_msg) in enumerate(transient_pairs):
+            payload = CapturedPayload(
+                job_id=f"transient-{idx}",
+                host="codex",
+                event="Stop",
+                session_id=f"sess-transient-{idx}",
+                project_dir="/tmp/repo",
+                turns=[
+                    {"role": "user", "content": user_msg},
+                    {"role": "assistant", "content": assistant_msg},
+                ],
+                last_user_goal=user_msg,
+                last_assistant_final=assistant_msg,
+                touched_files=[],
+            )
+            self.assertTrue(
+                worker.is_delta_transient(payload),
+                f"未能识别瞬态交互: user={user_msg!r}, assistant={assistant_msg!r}",
+            )
+
+        # 2. 安全底线 1: 用户实质性决策绝对不能跳过 (即使 assistant 回复简短且带 Emoji)
+        substantive_payload = CapturedPayload(
+            job_id="substantive-1",
+            host="codex",
+            event="Stop",
+            session_id="sess-substantive-1",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "好的，我们决定采用 Redis 存储"},
+                {"role": "assistant", "content": "好的 👍"},
+            ],
+            last_user_goal="好的，我们决定采用 Redis 存储",
+            last_assistant_final="好的 👍",
+            touched_files=[],
+        )
+        self.assertFalse(worker.is_delta_transient(substantive_payload))
+
+        # 3. 安全底线 2: 助手实质性回复绝对不能跳过 (即使用户输入简短)
+        assistant_substantive_payload = CapturedPayload(
+            job_id="substantive-2",
+            host="codex",
+            event="Stop",
+            session_id="sess-substantive-2",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "运行测试"},
+                {"role": "assistant", "content": "测试未通过，发现内存泄漏严重"},
+            ],
+            last_user_goal="运行测试",
+            last_assistant_final="测试未通过，发现内存泄漏严重",
+            touched_files=[],
+        )
+        self.assertFalse(worker.is_delta_transient(assistant_substantive_payload))
+
+        # 4. 安全底线 3: 有代码变动 (touched_files 非空) 100% 绝不跳过
+        code_touch_payload = CapturedPayload(
+            job_id="code-touch-1",
+            host="codex",
+            event="Stop",
+            session_id="sess-code-touch-1",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "运行测试"},
+                {"role": "assistant", "content": "好的 👍"},
+            ],
+            last_user_goal="运行测试",
+            last_assistant_final="好的 👍",
+            touched_files=["hippo_memory/server.py"],
+        )
+        self.assertFalse(worker.is_delta_transient(code_touch_payload))
+
+        # 5. 安全底线 4: 用户仅使用语义 Emoji 表达评价或决策 (如 "👎" / "❌")，绝不能被当作瞬态跳过
+        emoji_decision_payload = CapturedPayload(
+            job_id="substantive-emoji",
+            host="codex",
+            event="Stop",
+            session_id="sess-substantive-emoji",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "👎"},
+                {"role": "assistant", "content": "收到"},
+            ],
+            last_user_goal="👎",
+            last_assistant_final="收到",
+            touched_files=[],
+        )
+        self.assertFalse(
+            worker.is_delta_transient(emoji_decision_payload),
+            "用户仅输入 Emoji 表达评价/拒绝时，绝不能被 Delta Skip 静默跳过",
+        )
 
     def test_lease_recovery_and_dead_letter(self):
         j = CapturedPayload(
