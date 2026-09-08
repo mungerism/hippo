@@ -1,0 +1,28 @@
+name: PR Lens
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write        # 允许将渲染后的 SVG 图片提交到孤立的 pr-lens 分支
+  pull-requests: write   # 允许在 PR 评论区自动发表/更新图表评论
+
+concurrency:             # 避免同一个 PR 多次 push 造成评论竞争
+  group: pr-lens-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lens:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 必须拉取完整历史，用于计算 base 和 head 之间的 commit diff
+
+      - name: Run PR Lens
+        uses: coldteadotai/pr-lens/packages/action@v0
+        with:
+          api-key: ${{ secrets.GEMINI_API_KEY }}
+          provider: gemini

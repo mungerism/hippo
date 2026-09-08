@@ -1,0 +1,8 @@
+schemaVersion: 0.1.1
+map:
+  exclude:
+    - "tests/**"
+    - "**/*.test.*"
+    - "snapshots/**"
+    - "uv.lock"
+    - "hippo.egg-info/**"
