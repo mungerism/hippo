@@ -157,8 +157,8 @@ def search_memories(
         Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
     ] = None,
     limit: Annotated[
-        int, Field(description="Maximum number of results to return (default 5).")
-    ] = 5,
+        int, Field(description="Maximum number of results to return (default 3).")
+    ] = 3,
     user_id: Annotated[
         Optional[str], Field(description="Optional user identifier.")
     ] = None,

@@ -157,9 +157,36 @@ class TestSearchGate(unittest.TestCase):
                 "score": "0.8",
                 "score_details": {"semantic_score": "0.8", "final_score": "0.8"},
             },
+            # 缺失 bm25_score 字段
+            {
+                "id": "b8",
+                "memory": "m",
+                "score": 0.8,
+                "score_details": {"semantic_score": 0.8, "final_score": 0.8, "entity_boost": 0.0},
+            },
+            # 缺失 entity_boost 字段
+            {
+                "id": "b9",
+                "memory": "m",
+                "score": 0.8,
+                "score_details": {"semantic_score": 0.8, "final_score": 0.8, "bm25_score": 0.0},
+            },
         ]
         res = filter_search_results(bad_cases, config=self.default_config, limit=5)
         self.assertEqual(res, [])
+
+    def test_relative_gate_zero_threshold_and_zero_score_candidate(self):
+        """当阈值设为 0.0 时，得分 0.0 的合法候选不应被相对门禁误杀。"""
+        zero_config = SearchGateConfig(
+            final_threshold=0.0,
+            dense_only_threshold=0.0,
+            relative_threshold_ratio=0.50,
+            enabled=True,
+        )
+        cand_zero = self._make_candidate("z1", "零分事实", 0.0, 0.0, bm25_score=0.0, entity_boost=0.0)
+        res = filter_search_results([cand_zero], config=zero_config, limit=5)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["id"], "z1")
 
     def test_boundary_equality_conditions(self):
         """临界值相等判定：== 阈值时均通过。"""
@@ -367,6 +394,9 @@ class TestMcpAndCliContracts(unittest.TestCase):
         forbidden = {"threshold", "explain", "gate_config", "final_threshold", "dense_only_threshold"}
         for f in forbidden:
             self.assertNotIn(f, properties, f"MCP schema 不应暴露内部参数: {f}")
+
+        # 契约核验：向 Agent 暴露的默认 limit 必须与实际生效上限 (3) 一致
+        self.assertEqual(properties.get("limit", {}).get("default"), 3)
 
     def test_mcp_search_memories_clamps_limit_and_handles_zero(self):
         """MCP 必须将 Agent 传入的超大 limit 钳制到 max_injected，且 limit<=0 时不调用 engine。"""

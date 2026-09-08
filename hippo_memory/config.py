@@ -100,16 +100,18 @@ class HippoConfig:
         self.max_injected = int(os.getenv("HIPPO_MAX_INJECTED", "3"))
         self.gate_enabled = os.getenv("HIPPO_GATE_ENABLED", "1").lower() in ("1", "true", "yes")
 
-    def get_gate_config(self):
-        """Build SearchGateConfig from current configuration settings."""
         from hippo_memory.gate import SearchGateConfig
 
-        return SearchGateConfig(
+        self.gate_config = SearchGateConfig(
             final_threshold=self.final_threshold,
             dense_only_threshold=self.dense_only_threshold,
             relative_threshold_ratio=self.relative_threshold_ratio,
             enabled=self.gate_enabled,
         )
+
+    def get_gate_config(self):
+        """Get the pre-constructed SearchGateConfig object."""
+        return self.gate_config
 
     def get_mem0_config(self) -> Dict[str, Any]:
         """Generate Mem0 configuration dictionary based on active provider."""
