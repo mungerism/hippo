@@ -379,6 +379,26 @@ class TestHookSpool(unittest.TestCase):
         )
         self.assertFalse(worker.is_delta_transient(code_touch_payload))
 
+        # 5. 安全底线 4: 用户仅使用语义 Emoji 表达评价或决策 (如 "👎" / "❌")，绝不能被当作瞬态跳过
+        emoji_decision_payload = CapturedPayload(
+            job_id="substantive-emoji",
+            host="codex",
+            event="Stop",
+            session_id="sess-substantive-emoji",
+            project_dir="/tmp/repo",
+            turns=[
+                {"role": "user", "content": "👎"},
+                {"role": "assistant", "content": "收到"},
+            ],
+            last_user_goal="👎",
+            last_assistant_final="收到",
+            touched_files=[],
+        )
+        self.assertFalse(
+            worker.is_delta_transient(emoji_decision_payload),
+            "用户仅输入 Emoji 表达评价/拒绝时，绝不能被 Delta Skip 静默跳过",
+        )
+
     def test_lease_recovery_and_dead_letter(self):
         j = CapturedPayload(
             job_id="job-crashed",

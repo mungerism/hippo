@@ -450,7 +450,7 @@ class SpoolWorker:
         # never skip; leave memory extraction and deduplication to Mem0.
         if user_goal:
             cleaned_user = clean_transient_text(user_goal).lower()
-            is_user_transient = len(user_goal) < 40 and (not cleaned_user or cleaned_user in TRANSIENT_PHRASES)
+            is_user_transient = len(user_goal) < 40 and (cleaned_user in TRANSIENT_PHRASES)
             if not is_user_transient:
                 return False
 
