@@ -77,6 +77,15 @@ class HostContract:
             target = (parent / fp).resolve()
             if target.exists():
                 return True
+
+        # 宿主专用环境根目录核验 (例如 Pi 的 ~/.pi/agent 根目录)
+        for root in self.environment_roots:
+            if root != parent and root.exists():
+                try:
+                    path.resolve().relative_to(root.resolve())
+                    return True
+                except ValueError:
+                    continue
         return False
 
     def detect_zombies(self) -> List[Path]:

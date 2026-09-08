@@ -80,24 +80,29 @@ class TestHostContracts(unittest.TestCase):
             self.assertTrue(agy_contract.verify_sibling_fingerprints())
 
     def test_pi_extension_sibling_verification_nested(self):
-        """验证 Pi 扩展在嵌套目录结构下的指纹校验（检查 parent 及 grandparent）。"""
+        """验证 Pi 扩展在嵌套目录结构下的指纹校验与裸根目录识别。"""
         from hippo_memory.hosts import get_contract
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_home = Path(tmp)
             pi_contract = get_contract(HostType.PI, home=tmp_home)
 
-            # 建立 extensions 目录
+            # 1. 模拟非标准目录（例如挂载在临时或未知路径）
+            bogus_path = tmp_home / "custom_agent" / "extensions" / "hippo-memory.ts"
+            bogus_path.parent.mkdir(parents=True, exist_ok=True)
+            bogus_path.write_text("console.log('hippo')", encoding="utf-8")
+
+            # 挂载在非标准路径且无 models.json 指纹 -> 应返回 False
+            self.assertFalse(pi_contract.verify_sibling_fingerprints(target_path=bogus_path))
+
+            # 在该非标准目录的 agent 级补齐相对指纹 models.json -> 应返回 True
+            (bogus_path.parent.parent / "models.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(pi_contract.verify_sibling_fingerprints(target_path=bogus_path))
+
+            # 2. 挂载在官方标准路径：即使尚无 models.json，有效的 Pi agent 裸根目录自身即通过指纹核验
             ext_dir = pi_contract.canonical_config_path.parent
             ext_dir.mkdir(parents=True, exist_ok=True)
             pi_contract.canonical_config_path.write_text("console.log('hippo')", encoding="utf-8")
-
-            # 无上级指纹
-            self.assertFalse(pi_contract.verify_sibling_fingerprints())
-
-            # 在 ~/.pi/agent (即 grandparent) 下创建 models.json 指纹
-            agent_dir = ext_dir.parent
-            (agent_dir / "models.json").write_text("{}", encoding="utf-8")
             self.assertTrue(pi_contract.verify_sibling_fingerprints())
 
     def test_zombie_detection_and_cleaning(self):
