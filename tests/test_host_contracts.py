@@ -31,6 +31,9 @@ class TestHostContracts(unittest.TestCase):
             self.assertTrue(all(isinstance(fp, str) for fp in c.sibling_fingerprints))
             self.assertIsInstance(c.legacy_trap_paths, tuple)
             self.assertTrue(all(isinstance(tp, Path) for tp in c.legacy_trap_paths))
+            self.assertIsInstance(c.environment_roots, tuple)
+            self.assertTrue(len(c.environment_roots) > 0)
+            self.assertTrue(all(isinstance(er, Path) for er in c.environment_roots))
             self.assertTrue(bool(c.spec_reference))
             self.assertIsInstance(c.hook_needles, tuple)
             self.assertTrue(len(c.hook_needles) > 0)
@@ -50,6 +53,8 @@ class TestHostContracts(unittest.TestCase):
                 self.assertTrue(str(c.canonical_config_path).startswith(str(tmp_home)))
                 for tp in c.legacy_trap_paths:
                     self.assertTrue(str(tp).startswith(str(tmp_home)))
+                for er in c.environment_roots:
+                    self.assertTrue(str(er).startswith(str(tmp_home)))
 
                 rebased = c.with_home(tmp_home)
                 self.assertEqual(rebased.canonical_config_path, c.canonical_config_path)
@@ -271,3 +276,52 @@ class TestHostContracts(unittest.TestCase):
             # 陷阱文件已被清理，且不会凭空创建虚假的合法目录
             self.assertFalse(trap.exists())
             self.assertFalse(agy_contract.canonical_config_path.exists())
+
+    def test_pi_bare_agent_directory_detection_and_init(self):
+        """验证 Pi 仅存在裸 agent 根目录 (~/.pi/agent) 且尚未创建 extensions 时的环境识别与自动安装。"""
+        from hippo_memory.init import run_init
+        from hippo_memory.hosts import get_contract
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_home = Path(tmp)
+            pi_contract = get_contract(HostType.PI, home=tmp_home)
+
+            # 仅创建 ~/.pi/agent 根目录（无 extensions 子目录，无 models.json / settings.json 等）
+            agent_root = tmp_home / ".pi" / "agent"
+            agent_root.mkdir(parents=True, exist_ok=True)
+
+            self.assertTrue(pi_contract.is_host_environment_present())
+
+            with patch("pathlib.Path.home", return_value=tmp_home), \
+                 patch("hippo_memory.router.detect_git_project", return_value=("test_proj", tmp_home)):
+                results = run_init()
+
+            # 验证 extensions 目录及 hippo-memory.ts 成功创建
+            self.assertTrue(pi_contract.canonical_config_path.exists())
+            self.assertTrue(pi_contract.is_hook_installed())
+            self.assertIn(pi_contract.canonical_config_path, [p for p, _ in results])
+
+    def test_legacy_trap_decoding_failure_resilience(self):
+        """验证探测与清理包含非 UTF-8 损坏数据的僵尸/配置文件时的防御性容错。"""
+        from hippo_memory.hosts import get_contract
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_home = Path(tmp)
+            agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
+
+            # 构造包含非 UTF-8 坏字节的僵尸文件
+            trap = agy_contract.legacy_trap_paths[0]
+            trap.parent.mkdir(parents=True, exist_ok=True)
+            trap.write_bytes(b"\xff\xfe\x00\x01\x80\x99invalid-utf8")
+
+            # 探测与清理不应抛出 UnicodeDecodeError
+            zombies = agy_contract.detect_zombies()
+            self.assertEqual(zombies, [])
+            cleaned = agy_contract.clean_zombies()
+            self.assertEqual(cleaned, [])
+
+            # 即使包含有效 marker 伴随坏字节也能被鲁棒识别
+            trap.write_bytes(b"\xff\xfe hippo-memory-distill \x80\x99")
+            zombies = agy_contract.detect_zombies()
+            self.assertIn(trap, zombies)
+

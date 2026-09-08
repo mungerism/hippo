@@ -30,12 +30,15 @@ class HostContract:
     legacy_trap_paths: Tuple[Path, ...]              # 易混淆的历史/陷阱路径 (用于反向探测)
     spec_reference: str                              # 官方规范文档链接或出处说明
     hook_needles: Tuple[str, ...] = field(default_factory=tuple)
+    environment_roots: Tuple[Path, ...] = field(default_factory=tuple)
 
     def __post_init__(self):
         object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "sibling_fingerprints", tuple(self.sibling_fingerprints))
         object.__setattr__(self, "legacy_trap_paths", tuple(self.legacy_trap_paths))
         object.__setattr__(self, "hook_needles", tuple(self.hook_needles))
+        roots = self.environment_roots or (self.canonical_config_path.parent,)
+        object.__setattr__(self, "environment_roots", tuple(roots))
 
     def with_home(self, home: Path) -> HostContract:
         """Return a copy of the contract rebased against the given home directory."""
@@ -43,6 +46,8 @@ class HostContract:
 
     def is_host_environment_present(self) -> bool:
         """Check if this host appears to be installed or used in the user environment."""
+        if any(root.exists() for root in self.environment_roots):
+            return True
         parent = self.canonical_config_path.parent
         if parent.exists():
             return True
@@ -54,10 +59,10 @@ class HostContract:
         if not path.exists():
             return False
         try:
-            content = path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8", errors="ignore")
             needles = self.hook_needles or (f"hook capture --host {self.host.value}",)
             return all(n in content for n in needles)
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return False
 
     def verify_sibling_fingerprints(self, target_path: Optional[Path] = None) -> bool:
@@ -81,7 +86,7 @@ class HostContract:
             if not trap.exists():
                 continue
             try:
-                content = trap.read_text(encoding="utf-8")
+                content = trap.read_text(encoding="utf-8", errors="ignore")
                 hippo_markers = [
                     "hippo-memory-distill",
                     "hippo-memory",
@@ -90,7 +95,7 @@ class HostContract:
                 ]
                 if any(m in content for m in hippo_markers):
                     zombies.append(trap)
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 continue
         return zombies
 
@@ -108,7 +113,7 @@ class HostContract:
 
                 # 2. JSON 配置文件
                 try:
-                    raw = trap.read_text(encoding="utf-8").strip()
+                    raw = trap.read_text(encoding="utf-8", errors="ignore").strip()
                     data = json.loads(raw) if raw else {}
                 except Exception:
                     continue
@@ -236,6 +241,7 @@ def get_host_contracts(home: Optional[Path] = None) -> List[HostContract]:
             canonical_config_path=h / ".pi" / "agent" / "extensions" / "hippo-memory.ts",
             events=(HookEvent.AGENT_SETTLED, HookEvent.SESSION_SHUTDOWN),
             sibling_fingerprints=("../models.json", "../settings.json", "../auth.json"),
+            environment_roots=(h / ".pi" / "agent",),
             legacy_trap_paths=(
                 h / ".pi" / "extensions" / "hippo-memory.ts",
                 h / ".pi" / "agent" / "hippo-memory.ts",
