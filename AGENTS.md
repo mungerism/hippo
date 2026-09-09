@@ -10,7 +10,6 @@
 
 1. **Agent 安全子集**：面向 Agent 的 MCP 仅暴露经过安全审计的极简工具（`add_memory` 事实文本限 2000 字符；`search_memories` 由部署端把控安全门禁与注入预算，绝不对 Agent 暴露底层微调参数）。
 2. **轻量依赖与服务**：全量使用 `uv`，禁止引入冗余重依赖（如重型本地 Cross-Encoder）；底层依赖单二进制 Qdrant (`127.0.0.1:6333`) 本地自愈与保活。
-3. **文档归档**：项目文档统一存放在 Obsidian 对应目录（`02-PROJECTS/hippo/`），使用 `obsidian-cli` 管理，不污染代码仓库。
 
 <!-- hippo:memory:start -->
 ## 记忆检索约定 (Hippo)
