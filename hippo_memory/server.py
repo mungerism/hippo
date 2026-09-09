@@ -5,7 +5,7 @@ Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed A
 
 import json
 import logging
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict, Literal, Optional
 
 from pydantic import Field
 
@@ -42,11 +42,11 @@ def get_engine() -> HippoEngine:
 
 @mcp_server.tool(
     description=(
-        "Store a new preference, fact, or conversation snippet into persistent long-term memory. "
+        "Store a new preference, fact, or decision into persistent long-term memory (Hot Path). "
         "Call this when the user states a preference, makes a decision worth keeping, corrects "
         "your behavior, or explicitly asks you to remember something. scope='project' (default) "
         "saves to the current Git repository's namespace; scope='global' saves to the user's "
-        "cross-project personal preferences."
+        "cross-project personal preferences. category defaults to 'general' (or 'preference', 'decision', 'pitfall')."
     )
 )
 def add_memory(
@@ -60,26 +60,8 @@ def add_memory(
             ),
         ),
     ],
-    user_id: Annotated[
-        Optional[str], Field(description="Optional user identifier (defaults to current user).")
-    ] = None,
-    agent_id: Annotated[
-        Optional[str],
-        Field(
-            description=(
-                "Optional agent or project identifier. Pass 'global' for personal habits, "
-                "omit to auto-route to the current Git repository."
-            )
-        ),
-    ] = None,
-    run_id: Annotated[
-        Optional[str], Field(description="Optional run/session identifier.")
-    ] = None,
-    metadata: Annotated[
-        Optional[Dict[str, Any]], Field(description="Optional arbitrary metadata JSON.")
-    ] = None,
     scope: Annotated[
-        str,
+        Literal["project", "global"],
         Field(
             description=(
                 "Storage scope: 'project' (default, current Git repository) or "
@@ -87,47 +69,34 @@ def add_memory(
             )
         ),
     ] = "project",
-    project_id: Annotated[
-        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
-    ] = None,
-    image_path: Annotated[
-        Optional[str],
-        Field(description="Optional local image/screenshot path for multimodal visual memory."),
-    ] = None,
+    category: Annotated[
+        Literal["preference", "decision", "pitfall", "general"],
+        Field(
+            description=(
+                "Knowledge category: 'preference' (user habit/style), 'decision' (architectural/tech decision), "
+                "'pitfall' (debugging fix/lesson), or 'general' (default fact)."
+            )
+        ),
+    ] = "general",
 ) -> str:
-    """Store a new preference, fact, or conversation snippet into persistent long-term memory.
+    """Store a new preference, fact, or decision into persistent long-term memory.
 
     Args:
         text: One concise fact, preference, rule, or decision to store (max 2000 chars).
-        user_id: Optional user identifier (defaults to current user).
-        agent_id: Optional agent or project identifier (e.g. 'global' for personal habits, or project name).
-        run_id: Optional run identifier.
-        metadata: Optional arbitrary metadata JSON.
         scope: Storage scope: 'project' (default, current project) or 'global' (cross-project personal preference).
-        project_id: Optional explicit project name.
-        image_path: Optional local image/screenshot path for multimodal visual memory.
+        category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
 
     Returns:
         Confirmation message with saved memory details.
     """
     try:
         engine = get_engine()
-        res = engine.add(
-            content=text,
+        res = engine.add_explicit(
             text=text,
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            metadata=metadata,
             scope=scope,
-            project_id=project_id,
-            image_path=image_path,
+            category=category,
         )
-        tag = (
-            "Global"
-            if (scope == "global" or agent_id == "global")
-            else f"Project: {agent_id or engine.router.resolve_project(project_id)}"
-        )
+        tag = "Global" if res.get("scope") == "global" else f"Project: {res.get('scope')}"
         return f"记忆已成功沉淀至 [{tag}] 命名空间。\n详情: {json.dumps(res, ensure_ascii=False)}"
     except Exception as e:
         return f"记忆保存失败: {str(e)}"

@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -155,6 +156,82 @@ class HippoEngine:
             else:
                 raise
         return result
+
+    def add_explicit(
+        self,
+        text: str,
+        scope: str = "project",
+        project_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        category: str = "general",
+    ) -> Dict[str, Any]:
+        """Direct write seam for agent-explicit facts (Hot Path).
+
+        Bypasses redundant secondary LLM extraction by setting infer=False.
+        Attaches standard provenance (source='agent_explicit') and freshness timestamps.
+
+        Args:
+            text: Plain-text concise fact or decision (max 2000 chars).
+            scope: 'project' (current git repo) or 'global' (user-level habit/preference).
+            project_id: Optional explicit project name.
+            user_id: Optional user identifier override.
+            category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
+
+        Returns:
+            Structured dictionary confirming addition with stable shape.
+        """
+        clean_text = (text or "").strip()
+        if not clean_text:
+            raise ValueError("text cannot be empty")
+        if len(clean_text) > 2000:
+            raise ValueError(f"text length ({len(clean_text)}) exceeds max allowed 2000 characters")
+
+        valid_scopes = {"project", "global"}
+        if scope not in valid_scopes:
+            raise ValueError(f"Invalid scope '{scope}'. Must be one of {sorted(valid_scopes)}")
+
+        valid_categories = {"preference", "decision", "pitfall", "general"}
+        if category not in valid_categories:
+            raise ValueError(
+                f"Invalid category '{category}'. Must be one of {sorted(valid_categories)}"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        metadata = {
+            "source": "agent_explicit",
+            "category": category,
+            "created_at": now,
+            "updated_at": now,
+            "last_confirmed_at": now,
+        }
+
+        raw_res = self.add(
+            text=clean_text,
+            scope=scope,
+            project_id=project_id,
+            user_id=user_id,
+            metadata=metadata,
+            infer=False,
+        )
+
+        memory_id = None
+        if isinstance(raw_res, dict):
+            results = raw_res.get("results")
+            if isinstance(results, list) and results:
+                memory_id = results[0].get("id")
+
+        effective_project = (
+            "global" if scope == "global" else self.router.resolve_project(project_id)
+        )
+
+        return {
+            "status": "success",
+            "id": memory_id,
+            "text": clean_text,
+            "scope": effective_project,
+            "category": category,
+            "raw": raw_res,
+        }
 
     def search(
         self,
