@@ -11,6 +11,7 @@ from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 from hippo_memory.engine import HippoEngine
+from hippo_memory.exceptions import HippoValidationError
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -96,7 +97,7 @@ def add_memory(
             scope=scope,
             category=category,
         )
-    except ValueError as e:
+    except HippoValidationError as e:
         return {
             "status": "error",
             "message": str(e),
