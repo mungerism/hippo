@@ -83,6 +83,22 @@ def clean_transient_text(text: str) -> str:
 
 
 
+def to_iso8601_utc(ts: Any) -> Optional[str]:
+    """Convert an epoch timestamp (seconds) to an ISO 8601 UTC string.
+
+    Returns None if ts is empty, non-positive, bool, or invalid.
+    """
+    if ts is None or isinstance(ts, bool):
+        return None
+    try:
+        val = float(ts)
+        if val <= 0:
+            return None
+        return datetime.fromtimestamp(val, timezone.utc).isoformat()
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
 def is_turns_superset(newer_turns: List[Dict[str, Any]], older_turns: List[Dict[str, Any]]) -> bool:
     """Check whether newer_turns is a strict superset containing all older_turns.
 
@@ -513,11 +529,12 @@ class SpoolWorker:
                 f"for project {project_id}..."
             )
             now = datetime.now(timezone.utc).isoformat()
+            last_confirmed_at = to_iso8601_utc(extracted.created_at) or now
             distill_metadata = {
                 "source": "session_distillation",
                 "created_at": now,
                 "updated_at": now,
-                "last_confirmed_at": now,
+                "last_confirmed_at": last_confirmed_at,
                 "session_id": extracted.session_id,
                 "host": extracted.host,
                 "event": extracted.event,
