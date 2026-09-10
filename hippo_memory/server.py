@@ -3,14 +3,14 @@
 Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed AI, and other agents.
 """
 
-import json
 import logging
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict, Literal, Optional
 
 from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 from hippo_memory.engine import HippoEngine
+from hippo_memory.exceptions import HippoValidationError
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -27,7 +27,8 @@ mcp_server = MCPServer(
         "When the user states a preference, makes a decision worth keeping, corrects your "
         "behavior, or asks you to remember something, persist it with add_memory; use "
         "scope='global' only for cross-project personal habits. "
-        "Memory updates and conflict resolution are handled automatically by Mem0 via add_memory."
+        "add_memory is an ADD-oriented raw capture path; do not assume synchronous "
+        "deduplication, updates, or conflict resolution."
     ),
 )
 _engine: Optional[HippoEngine] = None
@@ -42,11 +43,11 @@ def get_engine() -> HippoEngine:
 
 @mcp_server.tool(
     description=(
-        "Store a new preference, fact, or conversation snippet into persistent long-term memory. "
+        "Store a new preference, fact, or decision into persistent long-term memory (Hot Path). "
         "Call this when the user states a preference, makes a decision worth keeping, corrects "
         "your behavior, or explicitly asks you to remember something. scope='project' (default) "
         "saves to the current Git repository's namespace; scope='global' saves to the user's "
-        "cross-project personal preferences."
+        "cross-project personal preferences. category defaults to 'general' (or 'preference', 'decision', 'pitfall')."
     )
 )
 def add_memory(
@@ -60,26 +61,8 @@ def add_memory(
             ),
         ),
     ],
-    user_id: Annotated[
-        Optional[str], Field(description="Optional user identifier (defaults to current user).")
-    ] = None,
-    agent_id: Annotated[
-        Optional[str],
-        Field(
-            description=(
-                "Optional agent or project identifier. Pass 'global' for personal habits, "
-                "omit to auto-route to the current Git repository."
-            )
-        ),
-    ] = None,
-    run_id: Annotated[
-        Optional[str], Field(description="Optional run/session identifier.")
-    ] = None,
-    metadata: Annotated[
-        Optional[Dict[str, Any]], Field(description="Optional arbitrary metadata JSON.")
-    ] = None,
     scope: Annotated[
-        str,
+        Literal["project", "global"],
         Field(
             description=(
                 "Storage scope: 'project' (default, current Git repository) or "
@@ -87,50 +70,44 @@ def add_memory(
             )
         ),
     ] = "project",
-    project_id: Annotated[
-        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
-    ] = None,
-    image_path: Annotated[
-        Optional[str],
-        Field(description="Optional local image/screenshot path for multimodal visual memory."),
-    ] = None,
-) -> str:
-    """Store a new preference, fact, or conversation snippet into persistent long-term memory.
+    category: Annotated[
+        Literal["preference", "decision", "pitfall", "general"],
+        Field(
+            description=(
+                "Knowledge category: 'preference' (user habit/style), 'decision' (architectural/tech decision), "
+                "'pitfall' (debugging fix/lesson), or 'general' (default fact)."
+            )
+        ),
+    ] = "general",
+) -> Dict[str, Any]:
+    """Store a new preference, fact, or decision into persistent long-term memory.
 
     Args:
         text: One concise fact, preference, rule, or decision to store (max 2000 chars).
-        user_id: Optional user identifier (defaults to current user).
-        agent_id: Optional agent or project identifier (e.g. 'global' for personal habits, or project name).
-        run_id: Optional run identifier.
-        metadata: Optional arbitrary metadata JSON.
         scope: Storage scope: 'project' (default, current project) or 'global' (cross-project personal preference).
-        project_id: Optional explicit project name.
-        image_path: Optional local image/screenshot path for multimodal visual memory.
+        category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
 
     Returns:
-        Confirmation message with saved memory details.
+        Structured dictionary confirming memory addition: status, id, text, scope, category.
     """
     try:
         engine = get_engine()
-        res = engine.add(
-            content=text,
+        return engine.add_explicit(
             text=text,
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            metadata=metadata,
             scope=scope,
-            project_id=project_id,
-            image_path=image_path,
+            category=category,
         )
-        tag = (
-            "Global"
-            if (scope == "global" or agent_id == "global")
-            else f"Project: {agent_id or engine.router.resolve_project(project_id)}"
-        )
-        return f"记忆已成功沉淀至 [{tag}] 命名空间。\n详情: {json.dumps(res, ensure_ascii=False)}"
+    except HippoValidationError as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
     except Exception as e:
-        return f"记忆保存失败: {str(e)}"
+        logger.error("Failed to add explicit memory: %s", e, exc_info=True)
+        return {
+            "status": "error",
+            "message": "Failed to persist memory due to internal backend error.",
+        }
 
 
 @mcp_server.tool(
