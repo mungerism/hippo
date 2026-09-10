@@ -1,8 +1,18 @@
 """Tests for Issue #14: Agent Explicit Write low-latency Hot Path."""
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from hippo_memory.engine import HippoEngine
+
+
+def is_qdrant_running() -> bool:
+    """Check if local Qdrant server is available for integration tests."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:6333/healthz", timeout=1) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 class TestExplicitWrite(unittest.TestCase):
@@ -71,14 +81,16 @@ class TestExplicitWrite(unittest.TestCase):
         self.assertEqual(call_kwargs.get("metadata", {}).get("scope"), "global")
 
     def test_add_explicit_empty_result_raises_runtime_error(self):
-        """Fail-closed: if backend fails to return a valid memory id, raise RuntimeError."""
+        """Fail-closed: if backend fails to return a valid memory id, raise RuntimeError without leaking raw_res."""
         self.mock_mem0.add.return_value = {"results": []}
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError) as ctx:
             self.engine.add_explicit(text="测试空结果", scope="project")
+        self.assertNotIn("results", str(ctx.exception))
 
         self.mock_mem0.add.return_value = {}
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError) as ctx:
             self.engine.add_explicit(text="测试空字典", scope="project")
+        self.assertNotIn("results", str(ctx.exception))
 
     def test_add_explicit_input_validation(self):
         """Verify input validation on empty text, oversized text, invalid scope, and invalid category."""
@@ -149,9 +161,8 @@ class TestExplicitWrite(unittest.TestCase):
         for prop in disallowed:
             self.assertNotIn(prop, properties)
 
-    def test_mcp_add_memory_execution(self):
-        """Verify MCP add_memory invokes add_explicit and returns structured confirmation."""
-        from unittest.mock import patch
+    def test_mcp_add_memory_execution_structured(self):
+        """Verify MCP add_memory returns structured dictionary with exactly 5 contract fields."""
         from hippo_memory.server import add_memory
 
         with patch("hippo_memory.server.get_engine") as mock_get_engine:
@@ -176,13 +187,16 @@ class TestExplicitWrite(unittest.TestCase):
                 scope="global",
                 category="preference",
             )
-            self.assertIn("Global", output)
-            self.assertIn("test-id-888", output)
-            self.assertIn("preference", output)
+            self.assertIsInstance(output, dict)
+            self.assertEqual(output["status"], "success")
+            self.assertEqual(output["id"], "test-id-888")
+            self.assertEqual(output["text"], "代码风格偏好紧凑")
+            self.assertEqual(output["scope"], "global")
+            self.assertEqual(output["category"], "preference")
+            self.assertNotIn("raw", output)
 
-    def test_mcp_add_memory_error_handling(self):
-        """Verify MCP add_memory gracefully reports errors without crashing."""
-        from unittest.mock import patch
+    def test_mcp_add_memory_error_handling_sanitized(self):
+        """Verify MCP add_memory returns structured error without leaking raw exceptions."""
         from hippo_memory.server import add_memory
 
         with patch("hippo_memory.server.get_engine") as mock_get_engine:
@@ -190,9 +204,70 @@ class TestExplicitWrite(unittest.TestCase):
             mock_engine_instance.add_explicit.side_effect = ValueError("text cannot be empty")
             mock_get_engine.return_value = mock_engine_instance
 
+            # ValueError handling (user-safe error)
             output = add_memory(text="", scope="project")
-            self.assertIn("记忆保存失败", output)
-            self.assertIn("text cannot be empty", output)
+            self.assertEqual(output["status"], "error")
+            self.assertEqual(output["message"], "text cannot be empty")
+
+            # Unexpected internal backend error handling (sanitized, zero leak)
+            mock_engine_instance.add_explicit.side_effect = RuntimeError("secret database credentials or raw dump")
+            output_internal = add_memory(text="safe fact", scope="project")
+            self.assertEqual(output_internal["status"], "error")
+            self.assertNotIn("secret database", output_internal["message"])
+            self.assertEqual(output_internal["message"], "Failed to persist memory due to internal backend error.")
+
+
+@unittest.skipUnless(is_qdrant_running(), "Integration test requires local Qdrant server")
+class TestExplicitWriteIntegration(unittest.TestCase):
+    """Real storage integration test verifying zero LLM calls and readback via search/get."""
+
+    def setUp(self):
+        self.engine = HippoEngine()
+        self.created_ids = []
+
+    def tearDown(self):
+        for mid in self.created_ids:
+            try:
+                self.engine.delete(mid)
+            except Exception:
+                pass
+
+    def test_real_write_zero_llm_and_readback(self):
+        """Verify real infer=False write triggers 0 LLM calls and can be read back via get and search."""
+        test_proj = "integration_test_explicit_write"
+        test_fact = "[Integration Test] 验证真实存储零LLM调用与读回"
+
+        # Spy on LLM generate_response seam to prove zero LLM calls
+        with patch.object(self.engine.memory.llm, "generate_response", wraps=self.engine.memory.llm.generate_response) as spy_llm:
+            res = self.engine.add_explicit(
+                text=test_fact,
+                scope="project",
+                project_id=test_proj,
+                category="decision",
+            )
+            saved_id = res["id"]
+            self.created_ids.append(saved_id)
+
+            # Assert zero LLM calls
+            self.assertEqual(spy_llm.call_count, 0)
+
+        # Verify read-back via get
+        fetched = self.engine.get(saved_id)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched.get("memory"), test_fact)
+        metadata = fetched.get("metadata", {})
+        self.assertEqual(metadata.get("source"), "agent_explicit")
+        self.assertEqual(metadata.get("category"), "decision")
+
+        # Verify read-back via search
+        search_results = self.engine.search(
+            query="真实存储零LLM调用",
+            scope="project",
+            project_id=test_proj,
+            limit=5,
+        )
+        found_ids = [r.get("id") for r in search_results]
+        self.assertIn(saved_id, found_ids)
 
 
 if __name__ == "__main__":

@@ -221,9 +221,11 @@ class HippoEngine:
                 memory_id = results[0].get("id")
 
         if not memory_id:
-            raise RuntimeError(
-                f"Failed to persist explicit memory: backend returned no valid memory ID. Response: {raw_res}"
+            logger.error(
+                "Failed to persist explicit memory: backend returned no valid memory ID. Response: %s",
+                raw_res,
             )
+            raise RuntimeError("Failed to persist explicit memory: backend returned no valid memory ID")
 
         return {
             "status": "success",
