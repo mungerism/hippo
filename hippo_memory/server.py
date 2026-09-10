@@ -96,7 +96,7 @@ def add_memory(
             scope=scope,
             category=category,
         )
-        tag = "Global" if res.get("scope") == "global" else f"Project: {res.get('scope')}"
+        tag = "Global" if res.get("scope") == "global" else f"Project: {engine.router.resolve_project()}"
         return f"记忆已成功沉淀至 [{tag}] 命名空间。\n详情: {json.dumps(res, ensure_ascii=False)}"
     except Exception as e:
         return f"记忆保存失败: {str(e)}"

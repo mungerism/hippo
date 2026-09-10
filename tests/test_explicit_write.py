@@ -24,12 +24,15 @@ class TestExplicitWrite(unittest.TestCase):
             category="decision",
         )
 
-        # 1. Verify response shape
+        # 1. Verify exact 5-key response shape (no raw leakage, scope is literal 'project')
+        expected_keys = {"status", "id", "text", "scope", "category"}
+        self.assertEqual(set(res.keys()), expected_keys)
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["id"], "mem-uuid-123")
         self.assertEqual(res["text"], "项目使用 uv 进行依赖管理")
+        self.assertEqual(res["scope"], "project")
         self.assertEqual(res["category"], "decision")
-        self.assertTrue(res["scope"])
+        self.assertNotIn("raw", res)
 
         # 2. Verify Mem0 call parameters
         self.mock_mem0.add.assert_called_once()
@@ -67,6 +70,16 @@ class TestExplicitWrite(unittest.TestCase):
         self.assertEqual(call_kwargs.get("agent_id"), "global")
         self.assertEqual(call_kwargs.get("metadata", {}).get("scope"), "global")
 
+    def test_add_explicit_empty_result_raises_runtime_error(self):
+        """Fail-closed: if backend fails to return a valid memory id, raise RuntimeError."""
+        self.mock_mem0.add.return_value = {"results": []}
+        with self.assertRaises(RuntimeError):
+            self.engine.add_explicit(text="测试空结果", scope="project")
+
+        self.mock_mem0.add.return_value = {}
+        with self.assertRaises(RuntimeError):
+            self.engine.add_explicit(text="测试空字典", scope="project")
+
     def test_add_explicit_input_validation(self):
         """Verify input validation on empty text, oversized text, invalid scope, and invalid category."""
         # Empty text
@@ -87,6 +100,29 @@ class TestExplicitWrite(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.add_explicit(text="valid text", category="invalid_cat")
 
+    def test_explicit_write_and_readback_contract(self):
+        """Verify that an explicit write produces an ID that can be retrieved via engine read seams."""
+        add_res = self.engine.add_explicit(
+            text="架构决策：使用单二进制 Qdrant",
+            scope="project",
+            category="decision",
+        )
+        saved_id = add_res["id"]
+
+        # Simulate read-back via get
+        self.mock_mem0.get.return_value = {
+            "id": saved_id,
+            "memory": "架构决策：使用单二进制 Qdrant",
+            "metadata": {
+                "source": "agent_explicit",
+                "category": "decision",
+            },
+        }
+        fetched = self.engine.get(saved_id)
+        self.assertEqual(fetched["id"], saved_id)
+        self.assertEqual(fetched["metadata"]["source"], "agent_explicit")
+        self.assertEqual(fetched["metadata"]["category"], "decision")
+
     def test_engine_add_default_remains_infer_true(self):
         """Ensure HippoEngine.add() default infer parameter is untouched (infer=True)."""
         self.engine.add(text="智能提纯事实")
@@ -106,6 +142,7 @@ class TestExplicitWrite(unittest.TestCase):
         properties = add_tool.input_schema.get("properties", {})
         allowed_properties = {"text", "scope", "category"}
         self.assertEqual(set(properties.keys()), allowed_properties)
+        self.assertEqual(properties["text"].get("maxLength"), 2000)
 
         # Disallowed legacy/internal properties
         disallowed = ["user_id", "agent_id", "run_id", "metadata", "image_path", "messages"]
@@ -142,6 +179,20 @@ class TestExplicitWrite(unittest.TestCase):
             self.assertIn("Global", output)
             self.assertIn("test-id-888", output)
             self.assertIn("preference", output)
+
+    def test_mcp_add_memory_error_handling(self):
+        """Verify MCP add_memory gracefully reports errors without crashing."""
+        from unittest.mock import patch
+        from hippo_memory.server import add_memory
+
+        with patch("hippo_memory.server.get_engine") as mock_get_engine:
+            mock_engine_instance = MagicMock()
+            mock_engine_instance.add_explicit.side_effect = ValueError("text cannot be empty")
+            mock_get_engine.return_value = mock_engine_instance
+
+            output = add_memory(text="", scope="project")
+            self.assertIn("记忆保存失败", output)
+            self.assertIn("text cannot be empty", output)
 
 
 if __name__ == "__main__":
