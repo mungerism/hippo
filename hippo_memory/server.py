@@ -78,7 +78,7 @@ def add_memory(
             )
         ),
     ] = "general",
-) -> str:
+) -> Dict[str, Any]:
     """Store a new preference, fact, or decision into persistent long-term memory.
 
     Args:
@@ -87,19 +87,26 @@ def add_memory(
         category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
 
     Returns:
-        Confirmation message with saved memory details.
+        Structured dictionary confirming memory addition: status, id, text, scope, category.
     """
     try:
         engine = get_engine()
-        res = engine.add_explicit(
+        return engine.add_explicit(
             text=text,
             scope=scope,
             category=category,
         )
-        tag = "Global" if res.get("scope") == "global" else f"Project: {engine.router.resolve_project()}"
-        return f"记忆已成功沉淀至 [{tag}] 命名空间。\n详情: {json.dumps(res, ensure_ascii=False)}"
+    except ValueError as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
     except Exception as e:
-        return f"记忆保存失败: {str(e)}"
+        logger.error("Failed to add explicit memory: %s", e, exc_info=True)
+        return {
+            "status": "error",
+            "message": "Failed to persist memory due to internal backend error.",
+        }
 
 
 @mcp_server.tool(
