@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -80,6 +81,22 @@ def clean_transient_text(text: str) -> str:
             s = s[:-1]
     return s.strip()
 
+
+
+def to_iso8601_utc(ts: Any) -> Optional[str]:
+    """Convert an epoch timestamp (seconds) to an ISO 8601 UTC string.
+
+    Returns None if ts is empty, non-positive, bool, or invalid.
+    """
+    if ts is None or isinstance(ts, bool):
+        return None
+    try:
+        val = float(ts)
+        if val <= 0:
+            return None
+        return datetime.fromtimestamp(val, timezone.utc).isoformat()
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
 
 
 def is_turns_superset(newer_turns: List[Dict[str, Any]], older_turns: List[Dict[str, Any]]) -> bool:
@@ -511,19 +528,26 @@ class SpoolWorker:
                 f"Distilling session {extracted.session_id} ({extracted.host}, {len(extracted.turns)} turns) "
                 f"for project {project_id}..."
             )
+            now = datetime.now(timezone.utc).isoformat()
+            last_confirmed_at = to_iso8601_utc(extracted.created_at) or now
+            distill_metadata = {
+                "source": "session_distillation",
+                "created_at": now,
+                "updated_at": now,
+                "last_confirmed_at": last_confirmed_at,
+                "session_id": extracted.session_id,
+                "host": extracted.host,
+                "event": extracted.event,
+                "semantic_cursor": cursor,
+                "distilled_at": time.time(),
+            }
             result = self.engine.add(
                 messages=extracted.turns,
                 prompt=SESSION_DISTILLATION_PROMPT_V1,
                 project_id=project_id,
                 scope="project",
                 infer=True,
-                metadata={
-                    "session_id": extracted.session_id,
-                    "host": extracted.host,
-                    "event": extracted.event,
-                    "semantic_cursor": cursor,
-                    "distilled_at": time.time(),
-                },
+                metadata=distill_metadata,
             )
 
             # 4. Record receipt and complete job
