@@ -3,7 +3,6 @@
 Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed AI, and other agents.
 """
 
-import json
 import logging
 from typing import Annotated, Any, Dict, Literal, Optional
 
@@ -28,7 +27,8 @@ mcp_server = MCPServer(
         "When the user states a preference, makes a decision worth keeping, corrects your "
         "behavior, or asks you to remember something, persist it with add_memory; use "
         "scope='global' only for cross-project personal habits. "
-        "Memory updates and conflict resolution are handled automatically by Mem0 via add_memory."
+        "add_memory is an ADD-oriented raw capture path; do not assume synchronous "
+        "deduplication, updates, or conflict resolution."
     ),
 )
 _engine: Optional[HippoEngine] = None

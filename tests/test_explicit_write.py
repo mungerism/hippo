@@ -179,6 +179,11 @@ class TestExplicitWrite(unittest.TestCase):
         for prop in disallowed:
             self.assertNotIn(prop, properties)
 
+        # Instructions validation: reflects ADD-oriented raw capture path and no misleading auto-dedup promise
+        instructions = mcp_server.instructions or ""
+        self.assertIn("add_memory is an ADD-oriented raw capture path", instructions)
+        self.assertNotIn("Memory updates and conflict resolution are handled automatically", instructions)
+
     def test_mcp_add_memory_execution_structured(self):
         """Verify MCP add_memory returns structured dictionary with exactly 5 contract fields."""
         from hippo_memory.server import add_memory
