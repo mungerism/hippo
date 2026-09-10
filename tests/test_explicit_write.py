@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 from hippo_memory.engine import HippoEngine
+from hippo_memory.exceptions import HippoValidationError
 
 
 def is_qdrant_running() -> bool:
@@ -81,11 +82,24 @@ class TestExplicitWrite(unittest.TestCase):
         self.assertEqual(call_kwargs.get("metadata", {}).get("scope"), "global")
 
     def test_add_explicit_empty_result_raises_runtime_error(self):
-        """Fail-closed: if backend fails to return a valid memory id, raise RuntimeError without leaking raw_res."""
-        self.mock_mem0.add.return_value = {"results": []}
-        with self.assertRaises(RuntimeError) as ctx:
-            self.engine.add_explicit(text="测试空结果", scope="project")
-        self.assertNotIn("results", str(ctx.exception))
+        """Fail-closed & Log sanitization: backend failure raises RuntimeError and logs only diagnostic info."""
+        # Ensure sensitive user payloads in backend response are NOT leaked into server logs
+        sensitive_payload = "USER_SUPER_SECRET_PAYLOAD_12345"
+        self.mock_mem0.add.return_value = {
+            "results": [],
+            "raw_prompt_leak": sensitive_payload,
+        }
+
+        with self.assertLogs("hippo_memory.engine", level="ERROR") as cm:
+            with self.assertRaises(RuntimeError) as ctx:
+                self.engine.add_explicit(text="测试空结果", scope="project")
+            self.assertNotIn("results", str(ctx.exception))
+            self.assertNotIn(sensitive_payload, str(ctx.exception))
+
+        log_output = "\n".join(cm.output)
+        self.assertNotIn(sensitive_payload, log_output)
+        self.assertIn("Response type: dict", log_output)
+        self.assertIn("results_count: 0", log_output)
 
         self.mock_mem0.add.return_value = {}
         with self.assertRaises(RuntimeError) as ctx:
@@ -93,24 +107,28 @@ class TestExplicitWrite(unittest.TestCase):
         self.assertNotIn("results", str(ctx.exception))
 
     def test_add_explicit_input_validation(self):
-        """Verify input validation on empty text, oversized text, invalid scope, and invalid category."""
+        """Verify input validation raises HippoValidationError on empty text, oversized text, invalid scope/category."""
         # Empty text
-        with self.assertRaises(ValueError):
+        with self.assertRaises(HippoValidationError):
             self.engine.add_explicit(text="")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(HippoValidationError):
             self.engine.add_explicit(text="   ")
 
         # Exceeding 2000 chars
-        with self.assertRaises(ValueError):
+        with self.assertRaises(HippoValidationError):
             self.engine.add_explicit(text="a" * 2001)
 
         # Invalid scope
-        with self.assertRaises(ValueError):
+        with self.assertRaises(HippoValidationError):
             self.engine.add_explicit(text="valid text", scope="invalid_scope")
 
         # Invalid category
-        with self.assertRaises(ValueError):
+        with self.assertRaises(HippoValidationError):
             self.engine.add_explicit(text="valid text", category="invalid_cat")
+
+        # Also backwards compatible with ValueError
+        with self.assertRaises(ValueError):
+            self.engine.add_explicit(text="")
 
     def test_explicit_write_and_readback_contract(self):
         """Verify that an explicit write produces an ID that can be retrieved via engine read seams."""
@@ -196,25 +214,43 @@ class TestExplicitWrite(unittest.TestCase):
             self.assertNotIn("raw", output)
 
     def test_mcp_add_memory_error_handling_sanitized(self):
-        """Verify MCP add_memory returns structured error without leaking raw exceptions."""
+        """Verify MCP add_memory returns structured error without leaking raw exceptions or arbitrary ValueErrors."""
         from hippo_memory.server import add_memory
 
         with patch("hippo_memory.server.get_engine") as mock_get_engine:
             mock_engine_instance = MagicMock()
-            mock_engine_instance.add_explicit.side_effect = ValueError("text cannot be empty")
             mock_get_engine.return_value = mock_engine_instance
 
-            # ValueError handling (user-safe error)
+            # 1. Explicit HippoValidationError handling (user-safe validation error)
+            mock_engine_instance.add_explicit.side_effect = HippoValidationError("text cannot be empty")
             output = add_memory(text="", scope="project")
             self.assertEqual(output["status"], "error")
             self.assertEqual(output["message"], "text cannot be empty")
 
-            # Unexpected internal backend error handling (sanitized, zero leak)
-            mock_engine_instance.add_explicit.side_effect = RuntimeError("secret database credentials or raw dump")
+            # 2. Arbitrary downstream ValueError (e.g. from vector store, model, or driver) MUST NOT leak!
+            mock_engine_instance.add_explicit.side_effect = ValueError(
+                "underlying fastembed dimension mismatch: 768 != 1536 internal details"
+            )
+            output_val_err = add_memory(text="safe fact", scope="project")
+            self.assertEqual(output_val_err["status"], "error")
+            self.assertNotIn("fastembed", output_val_err["message"])
+            self.assertNotIn("dimension", output_val_err["message"])
+            self.assertEqual(
+                output_val_err["message"],
+                "Failed to persist memory due to internal backend error.",
+            )
+
+            # 3. Unexpected internal backend error handling (sanitized, zero leak)
+            mock_engine_instance.add_explicit.side_effect = RuntimeError(
+                "secret database credentials or raw dump"
+            )
             output_internal = add_memory(text="safe fact", scope="project")
             self.assertEqual(output_internal["status"], "error")
             self.assertNotIn("secret database", output_internal["message"])
-            self.assertEqual(output_internal["message"], "Failed to persist memory due to internal backend error.")
+            self.assertEqual(
+                output_internal["message"],
+                "Failed to persist memory due to internal backend error.",
+            )
 
 
 @unittest.skipUnless(is_qdrant_running(), "Integration test requires local Qdrant server")

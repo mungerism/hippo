@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
 from hippo_memory.config import HippoConfig
+from hippo_memory.exceptions import HippoValidationError
 from hippo_memory.router import ScopeRouter
 
 logger = logging.getLogger(__name__)
@@ -182,17 +183,19 @@ class HippoEngine:
         """
         clean_text = (text or "").strip()
         if not clean_text:
-            raise ValueError("text cannot be empty")
+            raise HippoValidationError("text cannot be empty")
         if len(clean_text) > 2000:
-            raise ValueError(f"text length ({len(clean_text)}) exceeds max allowed 2000 characters")
+            raise HippoValidationError(
+                f"text length ({len(clean_text)}) exceeds max allowed 2000 characters"
+            )
 
         valid_scopes = {"project", "global"}
         if scope not in valid_scopes:
-            raise ValueError(f"Invalid scope '{scope}'. Must be one of {sorted(valid_scopes)}")
+            raise HippoValidationError(f"Invalid scope '{scope}'. Must be one of {sorted(valid_scopes)}")
 
         valid_categories = {"preference", "decision", "pitfall", "general"}
         if category not in valid_categories:
-            raise ValueError(
+            raise HippoValidationError(
                 f"Invalid category '{category}'. Must be one of {sorted(valid_categories)}"
             )
 
@@ -221,9 +224,16 @@ class HippoEngine:
                 memory_id = results[0].get("id")
 
         if not memory_id:
+            results_count = 0
+            if isinstance(raw_res, dict):
+                results_val = raw_res.get("results")
+                if isinstance(results_val, list):
+                    results_count = len(results_val)
             logger.error(
-                "Failed to persist explicit memory: backend returned no valid memory ID. Response: %s",
-                raw_res,
+                "Failed to persist explicit memory: backend returned no valid memory ID. "
+                "Response type: %s, results_count: %d",
+                type(raw_res).__name__,
+                results_count,
             )
             raise RuntimeError("Failed to persist explicit memory: backend returned no valid memory ID")
 
