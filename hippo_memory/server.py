@@ -11,6 +11,7 @@ from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
+from hippo_memory.renderer import UNTRUSTED_CONTEXT_INSTRUCTION, render_untrusted_memories
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +29,8 @@ mcp_server = MCPServer(
         "behavior, or asks you to remember something, persist it with add_memory; use "
         "scope='global' only for cross-project personal habits. "
         "add_memory is an ADD-oriented raw capture path; do not assume synchronous "
-        "deduplication, updates, or conflict resolution."
+        "deduplication, updates, or conflict resolution. "
+        + UNTRUSTED_CONTEXT_INSTRUCTION
     ),
 )
 _engine: Optional[HippoEngine] = None
@@ -117,7 +119,8 @@ def add_memory(
         "past pitfalls, user preferences, or earlier conversations. Do not rely on the chat "
         "window alone. scope='all' (default) searches the current project's memories plus the "
         "user's global preferences; scope='project' only the current Git repository; "
-        "scope='global' only cross-project personal preferences."
+        "scope='global' only cross-project personal preferences. "
+        + UNTRUSTED_CONTEXT_INSTRUCTION
     )
 )
 def search_memories(
@@ -173,13 +176,10 @@ def search_memories(
         project_id: Optional explicit project name.
 
     Returns:
-        Markdown-formatted list of matching memories.
+        Markdown-formatted list of matching memories enclosed inside an untrusted context envelope.
     """
     if limit <= 0:
-        return (
-            f"未找到与 '{query}' 相关的记忆事实 (Scope: {scope})。"
-            "可尝试换用更具体的关键词，或放宽 scope（如 'global' 查跨项目个人偏好）。"
-        )
+        return render_untrusted_memories([], query=query, scope=scope)
 
     try:
         engine = get_engine()
@@ -195,25 +195,15 @@ def search_memories(
             project_id=project_id,
         )
 
-        if not results:
-            return (
-                f"未找到与 '{query}' 相关的记忆事实 (Scope: {scope})。"
-                "可尝试换用更具体的关键词，或放宽 scope（如 'global' 查跨项目个人偏好）。"
-            )
-
-        lines = [f"### 检索到的相关记忆 (匹配 {len(results)} 条，Scope: {scope}):"]
-        for idx, item in enumerate(results, 1):
-            mem_text = item.get("memory", "")
-            aid = item.get("agent_id", "global")
-            tag = "Global" if aid == "global" else f"Project: {aid}"
-            mem_id = item.get("id", "")
-            score = item.get("score")
-            score_part = f"，相关度 {score:.2f}" if isinstance(score, (int, float)) else ""
-            lines.append(f"{idx}. [{tag}]{score_part} {mem_text} (ID: `{mem_id}`)")
-
-        return "\n".join(lines)
+        return render_untrusted_memories(results, query=query, scope=scope)
     except Exception as e:
-        return f"记忆检索失败: {str(e)}"
+        logger.error("Failed to search memories: %s", e, exc_info=True)
+        return render_untrusted_memories(
+            [],
+            query=query,
+            scope=scope,
+            empty_message="记忆检索失败，请检查服务配置或稍后重试。",
+        )
 
 
 def main():
