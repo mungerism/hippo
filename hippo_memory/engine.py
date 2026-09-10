@@ -1,10 +1,12 @@
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
 from hippo_memory.config import HippoConfig
+from hippo_memory.exceptions import HippoValidationError
 from hippo_memory.router import ScopeRouter
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,93 @@ class HippoEngine:
             else:
                 raise
         return result
+
+    def add_explicit(
+        self,
+        text: str,
+        scope: Literal["project", "global"] = "project",
+        project_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        category: Literal["preference", "decision", "pitfall", "general"] = "general",
+    ) -> Dict[str, Any]:
+        """Direct write seam for agent-explicit facts (Hot Path).
+
+        Bypasses redundant secondary LLM extraction by setting infer=False.
+        Attaches standard provenance (source='agent_explicit') and freshness timestamps.
+
+        Args:
+            text: Plain-text concise fact or decision (max 2000 chars).
+            scope: 'project' (current git repo) or 'global' (user-level habit/preference).
+            project_id: Optional explicit project name.
+            user_id: Optional user identifier override.
+            category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
+
+        Returns:
+            Structured dictionary confirming addition with stable shape.
+        """
+        clean_text = (text or "").strip()
+        if not clean_text:
+            raise HippoValidationError("text cannot be empty")
+        if len(clean_text) > 2000:
+            raise HippoValidationError(
+                f"text length ({len(clean_text)}) exceeds max allowed 2000 characters"
+            )
+
+        valid_scopes = {"project", "global"}
+        if scope not in valid_scopes:
+            raise HippoValidationError(f"Invalid scope '{scope}'. Must be one of {sorted(valid_scopes)}")
+
+        valid_categories = {"preference", "decision", "pitfall", "general"}
+        if category not in valid_categories:
+            raise HippoValidationError(
+                f"Invalid category '{category}'. Must be one of {sorted(valid_categories)}"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        metadata = {
+            "source": "agent_explicit",
+            "category": category,
+            "created_at": now,
+            "updated_at": now,
+            "last_confirmed_at": now,
+        }
+
+        raw_res = self.add(
+            text=clean_text,
+            scope=scope,
+            project_id=project_id,
+            user_id=user_id,
+            metadata=metadata,
+            infer=False,
+        )
+
+        memory_id = None
+        if isinstance(raw_res, dict):
+            results = raw_res.get("results")
+            if isinstance(results, list) and results:
+                memory_id = results[0].get("id")
+
+        if not memory_id:
+            results_count = 0
+            if isinstance(raw_res, dict):
+                results_val = raw_res.get("results")
+                if isinstance(results_val, list):
+                    results_count = len(results_val)
+            logger.error(
+                "Failed to persist explicit memory: backend returned no valid memory ID. "
+                "Response type: %s, results_count: %d",
+                type(raw_res).__name__,
+                results_count,
+            )
+            raise RuntimeError("Failed to persist explicit memory: backend returned no valid memory ID")
+
+        return {
+            "status": "success",
+            "id": memory_id,
+            "text": clean_text,
+            "scope": scope,
+            "category": category,
+        }
 
     def search(
         self,
