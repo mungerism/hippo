@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
 from hippo_memory.config import HippoConfig
@@ -160,10 +160,10 @@ class HippoEngine:
     def add_explicit(
         self,
         text: str,
-        scope: str = "project",
+        scope: Literal["project", "global"] = "project",
         project_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        category: str = "general",
+        category: Literal["preference", "decision", "pitfall", "general"] = "general",
     ) -> Dict[str, Any]:
         """Direct write seam for agent-explicit facts (Hot Path).
 
@@ -220,17 +220,17 @@ class HippoEngine:
             if isinstance(results, list) and results:
                 memory_id = results[0].get("id")
 
-        effective_project = (
-            "global" if scope == "global" else self.router.resolve_project(project_id)
-        )
+        if not memory_id:
+            raise RuntimeError(
+                f"Failed to persist explicit memory: backend returned no valid memory ID. Response: {raw_res}"
+            )
 
         return {
             "status": "success",
             "id": memory_id,
             "text": clean_text,
-            "scope": effective_project,
+            "scope": scope,
             "category": category,
-            "raw": raw_res,
         }
 
     def search(
