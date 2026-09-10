@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -511,19 +512,25 @@ class SpoolWorker:
                 f"Distilling session {extracted.session_id} ({extracted.host}, {len(extracted.turns)} turns) "
                 f"for project {project_id}..."
             )
+            now = datetime.now(timezone.utc).isoformat()
+            distill_metadata = {
+                "source": "session_distillation",
+                "created_at": now,
+                "updated_at": now,
+                "last_confirmed_at": now,
+                "session_id": extracted.session_id,
+                "host": extracted.host,
+                "event": extracted.event,
+                "semantic_cursor": cursor,
+                "distilled_at": time.time(),
+            }
             result = self.engine.add(
                 messages=extracted.turns,
                 prompt=SESSION_DISTILLATION_PROMPT_V1,
                 project_id=project_id,
                 scope="project",
                 infer=True,
-                metadata={
-                    "session_id": extracted.session_id,
-                    "host": extracted.host,
-                    "event": extracted.event,
-                    "semantic_cursor": cursor,
-                    "distilled_at": time.time(),
-                },
+                metadata=distill_metadata,
             )
 
             # 4. Record receipt and complete job
