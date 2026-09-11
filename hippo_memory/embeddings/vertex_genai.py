@@ -99,6 +99,13 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
         if not texts:
             return []
 
+        # Vertex AI's embedContent endpoint accepts only one Content per
+        # request. Passing list[str] would be normalized into one multi-part
+        # Content and produce a single combined embedding, so Gemini Embedding
+        # 2 must use the base class's sequential semantics.
+        if self._uses_embedding_2():
+            return [self.embed(text, memory_action) for text in texts]
+
         prepared = [self._prepare_text(text, memory_action) for text in texts]
         response = self.client.models.embed_content(
             model=self.config.model,

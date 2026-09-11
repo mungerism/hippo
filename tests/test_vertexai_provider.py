@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from google import genai
+from google.auth.credentials import AnonymousCredentials
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 
 from hippo_memory.config import HippoConfig, resolve_collection_name
@@ -209,7 +211,49 @@ class TestVertexAIProvider(unittest.TestCase):
         self.assertEqual(call.kwargs["contents"], "query")
         self.assertEqual(call.kwargs["config"].task_type, "RETRIEVAL_QUERY")
 
-    def test_embedding_batch_preserves_cardinality(self):
+    def test_embedding_2_batch_embeds_each_text_separately(self):
+        client = genai.Client(
+            vertexai=True,
+            project="hippo-test",
+            location="global",
+            credentials=AnonymousCredentials(),
+        )
+        responses = [
+            SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1])]),
+            SimpleNamespace(embeddings=[SimpleNamespace(values=[0.2])]),
+        ]
+        env = {"GOOGLE_CLOUD_PROJECT": "hippo-test"}
+        config = BaseEmbedderConfig(
+            model="gemini-embedding-2",
+            embedding_dims=256,
+        )
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(
+                "hippo_memory.embeddings.vertex_genai.genai.Client",
+                return_value=client,
+            ),
+            patch.object(client.models, "_embed_content", side_effect=responses) as request,
+        ):
+            result = VertexAIGenAIEmbedding(config).embed_batch(
+                ["a", "b"], memory_action="add"
+            )
+
+        self.assertEqual(result, [[0.1], [0.2]])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            [
+                call.kwargs["content"].parts[0].text
+                for call in request.call_args_list
+            ],
+            ["title: none | text: a", "title: none | text: b"],
+        )
+        for call in request.call_args_list:
+            self.assertEqual(len(call.kwargs["content"].parts), 1)
+            self.assertEqual(call.kwargs["config"].output_dimensionality, 256)
+
+    def test_older_embedding_model_batch_uses_native_batch_request(self):
         fake_client = MagicMock()
         fake_client.models.embed_content.return_value = SimpleNamespace(
             embeddings=[
@@ -219,7 +263,7 @@ class TestVertexAIProvider(unittest.TestCase):
         )
         env = {"GOOGLE_CLOUD_PROJECT": "hippo-test"}
         config = BaseEmbedderConfig(
-            model="gemini-embedding-2",
+            model="gemini-embedding-001",
             embedding_dims=256,
         )
 
@@ -231,12 +275,10 @@ class TestVertexAIProvider(unittest.TestCase):
             result = embedder.embed_batch(["a", "b"], memory_action="add")
 
         self.assertEqual(result, [[0.1], [0.2]])
+        fake_client.models.embed_content.assert_called_once()
         call = fake_client.models.embed_content.call_args
-        self.assertEqual(
-            call.kwargs["contents"],
-            ["title: none | text: a", "title: none | text: b"],
-        )
-        self.assertEqual(call.kwargs["config"].output_dimensionality, 256)
+        self.assertEqual(call.kwargs["contents"], ["a", "b"])
+        self.assertEqual(call.kwargs["config"].task_type, "RETRIEVAL_DOCUMENT")
 
     def test_doctor_vertex_adc_success_and_failure(self):
         from hippo_memory import doctor
