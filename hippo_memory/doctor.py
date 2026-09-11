@@ -85,7 +85,12 @@ def collect_checks() -> List[dict]:
 
     provider = _active_provider()
     collection_provider = provider if provider != "未配置" else "gemini"
-    collection_name = resolve_collection_name(collection_provider)
+    collection_name = None
+    collection_error = None
+    try:
+        collection_name = resolve_collection_name(collection_provider)
+    except Exception as e:
+        collection_error = str(e)
 
     # --- Qdrant ---
     listening = False
@@ -101,19 +106,22 @@ def collect_checks() -> List[dict]:
     )
 
     if listening:
-        try:
-            from qdrant_client import QdrantClient
+        if collection_name:
+            try:
+                from qdrant_client import QdrantClient
 
-            client = QdrantClient(host="127.0.0.1", port=6333, timeout=3)
-            exists = client.collection_exists(collection_name)
-            add(
-                "Qdrant",
-                f"collection {collection_name}",
-                exists,
-                "存在" if exists else "不存在（首次 add 记忆后自动创建）",
-            )
-        except Exception as e:
-            add("Qdrant", f"collection {collection_name}", False, f"查询失败: {e}")
+                client = QdrantClient(host="127.0.0.1", port=6333, timeout=3)
+                exists = client.collection_exists(collection_name)
+                add(
+                    "Qdrant",
+                    f"collection {collection_name}",
+                    exists,
+                    "存在" if exists else "不存在（首次 add 记忆后自动创建）",
+                )
+            except Exception as e:
+                add("Qdrant", f"collection {collection_name}", False, f"查询失败: {e}")
+        else:
+            add("Qdrant", "collection 状态", False, f"跳过检查（{collection_error}）")
 
     try:
         add("Qdrant", "数据目录占用", True, f"{_dir_size_mb(HIPPO_HOME / 'storage'):.1f} MB")
@@ -134,6 +142,13 @@ def collect_checks() -> List[dict]:
         credentials_ok,
         f"provider={provider}; {credentials_detail}",
     )
+    if collection_error:
+        add(
+            "配置",
+            "Qdrant collection",
+            False,
+            f"配置错误: {collection_error}",
+        )
 
     if provider == "vertexai":
         project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()

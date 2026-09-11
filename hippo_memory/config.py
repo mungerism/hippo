@@ -78,7 +78,13 @@ def resolve_collection_name(
         return "hippo_memories"
 
     model = embedding_model or os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-2")
-    dimensions = dims or int(os.getenv("VERTEX_EMBEDDING_DIMS", "768"))
+    raw_dims = os.getenv("VERTEX_EMBEDDING_DIMS", "768")
+    try:
+        dimensions = dims if dims is not None else int(raw_dims)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Invalid VERTEX_EMBEDDING_DIMS: '{raw_dims}' (must be an integer)"
+        )
     model_slug = re.sub(r"[^a-zA-Z0-9]+", "_", model).strip("_").lower()
     return f"hippo_memories_vertexai_{model_slug}_{dimensions}"
 
@@ -209,7 +215,13 @@ class HippoConfig:
                 os.getenv("GEMINI_LLM_MODEL", "gemini-3.5-flash-lite"),
             )
             embed_model = os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-2")
-            dims = int(os.getenv("VERTEX_EMBEDDING_DIMS", "768"))
+            raw_dims = os.getenv("VERTEX_EMBEDDING_DIMS", "768")
+            try:
+                dims = int(raw_dims)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Invalid VERTEX_EMBEDDING_DIMS: '{raw_dims}' (must be an integer)"
+                )
 
             _register_vertex_genai_embedder()
 
