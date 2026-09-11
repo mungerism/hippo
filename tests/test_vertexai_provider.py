@@ -189,27 +189,17 @@ class TestVertexAIProvider(unittest.TestCase):
                 "title: none | text: updated fact",
             )
 
-    def test_older_embedding_model_uses_task_type(self):
-        fake_client = MagicMock()
-        fake_client.models.embed_content.return_value = SimpleNamespace(
-            embeddings=[SimpleNamespace(values=[0.1])]
-        )
+    def test_unsupported_embedding_model_raises_error(self):
         env = {"GOOGLE_CLOUD_PROJECT": "hippo-test"}
         config = BaseEmbedderConfig(
             model="gemini-embedding-001",
             embedding_dims=768,
         )
-
-        with patch.dict(os.environ, env, clear=True), patch(
-            "hippo_memory.embeddings.vertex_genai.genai.Client",
-            return_value=fake_client,
-        ):
-            embedder = VertexAIGenAIEmbedding(config)
-            embedder.embed("query", memory_action="search")
-
-        call = fake_client.models.embed_content.call_args
-        self.assertEqual(call.kwargs["contents"], "query")
-        self.assertEqual(call.kwargs["config"].task_type, "RETRIEVAL_QUERY")
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(
+                ValueError, "Vertex AI provider currently only supports gemini-embedding-2"
+            ):
+                VertexAIGenAIEmbedding(config)
 
     def test_embedding_2_batch_embeds_each_text_separately(self):
         client = genai.Client(
@@ -253,33 +243,6 @@ class TestVertexAIProvider(unittest.TestCase):
             self.assertEqual(len(call.kwargs["content"].parts), 1)
             self.assertEqual(call.kwargs["config"].output_dimensionality, 256)
 
-    def test_older_embedding_model_batch_uses_native_batch_request(self):
-        fake_client = MagicMock()
-        fake_client.models.embed_content.return_value = SimpleNamespace(
-            embeddings=[
-                SimpleNamespace(values=[0.1]),
-                SimpleNamespace(values=[0.2]),
-            ]
-        )
-        env = {"GOOGLE_CLOUD_PROJECT": "hippo-test"}
-        config = BaseEmbedderConfig(
-            model="gemini-embedding-001",
-            embedding_dims=256,
-        )
-
-        with patch.dict(os.environ, env, clear=True), patch(
-            "hippo_memory.embeddings.vertex_genai.genai.Client",
-            return_value=fake_client,
-        ):
-            embedder = VertexAIGenAIEmbedding(config)
-            result = embedder.embed_batch(["a", "b"], memory_action="add")
-
-        self.assertEqual(result, [[0.1], [0.2]])
-        fake_client.models.embed_content.assert_called_once()
-        call = fake_client.models.embed_content.call_args
-        self.assertEqual(call.kwargs["contents"], ["a", "b"])
-        self.assertEqual(call.kwargs["config"].task_type, "RETRIEVAL_DOCUMENT")
-
     def test_doctor_vertex_adc_success_and_failure(self):
         from hippo_memory import doctor
 
@@ -301,6 +264,24 @@ class TestVertexAIProvider(unittest.TestCase):
                 ok, detail = doctor._provider_credentials_status("vertexai")
                 self.assertFalse(ok)
                 self.assertIn("ADC 不可用", detail)
+
+    def test_doctor_invalid_vertex_embedding_dims_does_not_crash(self):
+        from hippo_memory import doctor
+
+        env = {
+            "HIPPO_PROVIDER": "vertexai",
+            "GOOGLE_CLOUD_PROJECT": "hippo-test",
+            "VERTEX_EMBEDDING_DIMS": "abc",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "hippo_memory.doctor.is_listening", return_value=False
+        ):
+            checks = doctor.collect_checks()
+
+        collection_checks = [c for c in checks if c["name"] == "Qdrant collection"]
+        self.assertEqual(len(collection_checks), 1)
+        self.assertFalse(collection_checks[0]["ok"])
+        self.assertIn("must be an integer", collection_checks[0]["detail"])
 
 
 if __name__ == "__main__":

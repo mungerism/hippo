@@ -26,6 +26,12 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
         self.config.model = self.config.model or "gemini-embedding-2"
         self.config.embedding_dims = self.config.embedding_dims or 768
 
+        model_id = (self.config.model or "").split("/")[-1]
+        if not model_id.startswith("gemini-embedding-2"):
+            raise ValueError(
+                f"Vertex AI provider currently only supports gemini-embedding-2 (got '{self.config.model}')"
+            )
+
         project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
         if not project:
             raise ValueError(
@@ -39,10 +45,6 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
             location=location,
         )
 
-    def _uses_embedding_2(self) -> bool:
-        model_id = (self.config.model or "").split("/")[-1]
-        return model_id.startswith("gemini-embedding-2")
-
     def _prepare_text(
         self,
         text: str,
@@ -53,31 +55,16 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
         Google does not support ``task_type`` for Gemini Embedding 2. For this
         model the retrieval intent is encoded in the prompt itself.
         """
-        if not self._uses_embedding_2():
-            return text
-
         if memory_action == "search":
             return f"task: search result | query: {text}"
         if memory_action in ("add", "update"):
             return f"title: none | text: {text}"
         return f"task: sentence similarity | query: {text}"
 
-    def _embed_config(
-        self,
-        memory_action: Optional[Literal["add", "search", "update"]],
-    ) -> types.EmbedContentConfig:
-        params = {"output_dimensionality": self.config.embedding_dims}
-
-        # Older Gemini embedding models still support task_type directly.
-        if not self._uses_embedding_2():
-            if memory_action == "search":
-                params["task_type"] = "RETRIEVAL_QUERY"
-            elif memory_action in ("add", "update"):
-                params["task_type"] = "RETRIEVAL_DOCUMENT"
-            else:
-                params["task_type"] = "SEMANTIC_SIMILARITY"
-
-        return types.EmbedContentConfig(**params)
+    def _embed_config(self) -> types.EmbedContentConfig:
+        return types.EmbedContentConfig(
+            output_dimensionality=self.config.embedding_dims
+        )
 
     def embed(
         self,
@@ -87,7 +74,7 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
         response = self.client.models.embed_content(
             model=self.config.model,
             contents=self._prepare_text(text, memory_action),
-            config=self._embed_config(memory_action),
+            config=self._embed_config(),
         )
         return response.embeddings[0].values
 
@@ -102,20 +89,5 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
         # Vertex AI's embedContent endpoint accepts only one Content per
         # request. Passing list[str] would be normalized into one multi-part
         # Content and produce a single combined embedding, so Gemini Embedding
-        # 2 must use the base class's sequential semantics.
-        if self._uses_embedding_2():
-            return [self.embed(text, memory_action) for text in texts]
-
-        prepared = [self._prepare_text(text, memory_action) for text in texts]
-        response = self.client.models.embed_content(
-            model=self.config.model,
-            contents=prepared,
-            config=self._embed_config(memory_action),
-        )
-        embeddings = [item.values for item in response.embeddings]
-        if len(embeddings) != len(texts):
-            raise ValueError(
-                f"Vertex AI embed_batch() returned {len(embeddings)} embeddings "
-                f"for {len(texts)} texts using model '{self.config.model}'"
-            )
-        return embeddings
+        # 2 must embed each text sequentially to preserve Mem0's contract.
+        return [self.embed(text, memory_action) for text in texts]
