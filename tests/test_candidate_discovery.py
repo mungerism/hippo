@@ -20,16 +20,13 @@ class _Memory:
         self.vector_store = _VectorStore(neighbors)
 
     def get_all(self, *, filters, top_k, show_expired=False):
-        return {"results": list(self._memories)[:top_k]}
+        candidates = _apply_filters(self._memories, filters)
+        if not show_expired:
+            candidates = [item for item in candidates if not _is_expired(item)]
+        return {"results": list(candidates)[:top_k]}
 
     def search(self, query, *, filters, top_k, threshold, explain):
-        candidates = self._neighbors.get(query, [])
-        if {"status": "superseded"} in filters.get("NOT", []):
-            candidates = [
-                item
-                for item in candidates
-                if item.get("metadata", {}).get("status") != "superseded"
-            ]
+        candidates = _apply_filters(self._neighbors.get(query, []), filters)
         return {"results": list(candidates)[:top_k]}
 
     def add(self, *args, **kwargs):
@@ -46,17 +43,13 @@ class _VectorStore:
     def __init__(self, neighbors):
         self._neighbors = neighbors
         self.search_limits = []
+        self.search_filters = []
 
     def search(self, *, query, vectors, top_k, filters):
         del vectors
         self.search_limits.append(top_k)
-        candidates = self._neighbors.get(query, [])
-        if {"status": "superseded"} in filters.get("NOT", []):
-            candidates = [
-                item
-                for item in candidates
-                if item.get("metadata", {}).get("status") != "superseded"
-            ]
+        self.search_filters.append(filters)
+        candidates = _apply_filters(self._neighbors.get(query, []), filters)
         return [_vector_point(item) for item in candidates[:top_k]]
 
 
@@ -123,6 +116,30 @@ def _vector_point(item):
         **item.get("metadata", {}),
     }
     return SimpleNamespace(id=item.get("id"), score=item.get("score"), payload=payload)
+
+
+def _is_expired(item):
+    raw = item.get("expiration_date", item.get("metadata", {}).get("expiration_date"))
+    if not raw:
+        return False
+    try:
+        return datetime.fromisoformat(str(raw)).date() < datetime.now(timezone.utc).date()
+    except ValueError:
+        return False
+
+
+def _apply_filters(candidates, filters):
+    excluded = filters.get("NOT", [])
+    result = list(candidates)
+    if {"status": "superseded"} in excluded:
+        result = [
+            item
+            for item in result
+            if item.get("metadata", {}).get("status") != "superseded"
+        ]
+    if any("expiration_date" in condition for condition in excluded):
+        result = [item for item in result if not _is_expired(item)]
+    return result
 
 
 class TestCandidateDiscovery(unittest.TestCase):
@@ -442,7 +459,7 @@ class TestCandidateDiscovery(unittest.TestCase):
             [CandidateEdge("seed", "semantic", 0.96, ("u1", "hippo"))],
         )
 
-    def test_semantic_search_expands_past_expired_ann_results(self):
+    def test_semantic_search_is_bounded_after_expiration_is_pushed_down(self):
         expired = [
             _memory(
                 f"expired-{index}",
@@ -472,14 +489,58 @@ class TestCandidateDiscovery(unittest.TestCase):
 
         result = engine.search_semantic_neighbors(
             "query",
-            filters={"user_id": "u1", "agent_id": "hippo"},
+            filters={
+                "user_id": "u1",
+                "agent_id": "hippo",
+                "NOT": [{"expiration_date": {"lt": "2026-09-12"}}],
+            },
             top_k=2,
-            max_candidates=6,
-            eligible_ids={item["id"] for item in active},
         )
 
         self.assertEqual([item["id"] for item in result], ["active-1", "active-2"])
-        self.assertEqual(engine.memory.vector_store.search_limits, [4, 6])
+        self.assertEqual(engine.memory.vector_store.search_limits, [2])
+
+    def test_discovery_pushes_expiration_filter_into_each_bounded_ann_query(self):
+        active = [
+            _memory(f"active-{index}", f"active {index}", "u1", "hippo")
+            for index in range(3)
+        ]
+        expired = [
+            _memory(
+                f"expired-{index}",
+                f"expired {index}",
+                "u1",
+                "hippo",
+                expiration_date="2000-01-01",
+            )
+            for index in range(20)
+        ]
+        neighbors = {
+            seed["memory"]: [
+                *[_point(item, 0.99) for item in expired],
+                *[_point(item, 0.95) for item in active],
+            ]
+            for seed in active
+        }
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        engine._memory = _Memory([*expired, *active], neighbors)
+
+        CandidateDiscovery(engine, top_k=1).discover(
+            scope="project", project_id="hippo"
+        )
+
+        self.assertEqual(engine.memory.vector_store.search_limits, [2, 2, 2])
+        expiration_cutoff = {
+            "expiration_date": {
+                "lt": datetime.now(timezone.utc).date().isoformat()
+            }
+        }
+        self.assertTrue(
+            all(
+                expiration_cutoff in filters.get("NOT", [])
+                for filters in engine.memory.vector_store.search_filters
+            )
+        )
 
     def test_pair_direction_and_score_are_stable_across_scan_order(self):
         a = _memory("a", "fact a", "u1", "hippo")

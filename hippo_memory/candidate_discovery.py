@@ -75,7 +75,14 @@ class CandidateDiscovery:
         filters = {
             "user_id": identity[0],
             "agent_id": identity[1],
-            "NOT": [{"status": "superseded"}],
+            "NOT": [
+                {"status": "superseded"},
+                {
+                    "expiration_date": {
+                        "lt": datetime.now(timezone.utc).date().isoformat()
+                    }
+                },
+            ],
         }
         scan_probe = self.engine.memory.get_all(
             filters=filters,
@@ -109,7 +116,6 @@ class CandidateDiscovery:
             for memory in raw_memories
             if self._matches_identity(memory, identity) and self._is_active(memory)
         ]
-        active_ids = {str(memory.get("id", "")) for memory in active}
         normalized_since = self._normalize_datetime(since) if since is not None else None
         seeds = [
             memory
@@ -128,8 +134,6 @@ class CandidateDiscovery:
                 query=seed_text,
                 filters=filters,
                 top_k=self.top_k + 1,
-                max_candidates=self.scan_limit + 1,
-                eligible_ids=active_ids,
             )
             accepted_for_seed = 0
             for neighbor in neighbors:

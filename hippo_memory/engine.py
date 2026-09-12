@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Collection, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
 from hippo_memory.config import HippoConfig
@@ -325,53 +325,30 @@ class HippoEngine:
         *,
         filters: Dict[str, Any],
         top_k: int,
-        max_candidates: int,
-        eligible_ids: Collection[str],
     ) -> List[Dict[str, Any]]:
         """Return raw semantic ANN neighbors without Mem0's hybrid reranking.
 
         Mem0's public ``search`` combines semantic, BM25, and entity scores before
         applying ``top_k``. Candidate discovery needs the semantic ordering itself,
-        so this gateway isolates the smallest necessary compatibility seam. The ANN
-        The caller supplies IDs from Mem0's public, expiration-aware ``get_all`` result.
-        The ANN window grows until enough eligible records are found or the caller's
-        already-audited scan bound is exhausted.
+        so this gateway isolates the smallest necessary compatibility seam. Callers
+        must include all eligibility constraints in ``filters`` so the vector store
+        can execute one bounded ANN query.
         """
-        if top_k <= 0 or max_candidates <= 0:
+        if top_k <= 0:
             return []
 
         memory = self.memory
-        eligible = {str(memory_id) for memory_id in eligible_ids}
-        if not eligible:
-            return []
         embedding = memory.embedding_model.embed(query, "search")
-        fetch_limit = min(max_candidates, max(top_k, top_k * 2))
-
-        while True:
-            raw_points = list(
-                memory.vector_store.search(
-                    query=query,
-                    vectors=embedding,
-                    top_k=fetch_limit,
-                    filters=filters,
-                )
-                or []
-            )
-            eligible_points = [
-                point
-                for point in raw_points
-                if self._semantic_point_id(point) in eligible
-            ]
-            if (
-                len(eligible_points) >= top_k
-                or len(raw_points) < fetch_limit
-                or fetch_limit >= max_candidates
-            ):
-                return [
-                    self._format_semantic_point(point)
-                    for point in eligible_points[:top_k]
-                ]
-            fetch_limit = min(max_candidates, fetch_limit * 2)
+        raw_points = memory.vector_store.search(
+            query=query,
+            vectors=embedding,
+            top_k=top_k,
+            filters=filters,
+        )
+        return [
+            self._format_semantic_point(point)
+            for point in list(raw_points or [])[:top_k]
+        ]
 
     @staticmethod
     def _semantic_point_id(point: Any) -> str:
