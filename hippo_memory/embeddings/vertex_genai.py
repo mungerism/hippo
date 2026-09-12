@@ -38,6 +38,10 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
                 "GOOGLE_CLOUD_PROJECT is required for the Vertex AI embedding provider."
             )
 
+        from hippo_memory.config import sanitize_google_application_credentials
+
+        sanitize_google_application_credentials()
+
         location = os.getenv("GOOGLE_CLOUD_LOCATION", "global").strip() or "global"
         self.client = genai.Client(
             vertexai=True,

@@ -46,6 +46,9 @@ def _active_provider() -> str:
 def _vertex_adc_status() -> tuple[bool, str]:
     """Resolve Application Default Credentials without issuing a model request."""
     try:
+        from hippo_memory.config import sanitize_google_application_credentials
+
+        sanitize_google_application_credentials()
         import google.auth
 
         credentials, detected_project = google.auth.default(
