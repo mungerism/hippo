@@ -8,6 +8,7 @@ classifier failure mode fails closed to DISTINCT.
 import json
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from hippo_memory.decision import (
     RELATION_CONFLICT,
@@ -55,6 +56,8 @@ def _memory(
     memory_id,
     text,
     *,
+    user_id="u1",
+    agent_id="hippo",
     source="agent_explicit",
     confirmed_at=None,
     created_at="2026-09-01T00:00:00+00:00",
@@ -67,6 +70,8 @@ def _memory(
     return _MutationTrackedDict(
         id=memory_id,
         memory=text,
+        user_id=user_id,
+        agent_id=agent_id,
         created_at=created_at,
         updated_at=updated_at,
         metadata=metadata,
@@ -227,12 +232,17 @@ class TestRelationshipClassification(unittest.TestCase):
 
 class TestClassifierFailClosed(unittest.TestCase):
     def test_malformed_llm_output_is_distinct(self):
+        good_json = _classifier_json(RELATION_EQUIVALENT, 0.9)
         for bad_response in (
             "好的，这两条记忆是等价的",
+            f"答案如下：{good_json} thanks",
+            f"```json\n{good_json}\n```",
+            f"```{good_json}```",
             _classifier_json("MAYBE", 0.9),
             _classifier_json(RELATION_EQUIVALENT, "很高"),
             _classifier_json(RELATION_EQUIVALENT, 1.5),
             '{"relation": "EQUIVALENT", "confidence": 0.9',
+            '[{"relation": "EQUIVALENT", "confidence": 0.9}]',
             None,
         ):
             with self.subTest(bad_response=bad_response):
@@ -302,7 +312,9 @@ class TestClassifierFailClosed(unittest.TestCase):
         self.assertEqual(len(llm.calls), 1)
         call = llm.calls[0]
         self.assertEqual(call["args"], ())
-        self.assertEqual(call["kwargs"], {})
+        # JSON mode is requested, but the seam must stay tool-free.
+        self.assertEqual(set(call["kwargs"]), {"response_format"})
+        self.assertEqual(call["kwargs"]["response_format"], {"type": "json_object"})
         messages = call["messages"]
         self.assertEqual(
             [message["role"] for message in messages], ["system", "user"]
@@ -408,7 +420,7 @@ class TestWinnerArbitration(unittest.TestCase):
         self.assertEqual(by_id.reason, "stability_id")
         self.assertEqual(by_id.winner_id, "mem-a")
 
-    def test_missing_last_confirmed_at_falls_back_to_updated_at(self):
+    def test_missing_last_confirmed_at_skips_recency_entirely(self):
         arbiter = WinnerArbiter(recency_margin_seconds=60.0)
         stale = _memory(
             "mem-a",
@@ -423,10 +435,24 @@ class TestWinnerArbitration(unittest.TestCase):
             confirmed_at=None,
         )
 
+        # updated_at is not a confirmation signal (#15): a pure metadata
+        # update must not masquerade as a fresher fact, so recency is skipped.
         result = arbiter.arbitrate(stale, fresh)
+        self.assertNotEqual(result.reason, "recency")
+        self.assertEqual(result.reason, "stability_id")
+        self.assertIsNone(result.evidence["confirmed_at"]["mem-a"])
+        self.assertIsNone(result.evidence["confirmed_at"]["mem-b"])
 
-        self.assertEqual(result.reason, "recency")
-        self.assertEqual(result.winner_id, "mem-b")
+        # One-sided freshness is equally undecidable and must not trigger
+        # recency either.
+        half_known = _memory(
+            "mem-b",
+            "fresh",
+            updated_at="2026-09-09T00:00:00+00:00",
+            confirmed_at="2026-09-09T00:00:00+00:00",
+        )
+        result = arbiter.arbitrate(stale, half_known)
+        self.assertNotEqual(result.reason, "recency")
 
     def test_arbitration_is_symmetric_and_repeatable(self):
         arbiter = WinnerArbiter(recency_margin_seconds=60.0)
@@ -489,6 +515,115 @@ class TestZeroMutation(unittest.TestCase):
         self.assertEqual(
             [call["messages"][0]["role"] for call in llm.calls], ["system", "system"]
         )
+
+
+class TestIdentityBoundary(unittest.TestCase):
+    """Parent #17: the decision layer must re-enforce the storage identity."""
+
+    def _decide_mixed(self, first, second, llm=None):
+        return ConsolidationDecider(
+            classifier=RelationshipClassifier(llm=llm or _StubLLM())
+        ).decide(first, second)
+
+    def test_cross_user_pair_fails_closed(self):
+        decision = self._decide_mixed(
+            _memory("mem-a", "same text", user_id="u1"),
+            _memory("mem-b", "same text", user_id="u2"),
+        )
+        self.assertEqual(decision.relation, RELATION_DISTINCT)
+        self.assertEqual(decision.reason, "identity_boundary_mismatch")
+        self.assertIsNone(decision.winner_id)
+
+    def test_cross_project_pair_fails_closed(self):
+        decision = self._decide_mixed(
+            _memory("mem-a", "same text", agent_id="hippo"),
+            _memory("mem-b", "same text", agent_id="sumproof"),
+        )
+        self.assertEqual(decision.relation, RELATION_DISTINCT)
+        self.assertEqual(decision.reason, "identity_boundary_mismatch")
+
+    def test_project_global_pair_fails_closed(self):
+        decision = self._decide_mixed(
+            _memory("mem-a", "same text", agent_id="hippo"),
+            _memory("mem-b", "same text", agent_id="global"),
+        )
+        self.assertEqual(decision.relation, RELATION_DISTINCT)
+        self.assertEqual(decision.reason, "identity_boundary_mismatch")
+
+    def test_missing_identity_fields_fail_closed(self):
+        no_identity = _MutationTrackedDict(id="mem-a", memory="text a")
+        decision = self._decide_mixed(no_identity, _memory("mem-b", "text b"))
+        self.assertEqual(decision.relation, RELATION_DISTINCT)
+        self.assertEqual(decision.reason, "missing_identity_boundary")
+
+    def test_metadata_only_identity_is_resolved_and_matched(self):
+        llm = _StubLLM(_classifier_json(RELATION_EQUIVALENT, 0.9))
+        top_level = _memory("mem-a", "text a")
+        in_metadata = _MutationTrackedDict(
+            id="mem-b",
+            memory="text b",
+            metadata={"user_id": "u1", "agent_id": "hippo", "source": "agent_explicit"},
+        )
+
+        decision = ConsolidationDecider(
+            classifier=RelationshipClassifier(llm=llm)
+        ).decide(top_level, in_metadata)
+
+        self.assertNotEqual(decision.reason, "identity_boundary_mismatch")
+
+    def test_identity_mismatch_never_reaches_the_classifier(self):
+        llm = _StubLLM(_classifier_json(RELATION_EQUIVALENT, 0.9))
+
+        decision = self._decide_mixed(
+            _memory("mem-a", "same text", user_id="u1"),
+            _memory("mem-b", "same text", user_id="u2"),
+            llm=llm,
+        )
+
+        self.assertEqual(decision.reason, "identity_boundary_mismatch")
+        self.assertEqual(llm.calls, [])
+
+
+class TestDeciderFailClosed(unittest.TestCase):
+    def test_classifier_seam_exception_is_contained_by_the_decider(self):
+        class _ExplodingClassifier:
+            relation = "EQUIVALENT"
+
+            def classify(self, first, second):
+                raise RuntimeError("seam blew up before the LLM call")
+
+        decision = ConsolidationDecider(classifier=_ExplodingClassifier()).decide(
+            _memory("mem-a", "text a"), _memory("mem-b", "text b")
+        )
+
+        self.assertEqual(decision.relation, RELATION_DISTINCT)
+        self.assertEqual(decision.reason, "classifier_exception")
+        self.assertIsNone(decision.winner_id)
+
+    def test_classifier_temperature_is_pinned_for_determinism(self):
+        llm = _StubLLM(_classifier_json(RELATION_EQUIVALENT, 0.9))
+        llm.config = SimpleNamespace(temperature=0.1)
+
+        RelationshipClassifier(llm=llm)
+
+        self.assertEqual(llm.config.temperature, 0.0)
+
+    def test_classifier_temperature_override_and_validation(self):
+        llm = _StubLLM()
+        llm.config = SimpleNamespace(temperature=0.1)
+        RelationshipClassifier(llm=llm, temperature=0.2)
+        self.assertEqual(llm.config.temperature, 0.2)
+
+        llm_without_config = _StubLLM()
+        RelationshipClassifier(llm=llm_without_config, temperature=0.3)
+
+        for kwargs in (
+            {"temperature": -0.1},
+            {"temperature": float("nan")},
+            {"temperature": True},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                RelationshipClassifier(**kwargs)
 
 
 if __name__ == "__main__":
