@@ -293,16 +293,16 @@ def consolidation_lock(
     rlock = entry["rlock"]
     if not rlock.acquire(timeout=timeout if timeout is not None else -1):
         raise TimeoutError(f"consolidation lock busy for identity={key!r}")
+    fd: Optional[int] = None
+    flocked = False
     try:
         with _REGISTRY_GUARD:
+            outermost = entry["depth"] == 0
             entry["depth"] += 1
-            outermost = entry["depth"] == 1
-        fd: Optional[int] = None
         if outermost:
             lock_dir.mkdir(parents=True, exist_ok=True)
             safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{key[0]}__{key[1]}")
-            path = lock_dir / f"{safe_name}.lock"
-            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            fd = os.open(lock_dir / f"{safe_name}.lock", os.O_CREAT | os.O_RDWR, 0o600)
             deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 try:
@@ -310,28 +310,30 @@ def consolidation_lock(
                     break
                 except OSError:
                     if deadline is not None and time.monotonic() >= deadline:
-                        with _REGISTRY_GUARD:
-                            entry["depth"] -= 1
-                        os.close(fd)
-                        rlock.release()
+                        # Raised straight into the unified finally below,
+                        # which closes the un-flocked handle, rebalances the
+                        # depth and releases the RLock exactly once.
                         raise TimeoutError(
                             f"consolidation lock busy for identity={key!r}"
-                        )
+                        ) from None
                     time.sleep(0.02)
+            flocked = True
             with _REGISTRY_GUARD:
                 entry["fd"] = fd
-        try:
-            yield
-        finally:
-            with _REGISTRY_GUARD:
-                entry["depth"] -= 1
-                fd_to_release = entry["fd"] if entry["depth"] == 0 else None
-                if fd_to_release is not None:
-                    entry["fd"] = None
-            if fd_to_release is not None:
-                fcntl.flock(fd_to_release, fcntl.LOCK_UN)
-                os.close(fd_to_release)
+        yield
     finally:
+        with _REGISTRY_GUARD:
+            entry["depth"] -= 1
+            fd_to_release = entry["fd"] if flocked and entry["depth"] == 0 else None
+            if fd_to_release is not None:
+                entry["fd"] = None
+        if fd_to_release is not None:
+            fcntl.flock(fd_to_release, fcntl.LOCK_UN)
+            os.close(fd_to_release)
+        if fd is not None and not flocked:
+            # flock never taken (timeout path): nothing to unlock, but the
+            # handle must not leak.
+            os.close(fd)
         rlock.release()
 
 

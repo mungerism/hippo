@@ -426,6 +426,14 @@ class HippoEngine:
             timeout=getattr(self.config, "consolidation_lock_timeout", None),
         )
 
+    def _get_for_write(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """Record read for mutation paths — unlike the public ``get()``,
+        backing-store errors propagate. A swallowed transient failure must
+        never downgrade a mutation into an unlocked write (PR #33 review
+        round 3): if identity cannot be proven, fail closed instead.
+        """
+        return self.memory.get(memory_id)
+
     def update(
         self,
         memory_id: str,
@@ -438,12 +446,15 @@ class HippoEngine:
             kwargs["text"] = text
         if metadata is not None:
             kwargs["metadata"] = metadata
-        record = self.get(memory_id)
-        identity = resolve_identity(record) if record is not None else None
+        record = self._get_for_write(memory_id)
+        if record is None:
+            raise ValueError(f"memory {memory_id} not found")
+        identity = resolve_identity(record)
         if identity is None:
-            # Unknown identity (missing or already-deleted record): surface
-            # the backing store's own error instead of guessing a lock.
-            return self.memory.update(memory_id, **kwargs)
+            raise ValueError(
+                f"cannot prove (user_id, agent_id) identity for {memory_id}; "
+                "refusing unlocked mutation"
+            )
         with self._write_lock(*identity):
             return self.memory.update(memory_id, **kwargs)
 
@@ -510,17 +521,18 @@ class HippoEngine:
 
     def delete(self, memory_id: str) -> bool:
         """Delete a specific memory by its ID."""
-        try:
-            record = self.get(memory_id)
-            identity = resolve_identity(record) if record is not None else None
-            if identity is None:
-                self.memory.delete(memory_id)
-                return True
-            with self._write_lock(*identity):
-                self.memory.delete(memory_id)
-            return True
-        except Exception:
+        record = self._get_for_write(memory_id)
+        if record is None:
             return False
+        identity = resolve_identity(record)
+        if identity is None:
+            raise ValueError(
+                f"cannot prove (user_id, agent_id) identity for {memory_id}; "
+                "refusing unlocked mutation"
+            )
+        with self._write_lock(*identity):
+            self.memory.delete(memory_id)
+        return True
 
     def delete_all(
         self,
@@ -544,11 +556,21 @@ class HippoEngine:
         if run_id:
             kwargs["run_id"] = run_id
 
-        try:
-            self.memory.delete_all(**kwargs)
-            return True
-        except Exception:
-            return False
+        if aid is None:
+            # scope="all" spans every identity and has no single
+            # per-identity lock; it stays an admin-level operation outside
+            # the shared per-identity write protocol.
+            try:
+                self.memory.delete_all(**kwargs)
+                return True
+            except Exception:
+                return False
+        with self._write_lock(uid, aid):
+            try:
+                self.memory.delete_all(**kwargs)
+                return True
+            except Exception:
+                return False
 
     def list_entities(self) -> Dict[str, Any]:
         """List users and projects/agents stored in memories."""

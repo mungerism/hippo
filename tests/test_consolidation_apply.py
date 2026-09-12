@@ -7,6 +7,8 @@ recorded for audit.
 """
 
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -762,8 +764,11 @@ class _StubMemory:
     def __init__(self, records):
         self.records = {record["id"]: dict(record) for record in records}
         self.calls = []
+        self.fail_get = False
 
     def get(self, memory_id):
+        if self.fail_get:
+            raise RuntimeError("transient backing-store failure")
         record = self.records.get(memory_id)
         return dict(record) if record is not None else None
 
@@ -780,6 +785,10 @@ class _StubMemory:
     def delete(self, memory_id):
         self.calls.append(("delete", memory_id))
         self.records.pop(memory_id, None)
+
+    def delete_all(self, **kwargs):
+        self.calls.append(("delete_all", kwargs))
+        self.records.clear()
 
     def add(self, conversation, **params):
         self.calls.append(("add", conversation, params))
@@ -870,6 +879,105 @@ class TestWriterLockProtocol(unittest.TestCase):
         self.assertEqual(
             [call[0] for call in engine._memory.calls], ["update", "delete"]
         )
+
+
+    def test_update_fails_closed_on_transient_identity_read_failure(self):
+        """A swallowed read error must never downgrade a mutation into an
+        unlocked write: the error propagates and the store is untouched."""
+        engine = self._engine(lock_timeout=0.0)
+        engine._memory.fail_get = True
+
+        with self.assertRaises(RuntimeError):
+            engine.update("mem-a", metadata={"status": "hot"})
+
+        self.assertEqual(engine._memory.calls, [])
+
+    def test_update_and_delete_fail_closed_without_provable_identity(self):
+        engine = self._engine(lock_timeout=0.0)
+        engine._memory.records["mem-a"] = {"id": "mem-a", "memory": "no identity"}
+
+        with self.assertRaises(ValueError):
+            engine.update("mem-a", metadata={"status": "hot"})
+        with self.assertRaises(ValueError):
+            engine.delete("mem-a")
+
+        self.assertEqual(engine._memory.calls, [])
+
+    def test_delete_returns_false_for_missing_record_without_mutation(self):
+        engine = self._engine(lock_timeout=0.0)
+
+        self.assertFalse(engine.delete("does-not-exist"))
+        self.assertEqual(
+            [call[0] for call in engine._memory.calls], []
+        )
+
+    def test_delete_all_joins_the_identity_lock_protocol(self):
+        engine = self._engine(lock_timeout=0.0)
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold():
+            with consolidation_lock(
+                "u1", "hippo", base_dir=self.lock_dir, timeout=None
+            ):
+                acquired.set()
+                release.wait(timeout=2)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            self.assertTrue(acquired.wait(timeout=2))
+            with self.assertRaises(TimeoutError):
+                engine.delete_all(agent_id="hippo")
+        finally:
+            release.set()
+            holder.join(timeout=2)
+
+        # Re-entrant under the same held lock: proceeds normally.
+        with consolidation_lock(
+            "u1", "hippo", base_dir=self.lock_dir, timeout=None
+        ):
+            self.assertTrue(engine.delete_all(agent_id="hippo"))
+        self.assertEqual(engine._memory.calls[-1][0], "delete_all")
+
+
+    def test_cross_process_flock_timeout_raises_clean_timeout_error(self):
+        """Regression (PR #33 review round 3): the cross-process flock
+        timeout path must rebalance lock bookkeeping and raise TimeoutError
+        exactly once — never a masking RuntimeError from a double release."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lock_dir = Path(tmp.name) / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / "u1__hippo.lock"
+        script = (
+            "import fcntl, os, time\n"
+            f"fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\n"
+            "time.sleep(5)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), "held")
+            with self.assertRaises(TimeoutError):
+                with consolidation_lock(
+                    "u1", "hippo", base_dir=lock_dir, timeout=0.3
+                ):
+                    pass
+        finally:
+            proc.kill()
+            proc.wait()
+
+        # Bookkeeping survived: the same identity locks cleanly again.
+        with consolidation_lock(
+            "u1", "hippo", base_dir=lock_dir, timeout=None
+        ):
+            pass
 
 
 if __name__ == "__main__":
