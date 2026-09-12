@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Collection, Dict, List, Literal, Optional
 
 from mem0 import Memory
 from hippo_memory.config import HippoConfig
@@ -318,6 +318,105 @@ class HippoEngine:
         except Exception as e:
             logger.error("Error applying relevance gate to search results: %s", e)
             return []
+
+    def search_semantic_neighbors(
+        self,
+        query: str,
+        *,
+        filters: Dict[str, Any],
+        top_k: int,
+        max_candidates: int,
+        eligible_ids: Collection[str],
+    ) -> List[Dict[str, Any]]:
+        """Return raw semantic ANN neighbors without Mem0's hybrid reranking.
+
+        Mem0's public ``search`` combines semantic, BM25, and entity scores before
+        applying ``top_k``. Candidate discovery needs the semantic ordering itself,
+        so this gateway isolates the smallest necessary compatibility seam. The ANN
+        The caller supplies IDs from Mem0's public, expiration-aware ``get_all`` result.
+        The ANN window grows until enough eligible records are found or the caller's
+        already-audited scan bound is exhausted.
+        """
+        if top_k <= 0 or max_candidates <= 0:
+            return []
+
+        memory = self.memory
+        eligible = {str(memory_id) for memory_id in eligible_ids}
+        if not eligible:
+            return []
+        embedding = memory.embedding_model.embed(query, "search")
+        fetch_limit = min(max_candidates, max(top_k, top_k * 2))
+
+        while True:
+            raw_points = list(
+                memory.vector_store.search(
+                    query=query,
+                    vectors=embedding,
+                    top_k=fetch_limit,
+                    filters=filters,
+                )
+                or []
+            )
+            eligible_points = [
+                point
+                for point in raw_points
+                if self._semantic_point_id(point) in eligible
+            ]
+            if (
+                len(eligible_points) >= top_k
+                or len(raw_points) < fetch_limit
+                or fetch_limit >= max_candidates
+            ):
+                return [
+                    self._format_semantic_point(point)
+                    for point in eligible_points[:top_k]
+                ]
+            fetch_limit = min(max_candidates, fetch_limit * 2)
+
+    @staticmethod
+    def _semantic_point_id(point: Any) -> str:
+        point_id = point.get("id", "") if isinstance(point, dict) else point.id
+        return str(point_id)
+
+    @staticmethod
+    def _format_semantic_point(point: Any) -> Dict[str, Any]:
+        payload = (
+            point.get("payload", {}) if isinstance(point, dict) else point.payload
+        ) or {}
+        score = point.get("score") if isinstance(point, dict) else point.score
+        promoted_keys = {
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+            "attributed_to",
+            "expiration_date",
+        }
+        core_keys = {
+            "data",
+            "hash",
+            "created_at",
+            "updated_at",
+            "id",
+            "text_lemmatized",
+            *promoted_keys,
+        }
+        result: Dict[str, Any] = {
+            "id": HippoEngine._semantic_point_id(point),
+            "memory": payload.get("data", ""),
+            "hash": payload.get("hash"),
+            "created_at": payload.get("created_at"),
+            "updated_at": payload.get("updated_at"),
+            "semantic_score": score,
+        }
+        for key in promoted_keys:
+            if key in payload:
+                result[key] = payload[key]
+        metadata = {key: value for key, value in payload.items() if key not in core_keys}
+        if metadata:
+            result["metadata"] = metadata
+        return result
 
     def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a single memory by its ID."""

@@ -109,6 +109,7 @@ class CandidateDiscovery:
             for memory in raw_memories
             if self._matches_identity(memory, identity) and self._is_active(memory)
         ]
+        active_ids = {str(memory.get("id", "")) for memory in active}
         normalized_since = self._normalize_datetime(since) if since is not None else None
         seeds = [
             memory
@@ -123,30 +124,19 @@ class CandidateDiscovery:
             seed_text = str(seed.get("memory", ""))
             if not seed_id or not seed_text:
                 continue
-            search_response = self.engine.memory.search(
+            neighbors = self.engine.search_semantic_neighbors(
                 query=seed_text,
                 filters=filters,
                 top_k=self.top_k + 1,
-                threshold=0.0,
-                explain=True,
+                max_candidates=self.scan_limit + 1,
+                eligible_ids=active_ids,
             )
-            raw_neighbors = (
-                search_response.get("results", [])
-                if isinstance(search_response, Mapping)
-                else search_response
-            )
-            neighbors = list(raw_neighbors or [])
             accepted_for_seed = 0
             for neighbor in neighbors:
                 if not isinstance(neighbor, Mapping):
                     continue
                 neighbor_id = str(neighbor.get("id", ""))
-                score_details = neighbor.get("score_details", {})
-                score = (
-                    score_details.get("semantic_score")
-                    if isinstance(score_details, Mapping)
-                    else None
-                )
+                score = neighbor.get("semantic_score")
                 if (
                     not neighbor_id
                     or neighbor_id == seed_id

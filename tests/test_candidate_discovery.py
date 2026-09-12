@@ -16,6 +16,8 @@ class _Memory:
         self._memories = memories
         self._neighbors = neighbors
         self.mutation_calls = []
+        self.embedding_model = SimpleNamespace(embed=lambda query, mode: query)
+        self.vector_store = _VectorStore(neighbors)
 
     def get_all(self, *, filters, top_k, show_expired=False):
         return {"results": list(self._memories)[:top_k]}
@@ -38,6 +40,24 @@ class _Memory:
 
     def delete(self, *args, **kwargs):
         self.mutation_calls.append(("delete", args, kwargs))
+
+
+class _VectorStore:
+    def __init__(self, neighbors):
+        self._neighbors = neighbors
+        self.search_limits = []
+
+    def search(self, *, query, vectors, top_k, filters):
+        del vectors
+        self.search_limits.append(top_k)
+        candidates = self._neighbors.get(query, [])
+        if {"status": "superseded"} in filters.get("NOT", []):
+            candidates = [
+                item
+                for item in candidates
+                if item.get("metadata", {}).get("status") != "superseded"
+            ]
+        return [_vector_point(item) for item in candidates[:top_k]]
 
 
 class _ExpiredWindowMemory(_Memory):
@@ -91,6 +111,18 @@ def _search_result(memory, semantic_score):
             "final_score": semantic_score,
         },
     }
+
+
+def _vector_point(item):
+    payload = {
+        "data": item.get("memory", ""),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "user_id": item.get("user_id"),
+        "agent_id": item.get("agent_id"),
+        **item.get("metadata", {}),
+    }
+    return SimpleNamespace(id=item.get("id"), score=item.get("score"), payload=payload)
 
 
 class TestCandidateDiscovery(unittest.TestCase):
@@ -281,7 +313,7 @@ class TestCandidateDiscovery(unittest.TestCase):
         two = _memory("two", "second neighbor", "u1", "hippo")
         three = _memory("three", "third neighbor", "u1", "hippo")
         discovery = self._discovery(
-            [seed],
+            [seed, one, two, three],
             {
                 seed["memory"]: [
                     _point(one, 0.99),
@@ -350,12 +382,12 @@ class TestCandidateDiscovery(unittest.TestCase):
         with self.assertRaises(CandidateScanLimitExceeded):
             discovery.discover(scope="project", project_id="hippo")
 
-    def test_ann_neighbors_use_the_public_mem0_search_contract(self):
+    def test_ann_neighbors_use_the_engine_semantic_search_seam(self):
         seed = _memory("seed", "uses postgres", "u1", "hippo")
         neighbor = _memory("neighbor", "database is postgres", "u1", "hippo")
         engine = HippoEngine(SimpleNamespace(user_id="u1"))
         engine._memory = _Memory(
-            [seed],
+            [seed, neighbor],
             {
                 seed["memory"]: [
                     _search_result(seed, 1.0),
@@ -371,6 +403,83 @@ class TestCandidateDiscovery(unittest.TestCase):
             result.candidate_pairs,
             [CandidateEdge("seed", "neighbor", 0.94, ("u1", "hippo"))],
         )
+
+    def test_hybrid_reranking_cannot_displace_a_true_semantic_top_k_neighbor(self):
+        seed = _memory(
+            "seed",
+            "uses postgres",
+            "u1",
+            "hippo",
+            updated_at="2026-09-12T01:00:00+00:00",
+        )
+        semantic_neighbor = _memory("semantic", "database is postgres", "u1", "hippo")
+        keyword_neighbor = _memory("keyword", "postgres keyword", "u1", "hippo")
+        raw_neighbors = {
+            seed["memory"]: [
+                _point(seed, 1.0),
+                _point(semantic_neighbor, 0.96),
+                _point(keyword_neighbor, 0.30),
+            ]
+        }
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        engine._memory = _Memory([seed, semantic_neighbor, keyword_neighbor], raw_neighbors)
+
+        # Reproduce Mem0's hybrid output: BM25 promoted the weak semantic match
+        # and the true semantic neighbor was already truncated away.
+        engine.memory.search = lambda *args, **kwargs: {
+            "results": [_search_result(seed, 1.0), _search_result(keyword_neighbor, 0.30)]
+        }
+        discovery = CandidateDiscovery(engine, top_k=1)
+
+        result = discovery.discover(
+            scope="project",
+            project_id="hippo",
+            since=datetime(2026, 9, 12, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            result.candidate_pairs,
+            [CandidateEdge("seed", "semantic", 0.96, ("u1", "hippo"))],
+        )
+
+    def test_semantic_search_expands_past_expired_ann_results(self):
+        expired = [
+            _memory(
+                f"expired-{index}",
+                f"expired {index}",
+                "u1",
+                "hippo",
+                expiration_date="2000-01-01",
+            )
+            for index in range(4)
+        ]
+        active = [
+            _memory("active-1", "active one", "u1", "hippo"),
+            _memory("active-2", "active two", "u1", "hippo"),
+        ]
+        neighbors = {
+            "query": [
+                *[
+                    _point(item, 0.99 - index * 0.01)
+                    for index, item in enumerate(expired)
+                ],
+                _point(active[0], 0.90),
+                _point(active[1], 0.89),
+            ]
+        }
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        engine._memory = _Memory([*expired, *active], neighbors)
+
+        result = engine.search_semantic_neighbors(
+            "query",
+            filters={"user_id": "u1", "agent_id": "hippo"},
+            top_k=2,
+            max_candidates=6,
+            eligible_ids={item["id"] for item in active},
+        )
+
+        self.assertEqual([item["id"] for item in result], ["active-1", "active-2"])
+        self.assertEqual(engine.memory.vector_store.search_limits, [4, 6])
 
     def test_pair_direction_and_score_are_stable_across_scan_order(self):
         a = _memory("a", "fact a", "u1", "hippo")
