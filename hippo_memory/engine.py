@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
 from hippo_memory.apply import consolidation_lock, resolve_lock_namespace
+from hippo_memory.lifecycle import add_lifecycle_exclusion, filter_active_memories
 from hippo_memory.config import HippoConfig
 from hippo_memory.decision import resolve_identity
 from hippo_memory.exceptions import HippoValidationError
@@ -304,14 +305,17 @@ class HippoEngine:
 
         candidate_pool_size = max(limit * 4, 20)
 
+        # Lifecycle invariant first: superseded memories never re-enter
+        # Agent recall, independent of the relevance gate below (#24).
         results = self.memory.search(
             query=query,
-            filters=computed_filters,
+            filters=add_lifecycle_exclusion(computed_filters),
             top_k=candidate_pool_size,
             threshold=effective_threshold,
             explain=True,
         )
         raw_list = results if isinstance(results, list) else results.get("results", [])
+        raw_list = filter_active_memories(raw_list)
 
         from hippo_memory.gate import filter_search_results
 
@@ -482,8 +486,11 @@ class HippoEngine:
                 project_id=project_id,
             )
 
-        results = self.memory.get_all(filters=computed_filters, top_k=limit)
-        return results if isinstance(results, list) else results.get("results", [])
+        results = self.memory.get_all(
+            filters=add_lifecycle_exclusion(computed_filters), top_k=limit
+        )
+        raw = results if isinstance(results, list) else results.get("results", [])
+        return filter_active_memories(raw)
 
     def list_memories(
         self,
@@ -501,7 +508,7 @@ class HippoEngine:
             Dict containing the list of global facts and formatted markdown summary.
         """
         uid = user_id or self.config.user_id
-        filters = {"user_id": uid, "agent_id": "global"}
+        filters = add_lifecycle_exclusion({"user_id": uid, "agent_id": "global"})
 
         try:
             memories = self.memory.get_all(filters=filters, top_k=50)
@@ -509,6 +516,7 @@ class HippoEngine:
         except Exception:
             items = []
 
+        items = filter_active_memories(items)
         facts = [item["memory"] for item in items if "memory" in item]
         formatted = "\n".join([f"- {fact}" for fact in facts]) if facts else "暂无全局用户偏好记录"
 
