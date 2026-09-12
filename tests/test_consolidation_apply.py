@@ -1,0 +1,663 @@
+"""Tests for Issue #23: Idempotent Apply, Operation Journal and Concurrency.
+
+The apply layer is the Cold Path's only mutation seam. Every test here
+exercises it against a fake backing store that mirrors mem0 semantics:
+metadata merges into the record, every update bumps ``updated_at`` and is
+recorded for audit.
+"""
+
+import json
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from hippo_memory.apply import (
+    RESULT_ALREADY_APPLIED,
+    RESULT_APPLIED,
+    RESULT_FAILED,
+    RESULT_STALE_PLAN,
+    SUPERSEDE_REASON_CONFLICT,
+    SUPERSEDE_REASON_EQUIVALENT,
+    ApplyResult,
+    ConsolidationApplier,
+    OperationJournal,
+    OperationPlan,
+    build_operation_plan,
+    consolidation_lock,
+    record_version,
+)
+from hippo_memory.decision import ConsolidationDecision
+
+
+def _memory(
+    memory_id,
+    text,
+    *,
+    user_id="u1",
+    agent_id="hippo",
+    source="agent_explicit",
+    confirmed_at=None,
+    created_at="2026-09-01T00:00:00+00:00",
+    updated_at="2026-09-01T00:00:00+00:00",
+    confirmation_count=1,
+    **extra_metadata,
+):
+    metadata = {
+        "source": source,
+        "confirmation_count": confirmation_count,
+        **extra_metadata,
+    }
+    if confirmed_at is not None:
+        metadata["last_confirmed_at"] = confirmed_at
+    return {
+        "id": memory_id,
+        "memory": text,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "hash": f"hash-{memory_id}",
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "metadata": metadata,
+    }
+
+
+class _FakeEngine:
+    """Mem0-like store: metadata merges, updated_at always bumps."""
+
+    def __init__(self, records):
+        self.records = {record["id"]: record for record in records}
+        self.update_calls = []
+        self.history = []
+        self.fail_on = None
+
+    def get(self, memory_id):
+        record = self.records.get(memory_id)
+        return dict(record) if record is not None else None
+
+    def update(self, memory_id, text=None, metadata=None):
+        if self.fail_on is not None and memory_id in self.fail_on:
+            raise RuntimeError(f"simulated crash while updating {memory_id}")
+        record = self.records[memory_id]
+        prev_text = record["memory"]
+        if metadata:
+            merged = dict(record.get("metadata", {}))
+            merged.update(metadata)
+            record["metadata"] = merged
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self.update_calls.append({"id": memory_id, "text": text, "metadata": metadata})
+        # Mirror mem0's db.add_history provenance trail.
+        self.history.append({"memory_id": memory_id, "prev": prev_text, "action": "UPDATE"})
+        return memory_id
+
+
+class _ApplyHarness:
+    def __init__(self, records):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.engine = _FakeEngine(records)
+        self.journal_dir = Path(self.tmp.name) / "operations"
+        self.lock_dir = Path(self.tmp.name) / "locks"
+        self.applier = ConsolidationApplier(
+            self.engine,
+            journal=OperationJournal(self.journal_dir),
+            lock_dir=self.lock_dir,
+        )
+        self.journal = self.applier.journal
+
+    def cleanup(self):
+        self.tmp.cleanup()
+
+
+def _equivalent_decision(winner_id="mem-a", loser_id="mem-b"):
+    return ConsolidationDecision(
+        relation="EQUIVALENT",
+        winner_id=winner_id,
+        loser_id=loser_id,
+        reason="recency",
+        confidence=0.9,
+        evidence={},
+    )
+
+
+def _conflict_decision(winner_id="mem-a", loser_id="mem-b"):
+    return ConsolidationDecision(
+        relation="CONFLICT",
+        winner_id=winner_id,
+        loser_id=loser_id,
+        reason="recency",
+        confidence=0.9,
+        evidence={},
+    )
+
+
+class TestOperationPlan(unittest.TestCase):
+    def setUp(self):
+        self.winner = _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-03T00:00:00+00:00")
+        self.loser = _memory("mem-b", "项目数据库为 PostgreSQL", confirmed_at="2026-09-01T00:00:00+00:00")
+
+    def test_stable_inputs_produce_stable_operation_id(self):
+        decision = _equivalent_decision()
+        first = build_operation_plan(decision, winner_record=self.winner, loser_record=self.loser)
+        second = build_operation_plan(decision, winner_record=self.winner, loser_record=self.loser)
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first.observed_winner_version, record_version(self.winner)
+        )
+        self.assertEqual(first.observed_loser_version, record_version(self.loser))
+
+    def test_changed_observed_version_changes_the_operation_id(self):
+        decision = _equivalent_decision()
+        first = build_operation_plan(decision, winner_record=self.winner, loser_record=self.loser)
+        touched = _memory(
+            "mem-a",
+            "项目使用 PostgreSQL",
+            confirmed_at="2026-09-03T00:00:00+00:00",
+            updated_at="2026-09-09T00:00:00+00:00",
+        )
+        second = build_operation_plan(decision, winner_record=touched, loser_record=self.loser)
+
+        self.assertNotEqual(first.operation_id, second.operation_id)
+
+    def test_distinct_decision_cannot_produce_a_plan(self):
+        distinct = ConsolidationDecision(
+            relation="DISTINCT",
+            winner_id=None,
+            loser_id=None,
+            reason="low_confidence",
+            confidence=0.3,
+            evidence={},
+        )
+        with self.assertRaises(ValueError):
+            build_operation_plan(distinct, winner_record=self.winner, loser_record=self.loser)
+
+    def test_cross_identity_records_are_rejected(self):
+        foreign = _memory("mem-b", "项目数据库为 PostgreSQL", user_id="u2")
+        with self.assertRaises(ValueError):
+            build_operation_plan(
+                _equivalent_decision(), winner_record=self.winner, loser_record=foreign
+            )
+
+    def test_records_must_match_decision_ids(self):
+        with self.assertRaises(ValueError):
+            build_operation_plan(
+                _equivalent_decision(),
+                winner_record=self.loser,
+                loser_record=self.winner,
+            )
+
+
+class TestEquivalentMerge(unittest.TestCase):
+    def setUp(self):
+        self.harness = _ApplyHarness(
+            [
+                _memory(
+                    "mem-a",
+                    "项目使用 PostgreSQL",
+                    confirmed_at="2026-09-03T00:00:00+00:00",
+                    confirmation_count=3,
+                    merged_ids=["m1"],
+                ),
+                _memory(
+                    "mem-b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                    confirmation_count=1,
+                    merged_ids=["m2"],
+                ),
+            ]
+        )
+        self.addCleanup(self.harness.cleanup)
+        self.winner = self.harness.engine.records["mem-a"]
+        self.loser = self.harness.engine.records["mem-b"]
+        self.plan = build_operation_plan(
+            _equivalent_decision(), winner_record=self.winner, loser_record=self.loser
+        )
+
+    def test_apply_merges_lineage_deterministically(self):
+        result = self.harness.applier.apply(self.plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertTrue(result.winner_updated)
+        self.assertTrue(result.loser_superseded)
+
+        self.assertEqual(self.winner["memory"], "项目使用 PostgreSQL")
+        metadata = self.winner["metadata"]
+        self.assertEqual(metadata["confirmation_count"], 4)
+        self.assertEqual(metadata["merged_ids"], ["m1", "m2", "mem-b"])
+        self.assertEqual(
+            metadata["merged_sources"], ["agent_explicit", "session_distillation"]
+        )
+        self.assertEqual(metadata["last_confirmed_at"], "2026-09-03T00:00:00+00:00")
+
+        loser_metadata = self.loser["metadata"]
+        self.assertEqual(loser_metadata["status"], "superseded")
+        self.assertEqual(loser_metadata["superseded_by"], "mem-a")
+        self.assertEqual(loser_metadata["supersede_reason"], SUPERSEDE_REASON_EQUIVALENT)
+        self.assertIn("superseded_at", loser_metadata)
+
+    def test_journal_records_the_full_operation_for_audit(self):
+        self.harness.applier.apply(self.plan)
+
+        entry = json.loads(
+            (self.harness.journal_dir / f"{self.plan.operation_id}.json").read_text()
+        )
+        self.assertEqual(entry["status"], "completed")
+        self.assertEqual(entry["relation"], "EQUIVALENT")
+        self.assertEqual(entry["winner_id"], "mem-a")
+        self.assertEqual(entry["loser_id"], "mem-b")
+        self.assertEqual(entry["identity"], ["u1", "hippo"])
+        self.assertTrue(entry["steps"]["winner_update"])
+        self.assertTrue(entry["steps"]["loser_supersede"])
+        self.assertEqual(entry["observed_winner_version"], self.plan.observed_winner_version)
+        self.assertEqual(entry["attempts"], 1)
+        # Every mutation flowed through the engine seam, so the mem0 history
+        # trail plus this journal reconstruct the full audit story.
+        history_ids = [item["memory_id"] for item in self.harness.engine.history]
+        self.assertEqual(history_ids, ["mem-a", "mem-b"])
+        self.assertEqual(
+            [call["id"] for call in self.harness.engine.update_calls], history_ids
+        )
+
+    def test_lineage_overlap_dedupes_instead_of_double_counting(self):
+        # Overlap is unreachable through correct operation (superseded
+        # members are never re-discovered); it must still converge via the
+        # spec's set-union + unique-member accounting, not fail forever.
+        self.winner["metadata"]["merged_ids"] = ["m2", "m1"]
+        self.loser["metadata"]["merged_ids"] = ["m2"]
+        self.loser["metadata"]["confirmation_count"] = 2
+
+        result = self.harness.applier.apply(self.plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        metadata = self.winner["metadata"]
+        # 3 + 2 - 1 shared-subtree credit for m2 (absent record defaults 1).
+        self.assertEqual(metadata["confirmation_count"], 4)
+        self.assertEqual(metadata["merged_ids"], ["m1", "m2", "mem-b"])
+        self.assertEqual(self.loser["metadata"]["status"], "superseded")
+
+    def test_journal_discovery_lists_only_unfinished_operations(self):
+        engine = self.harness.engine
+        # Completed operation: this harness's own plan.
+        self.harness.applier.apply(self.plan)
+
+        # Stale operation on a second pair of the same identity.
+        engine.records["mem-c"] = _memory("mem-c", "fact c", confirmed_at="2026-09-02T00:00:00+00:00")
+        engine.records["mem-d"] = _memory("mem-d", "fact c paraphrase", confirmed_at="2026-09-01T00:00:00+00:00")
+        stale_plan = build_operation_plan(
+            _equivalent_decision(winner_id="mem-c", loser_id="mem-d"),
+            winner_record=engine.records["mem-c"],
+            loser_record=engine.records["mem-d"],
+        )
+        engine.update("mem-c", metadata={"unrelated": "hot write"})
+        self.harness.applier.apply(stale_plan)
+
+        # Failed operation on a third pair.
+        engine.records["mem-e"] = _memory("mem-e", "fact e", confirmed_at="2026-09-02T00:00:00+00:00")
+        engine.records["mem-f"] = _memory("mem-f", "fact f", confirmed_at="2026-09-01T00:00:00+00:00")
+        failed_plan = build_operation_plan(
+            _equivalent_decision(winner_id="mem-e", loser_id="mem-f"),
+            winner_record=engine.records["mem-e"],
+            loser_record=engine.records["mem-f"],
+        )
+        del engine.records["mem-f"]
+        self.harness.applier.apply(failed_plan)
+
+        unfinished_ids = {
+            entry["operation_id"] for entry in self.harness.journal.unfinished()
+        }
+        self.assertEqual(unfinished_ids, {failed_plan.operation_id})
+        self.assertNotIn(self.plan.operation_id, unfinished_ids)
+        self.assertNotIn(stale_plan.operation_id, unfinished_ids)
+
+
+class TestConflictSupersede(unittest.TestCase):
+    def setUp(self):
+        self.harness = _ApplyHarness(
+            [
+                _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-08T00:00:00+00:00"),
+                _memory(
+                    "mem-b",
+                    "项目已迁移至 MySQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                    confirmation_count=4,
+                ),
+            ]
+        )
+        self.addCleanup(self.harness.cleanup)
+        self.winner = self.harness.engine.records["mem-a"]
+        self.loser = self.harness.engine.records["mem-b"]
+        self.plan = build_operation_plan(
+            _conflict_decision(), winner_record=self.winner, loser_record=self.loser
+        )
+
+    def test_conflict_does_not_inherit_loser_confirmations(self):
+        result = self.harness.applier.apply(self.plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertFalse(result.winner_updated)
+        self.assertTrue(result.loser_superseded)
+        self.assertEqual(self.winner["metadata"]["confirmation_count"], 1)
+        self.assertNotIn("merged_ids", self.winner["metadata"])
+        self.assertEqual(
+            self.loser["metadata"]["supersede_reason"], SUPERSEDE_REASON_CONFLICT
+        )
+        winner_calls = [
+            call for call in self.harness.engine.update_calls if call["id"] == "mem-a"
+        ]
+        self.assertEqual(winner_calls, [])
+
+
+class TestStalePlans(unittest.TestCase):
+    def _harness_with_plan(self):
+        harness = _ApplyHarness(
+            [
+                _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-03T00:00:00+00:00"),
+                _memory(
+                    "mem-b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                ),
+            ]
+        )
+        plan = build_operation_plan(
+            _equivalent_decision(),
+            winner_record=harness.engine.records["mem-a"],
+            loser_record=harness.engine.records["mem-b"],
+        )
+        return harness, plan
+
+    def test_hot_or_warm_update_to_winner_rejects_the_plan(self):
+        harness, plan = self._harness_with_plan()
+        self.addCleanup(harness.cleanup)
+        harness.engine.update("mem-a", metadata={"unrelated": "hot-path write"})
+
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_STALE_PLAN)
+        self.assertIn("winner", result.error)
+        self.assertEqual(
+            [call for call in harness.engine.update_calls if call["id"] == "mem-b"],
+            [],
+        )
+        self.assertEqual(harness.journal.load(plan.operation_id)["status"], "stale")
+
+    def test_hot_or_warm_update_to_loser_rejects_the_plan(self):
+        harness, plan = self._harness_with_plan()
+        self.addCleanup(harness.cleanup)
+        harness.engine.update("mem-b", metadata={"unrelated": "hot-path write"})
+
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_STALE_PLAN)
+        self.assertIn("loser", result.error)
+        winner_calls = [
+            call for call in harness.engine.update_calls if call["id"] == "mem-a"
+        ]
+        self.assertEqual(winner_calls, [])
+        self.assertEqual(harness.journal.load(plan.operation_id)["status"], "stale")
+
+    def test_stale_journal_is_terminal_for_that_operation(self):
+        harness, plan = self._harness_with_plan()
+        self.addCleanup(harness.cleanup)
+        harness.engine.update("mem-a", metadata={"unrelated": "hot-path write"})
+        harness.applier.apply(plan)
+
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_STALE_PLAN)
+
+
+class TestCrashRecovery(unittest.TestCase):
+    def _records(self):
+        return [
+            _memory(
+                "mem-a",
+                "项目使用 PostgreSQL",
+                confirmed_at="2026-09-03T00:00:00+00:00",
+                confirmation_count=3,
+            ),
+            _memory(
+                "mem-b",
+                "项目数据库为 PostgreSQL",
+                source="session_distillation",
+                confirmed_at="2026-09-01T00:00:00+00:00",
+                confirmation_count=1,
+            ),
+        ]
+
+    def test_crash_after_winner_update_resumes_without_double_counting(self):
+        harness = _ApplyHarness(self._records())
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+
+        harness.engine.fail_on = {"mem-b"}
+        with self.assertRaises(RuntimeError):
+            harness.applier.apply(plan)
+
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+        entry = harness.journal.load(plan.operation_id)
+        self.assertEqual(entry["status"], "applying")
+        self.assertTrue(entry["steps"]["winner_update"])
+
+        harness.engine.fail_on = None
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertFalse(result.winner_updated)
+        self.assertTrue(result.loser_superseded)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+        winner_updates = [
+            call for call in harness.engine.update_calls if call["id"] == "mem-a"
+        ]
+        self.assertEqual(len(winner_updates), 1)
+
+    def test_crash_between_store_write_and_journal_flip_is_detected(self):
+        harness = _ApplyHarness(self._records())
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+
+        # Simulate a crash in the window after the winner write landed but
+        # before the journal step flipped: perform the patch by hand and keep
+        # the journal at the pre-step state.
+        harness.applier.apply(plan)  # normal run first to plant winner_patch
+        entry = harness.journal.load(plan.operation_id)
+        entry["status"] = "applying"
+        entry["steps"]["winner_update"] = False
+        harness.journal.save(entry)
+        # Undo nothing on disk: winner still carries the patch from run one.
+
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertFalse(result.winner_updated)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+        winner_updates = [
+            call for call in harness.engine.update_calls if call["id"] == "mem-a"
+        ]
+        self.assertEqual(len(winner_updates), 1)
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+
+    def test_crash_after_loser_supersede_completes_idempotently(self):
+        harness = _ApplyHarness(self._records())
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+        harness.applier.apply(plan)
+
+        # Rewind the journal to the "mutations done, completion not written"
+        # crash state and re-apply: no further mutation may happen.
+        entry = harness.journal.load(plan.operation_id)
+        entry["status"] = "applying"
+        harness.journal.save(entry)
+        calls_before = list(harness.engine.update_calls)
+
+        result = harness.applier.apply(plan)
+
+        # The run resumed an applying journal whose steps had all landed:
+        # it completes the entry with zero further mutations.
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertFalse(result.winner_updated)
+        self.assertFalse(result.loser_superseded)
+        self.assertEqual(harness.engine.update_calls, calls_before)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+        self.assertEqual(
+            harness.journal.load(plan.operation_id)["status"], "completed"
+        )
+
+    def test_partial_merge_then_hot_write_converges_on_replanning(self):
+        """Crash after winner update + Hot/Warm touch on the loser.
+
+        The stale plan is rejected; re-planning observes the partial merge
+        (winner lineage now contains the loser) and must still converge to
+        exactly the state a single successful execution would have produced.
+        """
+        harness = _ApplyHarness(self._records())
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        first_plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+
+        harness.engine.fail_on = {"mem-b"}
+        with self.assertRaises(RuntimeError):
+            harness.applier.apply(first_plan)
+        # Hot/Warm churn touches the loser after the partial merge.
+        harness.engine.fail_on = None
+        harness.engine.update("mem-b", metadata={"unrelated": "warm write"})
+
+        stale_result = harness.applier.apply(first_plan)
+        self.assertEqual(stale_result.status, RESULT_STALE_PLAN)
+
+        replan = build_operation_plan(
+            _equivalent_decision(),
+            winner_record=harness.engine.get("mem-a"),
+            loser_record=harness.engine.get("mem-b"),
+        )
+        result = harness.applier.apply(replan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+        self.assertEqual(winner["metadata"]["merged_ids"], ["mem-b"])
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+        self.assertEqual(loser["metadata"]["superseded_by"], "mem-a")
+
+    def test_missing_record_fails_then_recovers_when_it_reappears(self):
+        harness = _ApplyHarness(self._records())
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+        del harness.engine.records["mem-b"]
+
+        result = harness.applier.apply(plan)
+        self.assertEqual(result.status, RESULT_FAILED)
+        self.assertEqual(result.error, "loser_not_found")
+
+        harness.engine.records["mem-b"] = loser
+        result = harness.applier.apply(plan)
+        self.assertEqual(result.status, RESULT_APPLIED)
+
+
+class TestRerunIdempotency(unittest.TestCase):
+    def test_repeated_apply_performs_zero_mutations(self):
+        harness = _ApplyHarness(
+            [
+                _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-03T00:00:00+00:00", confirmation_count=2),
+                _memory(
+                    "mem-b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                ),
+            ]
+        )
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+
+        first = harness.applier.apply(plan)
+        calls_after_first = list(harness.engine.update_calls)
+        second = harness.applier.apply(plan)
+        third = harness.applier.apply(plan)
+
+        self.assertEqual(first.status, RESULT_APPLIED)
+        self.assertEqual(second.status, RESULT_ALREADY_APPLIED)
+        self.assertEqual(third.status, RESULT_ALREADY_APPLIED)
+        self.assertEqual(harness.engine.update_calls, calls_after_first)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 3)
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+
+
+class TestConsolidationLock(unittest.TestCase):
+    def _plan_for(self, user_id="u1", agent_id="hippo"):
+        winner = _memory("mem-a", "text a", user_id=user_id, agent_id=agent_id)
+        loser = _memory("mem-b", "text b", user_id=user_id, agent_id=agent_id)
+        return winner, loser, build_operation_plan(
+            _conflict_decision(), winner_record=winner, loser_record=loser
+        )
+
+    def test_same_identity_lock_is_exclusive(self):
+        harness = _ApplyHarness(self._plan_for()[:2])
+        self.addCleanup(harness.cleanup)
+        _, _, plan = self._plan_for()
+        harness.applier.lock_timeout = 0
+
+        with consolidation_lock(
+            "u1", "hippo", base_dir=harness.lock_dir, timeout=None
+        ):
+            with self.assertRaises(TimeoutError):
+                harness.applier.apply(plan)
+
+    def test_different_identities_do_not_block_each_other(self):
+        harness = _ApplyHarness(
+            [
+                _memory("mem-a", "text a", user_id="u1", agent_id="hippo"),
+                _memory("mem-b", "text b", user_id="u1", agent_id="hippo"),
+                _memory("mem-c", "text c", user_id="u2", agent_id="global"),
+                _memory("mem-d", "text d", user_id="u2", agent_id="global"),
+            ]
+        )
+        self.addCleanup(harness.cleanup)
+        _, _, plan_u1 = self._plan_for("u1", "hippo")
+        winner_u2 = harness.engine.records["mem-c"]
+        loser_u2 = harness.engine.records["mem-d"]
+        plan_u2 = build_operation_plan(
+            _conflict_decision(winner_id="mem-c", loser_id="mem-d"),
+            winner_record=winner_u2,
+            loser_record=loser_u2,
+        )
+
+        with consolidation_lock("u1", "hippo", base_dir=harness.lock_dir, timeout=None):
+            result = harness.applier.apply(plan_u2)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertEqual(
+            harness.engine.records["mem-d"]["metadata"]["superseded_by"], "mem-c"
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

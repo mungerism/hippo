@@ -183,7 +183,7 @@ class WinnerArbiter:
     1. Recency — when both sides have a known ``last_confirmed_at``, a value
        strictly newer by more than ``recency_margin_seconds`` wins. Missing
        freshness never participates (``updated_at`` is not a confirmation
-       signal, see ``_confirmed_at``).
+       signal, see ``confirmed_at``).
     2. Authority — close in time or freshness unknown, ``agent_explicit``
        beats ``session_distillation``.
     3. Confirmation evidence — higher ``confirmation_count`` wins.
@@ -209,17 +209,17 @@ class WinnerArbiter:
             "b": str(memory_b.get("id", "") or ""),
         }
         confirmed = {
-            "a": _confirmed_at(memory_a),
-            "b": _confirmed_at(memory_b),
+            "a": confirmed_at(memory_a),
+            "b": confirmed_at(memory_b),
         }
         created = {
             "a": _created_at(memory_a),
             "b": _created_at(memory_b),
         }
-        sources = {"a": _source(memory_a), "b": _source(memory_b)}
+        sources = {"a": source_of(memory_a), "b": source_of(memory_b)}
         confirmations = {
-            "a": _confirmation_count(memory_a),
-            "b": _confirmation_count(memory_b),
+            "a": confirmation_count_of(memory_a),
+            "b": confirmation_count_of(memory_b),
         }
 
         def decide(winner: str, reason: str) -> ArbitrationResult:
@@ -312,8 +312,8 @@ class ConsolidationDecider:
         # filters by identity, but the decision layer must not trust that the
         # incoming pair is homogeneous — a cross-identity pair must never be
         # allowed to produce a winner/loser plan.
-        identity_a = _identity(memory_a)
-        identity_b = _identity(memory_b)
+        identity_a = resolve_identity(memory_a)
+        identity_b = resolve_identity(memory_b)
         if identity_a is None or identity_b is None:
             return fail_closed("missing_identity_boundary")
         if identity_a != identity_b:
@@ -360,14 +360,14 @@ def _normalized_text(memory: Mapping[str, Any]) -> str:
     return " ".join(str(memory.get("memory", "") or "").split()).casefold()
 
 
-def _identity(memory: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+def resolve_identity(memory: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     """Resolve the storage identity (user_id, agent_id); None if incomplete.
 
     Mirrors CandidateDiscovery's resolution: top-level field first, then
     metadata, so the decision boundary re-checks exactly what discovery
     filtered on.
     """
-    metadata = _metadata(memory)
+    metadata = metadata_of(memory)
     user_id = memory.get("user_id", metadata.get("user_id"))
     agent_id = memory.get("agent_id", metadata.get("agent_id"))
     if not user_id or not agent_id:
@@ -375,12 +375,12 @@ def _identity(memory: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     return str(user_id), str(agent_id)
 
 
-def _metadata(memory: Mapping[str, Any]) -> Mapping[str, Any]:
+def metadata_of(memory: Mapping[str, Any]) -> Mapping[str, Any]:
     metadata = memory.get("metadata", {})
     return metadata if isinstance(metadata, Mapping) else {}
 
 
-def _parse_timestamp(raw: Any) -> Optional[datetime]:
+def parse_timestamp(raw: Any) -> Optional[datetime]:
     if isinstance(raw, datetime):
         return _as_utc(raw)
     if isinstance(raw, str) and raw.strip():
@@ -402,7 +402,7 @@ def _as_utc(value: datetime) -> datetime:
 _EPOCH_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _confirmed_at(memory: Mapping[str, Any]) -> Optional[datetime]:
+def confirmed_at(memory: Mapping[str, Any]) -> Optional[datetime]:
     """Fact-confirmation time from ``last_confirmed_at`` only, else None.
 
     ``updated_at`` is deliberately NOT used: per #15 it reflects any content
@@ -410,23 +410,23 @@ def _confirmed_at(memory: Mapping[str, Any]) -> Optional[datetime]:
     fresher fact and wrongly decide the recency rule. None means freshness
     is unknown and the recency rule must be skipped.
     """
-    parsed = _parse_timestamp(
-        memory.get("last_confirmed_at", _metadata(memory).get("last_confirmed_at"))
+    parsed = parse_timestamp(
+        memory.get("last_confirmed_at", metadata_of(memory).get("last_confirmed_at"))
     )
     return parsed
 
 
 def _created_at(memory: Mapping[str, Any]) -> datetime:
-    parsed = _parse_timestamp(memory.get("created_at", _metadata(memory).get("created_at")))
+    parsed = parse_timestamp(memory.get("created_at", metadata_of(memory).get("created_at")))
     return parsed if parsed is not None else _EPOCH_FLOOR
 
 
-def _source(memory: Mapping[str, Any]) -> str:
-    return str(_metadata(memory).get("source", memory.get("source", "")) or "")
+def source_of(memory: Mapping[str, Any]) -> str:
+    return str(metadata_of(memory).get("source", memory.get("source", "")) or "")
 
 
-def _confirmation_count(memory: Mapping[str, Any]) -> int:
-    raw = _metadata(memory).get(
+def confirmation_count_of(memory: Mapping[str, Any]) -> int:
+    raw = metadata_of(memory).get(
         "confirmation_count", memory.get("confirmation_count")
     )
     if (
