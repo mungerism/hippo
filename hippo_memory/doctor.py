@@ -5,10 +5,8 @@ import os
 from pathlib import Path
 from typing import List
 
-from hippo_memory.config import DEFAULT_ENV_FILE, HIPPO_HOME
+from hippo_memory.config import DEFAULT_ENV_FILE, HIPPO_HOME, resolve_collection_name
 from hippo_memory.service import is_listening, service_status
-
-COLLECTION_NAME = "hippo_memories"
 
 
 def _client_config_checks() -> List[tuple]:
@@ -35,6 +33,9 @@ def _dir_size_mb(path: Path) -> float:
 
 
 def _active_provider() -> str:
+    configured = os.getenv("HIPPO_PROVIDER", "auto").lower()
+    if configured != "auto":
+        return configured
     if os.getenv("GOOGLE_API_KEY"):
         return "gemini"
     if os.getenv("OPENAI_API_KEY"):
@@ -42,8 +43,37 @@ def _active_provider() -> str:
     return "未配置"
 
 
-def _has_active_key() -> bool:
-    return bool(os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY"))
+def _vertex_adc_status() -> tuple[bool, str]:
+    """Resolve Application Default Credentials without issuing a model request."""
+    try:
+        import google.auth
+
+        credentials, detected_project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        if credentials is None:
+            return False, "未解析到 ADC"
+        detail = "ADC 可用"
+        if detected_project:
+            detail += f"，detected_project={detected_project}"
+        return True, detail
+    except Exception as e:
+        return False, f"ADC 不可用: {e}"
+
+
+def _provider_credentials_status(provider: str) -> tuple[bool, str]:
+    if provider == "gemini":
+        ok = bool(os.getenv("GOOGLE_API_KEY"))
+        return ok, "GOOGLE_API_KEY 已配置" if ok else "缺少 GOOGLE_API_KEY"
+    if provider == "openai":
+        ok = bool(os.getenv("OPENAI_API_KEY"))
+        return ok, "OPENAI_API_KEY 已配置" if ok else "缺少 OPENAI_API_KEY"
+    if provider == "vertexai":
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        if not project:
+            return False, "缺少 GOOGLE_CLOUD_PROJECT"
+        return _vertex_adc_status()
+    return False, "未配置可用 provider"
 
 
 def collect_checks() -> List[dict]:
@@ -52,6 +82,15 @@ def collect_checks() -> List[dict]:
 
     def add(category: str, name: str, ok: bool, detail: str = "") -> None:
         checks.append({"category": category, "name": name, "ok": ok, "detail": detail})
+
+    provider = _active_provider()
+    collection_provider = provider if provider != "未配置" else "gemini"
+    collection_name = None
+    collection_error = None
+    try:
+        collection_name = resolve_collection_name(collection_provider)
+    except Exception as e:
+        collection_error = str(e)
 
     # --- Qdrant ---
     listening = False
@@ -67,19 +106,22 @@ def collect_checks() -> List[dict]:
     )
 
     if listening:
-        try:
-            from qdrant_client import QdrantClient
+        if collection_name:
+            try:
+                from qdrant_client import QdrantClient
 
-            client = QdrantClient(host="127.0.0.1", port=6333, timeout=3)
-            exists = client.collection_exists(COLLECTION_NAME)
-            add(
-                "Qdrant",
-                f"collection {COLLECTION_NAME}",
-                exists,
-                "存在" if exists else "不存在（首次 add 记忆后自动创建）",
-            )
-        except Exception as e:
-            add("Qdrant", f"collection {COLLECTION_NAME}", False, f"查询失败: {e}")
+                client = QdrantClient(host="127.0.0.1", port=6333, timeout=3)
+                exists = client.collection_exists(collection_name)
+                add(
+                    "Qdrant",
+                    f"collection {collection_name}",
+                    exists,
+                    "存在" if exists else "不存在（首次 add 记忆后自动创建）",
+                )
+            except Exception as e:
+                add("Qdrant", f"collection {collection_name}", False, f"查询失败: {e}")
+        else:
+            add("Qdrant", "collection 状态", False, f"跳过检查（{collection_error}）")
 
     try:
         add("Qdrant", "数据目录占用", True, f"{_dir_size_mb(HIPPO_HOME / 'storage'):.1f} MB")
@@ -87,12 +129,51 @@ def collect_checks() -> List[dict]:
         add("Qdrant", "数据目录占用", False, str(e))
 
     # --- 配置 ---
-    add("配置", "~/.hippo/.env", DEFAULT_ENV_FILE.exists(),
-        "存在" if DEFAULT_ENV_FILE.exists() else "缺失，参考 README 配置 API Key")
-    provider = _active_provider()
-    add("配置", "API Key", _has_active_key(), f"provider={provider}")
-    if provider == "未配置":
-        add("配置", "修复提示", False, "在 ~/.hippo/.env 设置 GOOGLE_API_KEY（或 OPENAI_API_KEY）")
+    add(
+        "配置",
+        "~/.hippo/.env",
+        DEFAULT_ENV_FILE.exists(),
+        "存在" if DEFAULT_ENV_FILE.exists() else "缺失，参考 README 配置 Provider 凭证",
+    )
+    credentials_ok, credentials_detail = _provider_credentials_status(provider)
+    add(
+        "配置",
+        "Provider 凭证",
+        credentials_ok,
+        f"provider={provider}; {credentials_detail}",
+    )
+    if collection_error:
+        add(
+            "配置",
+            "Qdrant collection",
+            False,
+            f"配置错误: {collection_error}",
+        )
+
+    if provider == "vertexai":
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "global").strip() or "global"
+        add(
+            "配置",
+            "Vertex AI project",
+            bool(project),
+            project or "未配置 GOOGLE_CLOUD_PROJECT",
+        )
+        add("配置", "Vertex AI location", True, location)
+        if not credentials_ok:
+            add(
+                "配置",
+                "修复提示",
+                False,
+                "设置 GOOGLE_CLOUD_PROJECT，并执行 gcloud auth application-default login 配置 ADC",
+            )
+    elif not credentials_ok:
+        add(
+            "配置",
+            "修复提示",
+            False,
+            "在 ~/.hippo/.env 设置 GOOGLE_API_KEY（或 OPENAI_API_KEY）",
+        )
 
     # --- 服务（LaunchAgent）---
     try:
@@ -157,15 +238,32 @@ def collect_checks() -> List[dict]:
     # --- Spool 队列巡检 ---
     try:
         from hippo_memory.hooks import SpoolStorage, JobState
+
         storage = SpoolStorage()
         pending_jobs = storage.list_jobs(state=JobState.PENDING)
         dead_jobs = storage.list_jobs(state=JobState.DEAD)
-        receipt_count = len(list(storage.receipts_dir.glob("*.json"))) if storage.receipts_dir.exists() else 0
+        receipt_count = (
+            len(list(storage.receipts_dir.glob("*.json")))
+            if storage.receipts_dir.exists()
+            else 0
+        )
 
         pending_ok = len(pending_jobs) < 10
-        add("Spool 队列", "待消费积压", pending_ok, f"当前 pending: {len(pending_jobs)} 个" + (" (正常)" if pending_ok else " (较多，可执行 hippo hook worker --drain)"))
+        add(
+            "Spool 队列",
+            "待消费积压",
+            pending_ok,
+            f"当前 pending: {len(pending_jobs)} 个"
+            + (" (正常)" if pending_ok else " (较多，可执行 hippo hook worker --drain)"),
+        )
         dead_ok = len(dead_jobs) == 0
-        add("Spool 队列", "死信作业 (dead)", dead_ok, f"当前 dead: {len(dead_jobs)} 个" + ("" if dead_ok else "；可执行 hippo hook retry <job_id> 重新入队"))
+        add(
+            "Spool 队列",
+            "死信作业 (dead)",
+            dead_ok,
+            f"当前 dead: {len(dead_jobs)} 个"
+            + ("" if dead_ok else "；可执行 hippo hook retry <job_id> 重新入队"),
+        )
         add("Spool 队列", "累计蒸馏收据", True, f"已沉淀 {receipt_count} 个会话状态")
     except Exception as e:
         add("Spool 队列", "队列状态", False, f"探测异常: {e}")
