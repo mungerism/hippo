@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import threading
 import time
 from typing import Any, Iterator, Mapping, Optional
@@ -261,6 +260,24 @@ class OperationJournal:
             os.close(dir_fd)
 
 
+def identity_lock_path(
+    user_id: str,
+    agent_id: str,
+    base_dir: Optional[Path] = None,
+) -> Path:
+    """Flock file for one identity — an injective digest mapping.
+
+    The filename is a SHA-256 of the canonical ``[user_id, agent_id]``
+    representation, so distinct identities can never collide on the same
+    lock file (lossy character sanitization would map e.g. ``foo bar`` and
+    ``foo_bar`` onto one flock and break per-identity independence).
+    """
+    lock_dir = Path(base_dir) if base_dir is not None else DEFAULT_LOCKS_DIR
+    canonical = json.dumps([str(user_id), str(agent_id)], ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return lock_dir / f"identity-{digest}.lock"
+
+
 @contextmanager
 def consolidation_lock(
     user_id: str,
@@ -278,13 +295,17 @@ def consolidation_lock(
     a check-then-act guard alone could never stop a Hot/Warm write landing
     between the check and the store update (TOCTOU).
 
-    Re-entrant inside a process (the applier holds the lock while calling
-    ``engine.update``); cross-process exclusion comes from the flock on
-    ``<lock_dir>/<user_id>__<agent_id>.lock``. Different identities lock
-    different files and never block each other.
+    Re-entrant inside a process *for the same lock namespace* (the applier
+    holds the lock while calling ``engine.update``; the registry key
+    includes the resolved lock directory, so different namespaces are
+    independent locks, never silently merged); cross-process exclusion
+    comes from the flock on the identity's lock file. Different identities
+    lock different files and never block each other.
     """
     lock_dir = Path(base_dir) if base_dir is not None else DEFAULT_LOCKS_DIR
-    key = (str(user_id), str(agent_id))
+    # The namespace is part of the registry key: nested acquires against a
+    # different lock directory are independent locks, not re-entrancy.
+    key = (str(user_id), str(agent_id), str(lock_dir))
     with _REGISTRY_GUARD:
         entry = _IDENTITY_LOCKS.get(key)
         if entry is None:
@@ -292,7 +313,7 @@ def consolidation_lock(
             _IDENTITY_LOCKS[key] = entry
     rlock = entry["rlock"]
     if not rlock.acquire(timeout=timeout if timeout is not None else -1):
-        raise TimeoutError(f"consolidation lock busy for identity={key!r}")
+        raise TimeoutError(f"consolidation lock busy for identity={key[:2]!r}")
     fd: Optional[int] = None
     flocked = False
     try:
@@ -301,8 +322,7 @@ def consolidation_lock(
             entry["depth"] += 1
         if outermost:
             lock_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{key[0]}__{key[1]}")
-            fd = os.open(lock_dir / f"{safe_name}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            fd = os.open(identity_lock_path(key[0], key[1], lock_dir), os.O_CREAT | os.O_RDWR, 0o600)
             deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 try:
@@ -314,7 +334,7 @@ def consolidation_lock(
                         # which closes the un-flocked handle, rebalances the
                         # depth and releases the RLock exactly once.
                         raise TimeoutError(
-                            f"consolidation lock busy for identity={key!r}"
+                            f"consolidation lock busy for identity={key[:2]!r}"
                         ) from None
                     time.sleep(0.02)
             flocked = True
@@ -375,7 +395,24 @@ class ConsolidationApplier:
     ) -> None:
         self.engine = engine
         self.journal = journal or OperationJournal()
-        self.lock_dir = lock_dir or DEFAULT_LOCKS_DIR
+        # One source of truth for the lock namespace: the engine's own
+        # configuration. An explicit override that disagrees with it would
+        # split the shared protocol into two namespaces and reopen the
+        # TOCTOU window, so it is rejected outright.
+        engine_dir = getattr(
+            getattr(engine, "config", None), "consolidation_lock_dir", None
+        )
+        if (
+            lock_dir is not None
+            and engine_dir is not None
+            and Path(lock_dir) != Path(engine_dir)
+        ):
+            raise ValueError(
+                f"applier lock_dir {Path(lock_dir)} differs from the engine's "
+                f"consolidation_lock_dir {Path(engine_dir)}; both sides must "
+                "share exactly one lock namespace"
+            )
+        self.lock_dir = Path(lock_dir or engine_dir or DEFAULT_LOCKS_DIR)
         self.lock_timeout = lock_timeout
 
     def _save(self, entry: dict[str, Any]) -> None:

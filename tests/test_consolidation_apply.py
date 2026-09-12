@@ -29,6 +29,7 @@ from hippo_memory.apply import (
     OperationPlan,
     build_operation_plan,
     consolidation_lock,
+    identity_lock_path,
     record_version,
 )
 from hippo_memory.decision import ConsolidationDecision
@@ -949,7 +950,7 @@ class TestWriterLockProtocol(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         lock_dir = Path(tmp.name) / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / "u1__hippo.lock"
+        lock_path = identity_lock_path("u1", "hippo", lock_dir)
         script = (
             "import fcntl, os, time\n"
             f"fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR)\n"
@@ -978,6 +979,83 @@ class TestWriterLockProtocol(unittest.TestCase):
             "u1", "hippo", base_dir=lock_dir, timeout=None
         ):
             pass
+
+
+    def test_lock_filename_is_injective_per_identity(self):
+        """Lossy sanitization could collide (foo bar vs foo_bar, tuple
+        boundaries); the digest mapping must keep distinct identities on
+        distinct lock files."""
+        self.assertNotEqual(
+            identity_lock_path("u1", "foo bar", self.lock_dir),
+            identity_lock_path("u1", "foo_bar", self.lock_dir),
+        )
+        self.assertNotEqual(
+            identity_lock_path("a__b", "c", self.lock_dir),
+            identity_lock_path("a", "b__c", self.lock_dir),
+        )
+        self.assertEqual(
+            identity_lock_path("u1", "hippo", self.lock_dir),
+            identity_lock_path("u1", "hippo", self.lock_dir),
+        )
+
+    def test_lock_namespaces_are_independent_not_merged(self):
+        """Regression (PR #33 review round 4): the registry is keyed by
+        identity AND lock namespace — a hold in one namespace must never
+        make an engine write in another namespace re-entrant."""
+        engine = self._engine(lock_timeout=0.0)
+        ns_b = Path(self.tmp.name) / "locks-b"
+        other_engine = HippoEngine(
+            SimpleNamespace(
+                user_id="u1",
+                consolidation_lock_timeout=0.0,
+                consolidation_lock_dir=ns_b,
+            )
+        )
+        other_engine._memory = _StubMemory(
+            [_memory("mem-a", "text a"), _memory("mem-b", "text b")]
+        )
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold():
+            with consolidation_lock(
+                "u1", "hippo", base_dir=ns_b, timeout=None
+            ):
+                acquired.set()
+                release.wait(timeout=2)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            self.assertTrue(acquired.wait(timeout=2))
+            with consolidation_lock(
+                "u1", "hippo", base_dir=self.lock_dir, timeout=None
+            ):
+                # ns-A hold must NOT re-enter ns-B: the writer is expected
+                # to take its own namespace's flock and time out.
+                with self.assertRaises(TimeoutError):
+                    other_engine.update("mem-a", metadata={"status": "hot"})
+        finally:
+            release.set()
+            holder.join(timeout=2)
+
+        # With ns-B free, the writer proceeds even while ns-A stays held.
+        with consolidation_lock(
+            "u1", "hippo", base_dir=self.lock_dir, timeout=None
+        ):
+            other_engine.update("mem-a", metadata={"status": "hot"})
+        self.assertEqual(other_engine._memory.calls[0][0], "update")
+
+    def test_applier_rejects_engine_namespace_mismatch(self):
+        """One lock namespace per identity: an applier pointed at a
+        different lock directory than the engine's is rejected outright."""
+        engine = self._engine(lock_timeout=0.0)
+        with self.assertRaises(ValueError):
+            ConsolidationApplier(
+                engine,
+                journal=OperationJournal(Path(self.tmp.name) / "ops"),
+                lock_dir=Path(self.tmp.name) / "locks-other",
+            )
 
 
 if __name__ == "__main__":

@@ -542,7 +542,14 @@ class HippoEngine:
         scope: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> bool:
-        """Bulk delete memories within a given scope."""
+        """Bulk delete memories within a given scope.
+
+        Joins the shared per-identity write protocol whenever the identity
+        is resolvable (``agent_id``, ``scope="global"`` or
+        ``scope="project"``). ``scope=None``/"all" spans every identity and
+        has no single lock granularity: it is an admin-level operation
+        outside the shared per-identity write protocol.
+        """
         uid = user_id or self.config.user_id
         aid = agent_id
         if scope == "global":
