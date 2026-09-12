@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import math
-import re
 from typing import Any, Mapping, Optional
 
 from hippo_memory.renderer import UNTRUSTED_CONTEXT_INSTRUCTION, escape_untrusted_text
@@ -35,8 +34,6 @@ VALID_RELATIONS = (RELATION_EQUIVALENT, RELATION_CONFLICT, RELATION_DISTINCT)
 _SOURCE_AUTHORITY_RANK = {"agent_explicit": 2, "session_distillation": 1}
 
 _DEFAULT_CONFIRMATION_COUNT = 1
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +76,13 @@ class RelationshipClassifier:
 
     Deterministic rules run first (normalized exact match). Anything else
     goes to the optional LLM seam, which has no tool access: it only receives
-    ``generate_response(messages)`` with the memories wrapped as untrusted
-    data. Every failure mode fails closed to DISTINCT.
+    ``generate_response(messages, response_format=...)`` with the memories
+    wrapped as untrusted data. Every failure mode fails closed to DISTINCT.
+
+    Determinism: the seam asks for strict JSON and forces the injected LLM's
+    ``config.temperature`` to ``temperature`` (default 0) so repeated runs on
+    identical input produce identical verdicts. Inject a dedicated LLM
+    instance — the mutation is visible to everyone sharing it.
     """
 
     def __init__(
@@ -88,6 +90,7 @@ class RelationshipClassifier:
         *,
         llm: Any = None,
         low_confidence_threshold: float = 0.6,
+        temperature: float = 0.0,
     ) -> None:
         if (
             not isinstance(low_confidence_threshold, (int, float))
@@ -98,8 +101,20 @@ class RelationshipClassifier:
             raise ValueError(
                 "low_confidence_threshold must be a finite number in [0.0, 1.0]"
             )
+        if (
+            not isinstance(temperature, (int, float))
+            or isinstance(temperature, bool)
+            or not math.isfinite(temperature)
+            or temperature < 0
+        ):
+            raise ValueError("temperature must be a finite number >= 0")
         self.llm = llm
         self.low_confidence_threshold = float(low_confidence_threshold)
+        # Mem0 LLM wrappers re-read config.temperature on every call; pin it
+        # so classification does not inherit the warm path's sampling heat.
+        llm_temperature = getattr(llm, "config", None)
+        if llm_temperature is not None and hasattr(llm_temperature, "temperature"):
+            llm_temperature.temperature = float(temperature)
 
     def classify(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
@@ -144,7 +159,11 @@ class RelationshipClassifier:
             {"role": "user", "content": _render_classifier_prompt(first, second)},
         ]
         try:
-            response = self.llm.generate_response(messages)
+            # JSON mode where the provider supports it; the strict parser
+            # below still fails closed on anything non-conforming.
+            response = self.llm.generate_response(
+                messages, response_format={"type": "json_object"}
+            )
         except Exception:
             return _Classification(RELATION_DISTINCT, "classifier_exception", None)
 
@@ -161,10 +180,12 @@ class WinnerArbiter:
     """Deterministic winner arbitration for EQUIVALENT / CONFLICT pairs.
 
     Rule order (first decisive rule wins):
-    1. Recency — ``last_confirmed_at`` strictly newer by more than
-       ``recency_margin_seconds`` wins.
-    2. Authority — close in time, ``agent_explicit`` beats
-       ``session_distillation``.
+    1. Recency — when both sides have a known ``last_confirmed_at``, a value
+       strictly newer by more than ``recency_margin_seconds`` wins. Missing
+       freshness never participates (``updated_at`` is not a confirmation
+       signal, see ``_confirmed_at``).
+    2. Authority — close in time or freshness unknown, ``agent_explicit``
+       beats ``session_distillation``.
     3. Confirmation evidence — higher ``confirmation_count`` wins.
     4. Stability — earlier ``created_at`` wins, then the lexicographically
        smaller memory ID guarantees a total order.
@@ -213,7 +234,12 @@ class WinnerArbiter:
                     "rule": reason,
                     "recency_margin_seconds": self.recency_margin_seconds,
                     "confirmed_at": {
-                        ids[side]: confirmed[side].isoformat() for side in ("a", "b")
+                        ids[side]: (
+                            confirmed[side].isoformat()
+                            if confirmed[side] is not None
+                            else None
+                        )
+                        for side in ("a", "b")
                     },
                     "source": {ids[side]: sources[side] for side in ("a", "b")},
                     "confirmation_count": {
@@ -225,7 +251,11 @@ class WinnerArbiter:
                 },
             )
 
-        if confirmed["a"] != confirmed["b"]:
+        if (
+            confirmed["a"] is not None
+            and confirmed["b"] is not None
+            and confirmed["a"] != confirmed["b"]
+        ):
             newer, older = (
                 ("a", "b") if confirmed["a"] > confirmed["b"] else ("b", "a")
             )
@@ -263,19 +293,41 @@ class ConsolidationDecider:
     def decide(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
     ) -> ConsolidationDecision:
-        if not str(memory_a.get("id", "") or "") or not str(
-            memory_b.get("id", "") or ""
-        ):
+        def fail_closed(reason: str, confidence: Optional[float] = None) -> ConsolidationDecision:
             return ConsolidationDecision(
                 relation=RELATION_DISTINCT,
                 winner_id=None,
                 loser_id=None,
-                reason="missing_memory_id",
-                confidence=None,
-                evidence={},
+                reason=reason,
+                confidence=confidence,
+                evidence={"classification": {"reason": reason, "confidence": confidence}},
             )
 
-        classification = self.classifier.classify(memory_a, memory_b)
+        if not str(memory_a.get("id", "") or "") or not str(
+            memory_b.get("id", "") or ""
+        ):
+            return fail_closed("missing_memory_id")
+
+        # Hard (user_id, agent_id) boundary re-check (parent #17): discovery
+        # filters by identity, but the decision layer must not trust that the
+        # incoming pair is homogeneous — a cross-identity pair must never be
+        # allowed to produce a winner/loser plan.
+        identity_a = _identity(memory_a)
+        identity_b = _identity(memory_b)
+        if identity_a is None or identity_b is None:
+            return fail_closed("missing_identity_boundary")
+        if identity_a != identity_b:
+            return fail_closed("identity_boundary_mismatch")
+
+        try:
+            classification = self.classifier.classify(memory_a, memory_b)
+        except Exception:
+            classification = _Classification(
+                RELATION_DISTINCT, "classifier_exception", None
+            )
+        if classification.relation not in VALID_RELATIONS:
+            return fail_closed("malformed_classifier_output")
+
         classification_evidence = {
             "reason": classification.reason,
             "confidence": classification.confidence,
@@ -308,6 +360,21 @@ def _normalized_text(memory: Mapping[str, Any]) -> str:
     return " ".join(str(memory.get("memory", "") or "").split()).casefold()
 
 
+def _identity(memory: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    """Resolve the storage identity (user_id, agent_id); None if incomplete.
+
+    Mirrors CandidateDiscovery's resolution: top-level field first, then
+    metadata, so the decision boundary re-checks exactly what discovery
+    filtered on.
+    """
+    metadata = _metadata(memory)
+    user_id = memory.get("user_id", metadata.get("user_id"))
+    agent_id = memory.get("agent_id", metadata.get("agent_id"))
+    if not user_id or not agent_id:
+        return None
+    return str(user_id), str(agent_id)
+
+
 def _metadata(memory: Mapping[str, Any]) -> Mapping[str, Any]:
     metadata = memory.get("metadata", {})
     return metadata if isinstance(metadata, Mapping) else {}
@@ -335,13 +402,18 @@ def _as_utc(value: datetime) -> datetime:
 _EPOCH_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _confirmed_at(memory: Mapping[str, Any]) -> datetime:
-    metadata = _metadata(memory)
-    for field_name in ("last_confirmed_at", "updated_at", "created_at"):
-        parsed = _parse_timestamp(memory.get(field_name, metadata.get(field_name)))
-        if parsed is not None:
-            return parsed
-    return _EPOCH_FLOOR
+def _confirmed_at(memory: Mapping[str, Any]) -> Optional[datetime]:
+    """Fact-confirmation time from ``last_confirmed_at`` only, else None.
+
+    ``updated_at`` is deliberately NOT used: per #15 it reflects any content
+    or metadata change, so a pure metadata update would masquerade as a
+    fresher fact and wrongly decide the recency rule. None means freshness
+    is unknown and the recency rule must be skipped.
+    """
+    parsed = _parse_timestamp(
+        memory.get("last_confirmed_at", _metadata(memory).get("last_confirmed_at"))
+    )
+    return parsed
 
 
 def _created_at(memory: Mapping[str, Any]) -> datetime:
@@ -406,18 +478,16 @@ def _render_classifier_prompt(first: tuple[str, str], second: tuple[str, str]) -
 def _parse_classifier_response(
     response: Any,
 ) -> Optional[tuple[str, float, str]]:
-    """Parse a strict-JSON classifier verdict; None means malformed."""
+    """Parse a strict-JSON classifier verdict; None means malformed.
+
+    The whole response must be exactly one JSON object after trimming outer
+    whitespace — no markdown fences, no prose prefix/suffix, no brace
+    scavenging. Anything else violates the output protocol and fails closed.
+    """
     if not isinstance(response, str):
         return None
-    candidate = response.strip()
-    fenced = _JSON_FENCE_RE.search(candidate)
-    if fenced:
-        candidate = fenced.group(1).strip()
-    start, end = candidate.find("{"), candidate.rfind("}")
-    if start == -1 or end <= start:
-        return None
     try:
-        payload = json.loads(candidate[start : end + 1])
+        payload = json.loads(response.strip())
     except (json.JSONDecodeError, ValueError):
         return None
     if not isinstance(payload, dict):
