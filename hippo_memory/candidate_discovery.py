@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from hippo_memory.engine import HippoEngine
 
@@ -77,8 +77,28 @@ class CandidateDiscovery:
             "agent_id": identity[1],
             "NOT": [{"status": "superseded"}],
         }
-        response = self.engine.memory.get_all(filters=filters, top_k=self.scan_limit + 1)
-        raw_result = response.get("results", []) if isinstance(response, Mapping) else response
+        scan_probe = self.engine.memory.get_all(
+            filters=filters,
+            top_k=self.scan_limit + 1,
+            show_expired=True,
+        )
+        probe_result = (
+            scan_probe.get("results", [])
+            if isinstance(scan_probe, Mapping)
+            else scan_probe
+        )
+        if len(list(probe_result or [])) > self.scan_limit:
+            raise CandidateScanLimitExceeded(
+                f"memory scan exceeds scan_limit={self.scan_limit} for identity={identity!r}"
+            )
+        response = self.engine.memory.get_all(
+            filters=filters,
+            top_k=self.scan_limit + 1,
+            show_expired=False,
+        )
+        raw_result = (
+            response.get("results", []) if isinstance(response, Mapping) else response
+        )
         raw_memories = list(raw_result or [])
         if len(raw_memories) > self.scan_limit:
             raise CandidateScanLimitExceeded(
@@ -97,51 +117,64 @@ class CandidateDiscovery:
             or self._latest_timestamp(memory) >= normalized_since
         ]
 
-        edges: list[CandidateEdge] = []
-        seen_pairs: set[frozenset[str]] = set()
+        edges_by_pair: dict[tuple[str, str], CandidateEdge] = {}
         for seed in seeds:
             seed_id = str(seed.get("id", ""))
             seed_text = str(seed.get("memory", ""))
             if not seed_id or not seed_text:
                 continue
-            vector = self.engine.memory.embedding_model.embed(seed_text, "search")
-            neighbors = self.engine.memory.vector_store.search(
+            search_response = self.engine.memory.search(
                 query=seed_text,
-                vectors=vector,
-                top_k=self.top_k + 1,
                 filters=filters,
+                top_k=self.top_k + 1,
+                threshold=0.0,
+                explain=True,
             )
+            raw_neighbors = (
+                search_response.get("results", [])
+                if isinstance(search_response, Mapping)
+                else search_response
+            )
+            neighbors = list(raw_neighbors or [])
             accepted_for_seed = 0
             for neighbor in neighbors:
-                neighbor_id = str(getattr(neighbor, "id", ""))
-                score = getattr(neighbor, "score", None)
-                payload = getattr(neighbor, "payload", {}) or {}
-                pair_key = frozenset((seed_id, neighbor_id))
+                if not isinstance(neighbor, Mapping):
+                    continue
+                neighbor_id = str(neighbor.get("id", ""))
+                score_details = neighbor.get("score_details", {})
+                score = (
+                    score_details.get("semantic_score")
+                    if isinstance(score_details, Mapping)
+                    else None
+                )
                 if (
                     not neighbor_id
                     or neighbor_id == seed_id
-                    or pair_key in seen_pairs
                     or not isinstance(score, (int, float))
                     or isinstance(score, bool)
                     or not math.isfinite(float(score))
                     or float(score) < self.semantic_threshold
-                    or not self._matches_identity(payload, identity)
-                    or not self._is_active(payload)
+                    or not self._matches_identity(neighbor, identity)
+                    or not self._is_active(neighbor)
                 ):
                     continue
-                seen_pairs.add(pair_key)
-                edges.append(
-                    CandidateEdge(
-                        seed_id=seed_id,
-                        neighbor_id=neighbor_id,
-                        semantic_score=float(score),
-                        identity=identity,
-                    )
+                edge = CandidateEdge(
+                    seed_id=seed_id,
+                    neighbor_id=neighbor_id,
+                    semantic_score=float(score),
+                    identity=identity,
                 )
                 accepted_for_seed += 1
+                pair_key = tuple(sorted((seed_id, neighbor_id)))
+                previous = edges_by_pair.get(pair_key)
+                if previous is None or self._edge_preference(edge) < self._edge_preference(
+                    previous
+                ):
+                    edges_by_pair[pair_key] = edge
                 if accepted_for_seed >= self.top_k:
                     break
 
+        edges = [edges_by_pair[key] for key in sorted(edges_by_pair)]
         return CandidateSet(scanned=len(active), seeds=len(seeds), candidate_pairs=edges)
 
     def _resolve_identity(
@@ -197,3 +230,7 @@ class CandidateDiscovery:
                 except ValueError:
                     continue
         return max(timestamps, default=datetime.min.replace(tzinfo=timezone.utc))
+
+    @staticmethod
+    def _edge_preference(edge: CandidateEdge) -> tuple[float, str, str]:
+        return (-edge.semantic_score, edge.seed_id, edge.neighbor_id)

@@ -11,42 +11,24 @@ from hippo_memory.candidate_discovery import (
 from hippo_memory.engine import HippoEngine
 
 
-class _Point:
-    def __init__(self, memory_id, score, payload):
-        self.id = memory_id
-        self.score = score
-        self.payload = payload
-
-
-class _EmbeddingModel:
-    def embed(self, text, memory_action):
-        return text
-
-
-class _VectorStore:
-    def __init__(self, neighbors):
-        self.neighbors = neighbors
-
-    def search(self, query, vectors, top_k, filters):
-        candidates = self.neighbors.get(query, [])
-        if {"status": "superseded"} in filters.get("NOT", []):
-            candidates = [
-                point
-                for point in candidates
-                if point.payload.get("status") != "superseded"
-            ]
-        return candidates[:top_k]
-
-
 class _Memory:
     def __init__(self, memories, neighbors):
         self._memories = memories
+        self._neighbors = neighbors
         self.mutation_calls = []
-        self.embedding_model = _EmbeddingModel()
-        self.vector_store = _VectorStore(neighbors)
 
-    def get_all(self, *, filters, top_k):
+    def get_all(self, *, filters, top_k, show_expired=False):
         return {"results": list(self._memories)[:top_k]}
+
+    def search(self, query, *, filters, top_k, threshold, explain):
+        candidates = self._neighbors.get(query, [])
+        if {"status": "superseded"} in filters.get("NOT", []):
+            candidates = [
+                item
+                for item in candidates
+                if item.get("metadata", {}).get("status") != "superseded"
+            ]
+        return {"results": list(candidates)[:top_k]}
 
     def add(self, *args, **kwargs):
         self.mutation_calls.append(("add", args, kwargs))
@@ -56,6 +38,21 @@ class _Memory:
 
     def delete(self, *args, **kwargs):
         self.mutation_calls.append(("delete", args, kwargs))
+
+
+class _ExpiredWindowMemory(_Memory):
+    """Reproduce Mem0 filtering expired points after a bounded vector-store read."""
+
+    def get_all(self, *, filters, top_k, show_expired=False):
+        if show_expired:
+            return {"results": list(self._memories)[:top_k]}
+        return {"results": []}
+
+
+class _ConcurrentGrowthMemory(_Memory):
+    def get_all(self, *, filters, top_k, show_expired=False):
+        records = self._memories[:1] if show_expired else self._memories
+        return {"results": list(records)[:top_k]}
 
 
 def _memory(
@@ -80,13 +77,20 @@ def _memory(
 
 
 def _point(memory, score):
-    payload = {
-        "data": memory["memory"],
-        "user_id": memory["user_id"],
-        "agent_id": memory["agent_id"],
-        **memory.get("metadata", {}),
+    return _search_result(memory, score)
+
+
+def _search_result(memory, semantic_score):
+    return {
+        **memory,
+        "score": semantic_score,
+        "score_details": {
+            "semantic_score": semantic_score,
+            "bm25_score": 0.0,
+            "entity_boost": 0.0,
+            "final_score": semantic_score,
+        },
     }
-    return _Point(memory["id"], score, payload)
 
 
 class TestCandidateDiscovery(unittest.TestCase):
@@ -122,6 +126,29 @@ class TestCandidateDiscovery(unittest.TestCase):
         self.assertEqual(
             result.candidate_pairs,
             [CandidateEdge("seed", "same", 0.96, ("u1", "hippo"))],
+        )
+
+    def test_global_scope_resolves_to_the_global_storage_identity(self):
+        seed = _memory("seed", "prefers concise replies", "u1", "global")
+        neighbor = _memory("neighbor", "likes concise answers", "u1", "global")
+        project = _memory("project", "project response rule", "u1", "hippo")
+        discovery = self._discovery(
+            [seed, neighbor, project],
+            {
+                seed["memory"]: [
+                    _point(seed, 1.0),
+                    _point(neighbor, 0.95),
+                    _point(project, 0.99),
+                ]
+            },
+        )
+
+        result = discovery.discover(scope="global")
+
+        self.assertEqual(result.scanned, 2)
+        self.assertEqual(
+            result.candidate_pairs,
+            [CandidateEdge("seed", "neighbor", 0.95, ("u1", "global"))],
         )
 
     def test_since_limits_seeds_but_not_historical_neighbors(self):
@@ -302,6 +329,67 @@ class TestCandidateDiscovery(unittest.TestCase):
 
         with self.assertRaises(CandidateScanLimitExceeded):
             discovery.discover(scope="project", project_id="hippo")
+
+    def test_expired_front_page_cannot_hide_active_memories_beyond_scan_limit(self):
+        expired = _memory("expired", "expired", "u1", "hippo")
+        hidden_active = _memory("active", "active", "u1", "hippo")
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        engine._memory = _ExpiredWindowMemory([expired, hidden_active], {})
+        discovery = CandidateDiscovery(engine, scan_limit=1)
+
+        with self.assertRaises(CandidateScanLimitExceeded):
+            discovery.discover(scope="project", project_id="hippo")
+
+    def test_growth_between_scan_probe_and_active_read_fails_closed(self):
+        initial = _memory("initial", "initial", "u1", "hippo")
+        concurrent = _memory("concurrent", "concurrent", "u1", "hippo")
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        engine._memory = _ConcurrentGrowthMemory([initial, concurrent], {})
+        discovery = CandidateDiscovery(engine, scan_limit=1)
+
+        with self.assertRaises(CandidateScanLimitExceeded):
+            discovery.discover(scope="project", project_id="hippo")
+
+    def test_ann_neighbors_use_the_public_mem0_search_contract(self):
+        seed = _memory("seed", "uses postgres", "u1", "hippo")
+        neighbor = _memory("neighbor", "database is postgres", "u1", "hippo")
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        engine._memory = _Memory(
+            [seed],
+            {
+                seed["memory"]: [
+                    _search_result(seed, 1.0),
+                    _search_result(neighbor, 0.94),
+                ]
+            },
+        )
+        discovery = CandidateDiscovery(engine)
+
+        result = discovery.discover(scope="project", project_id="hippo")
+
+        self.assertEqual(
+            result.candidate_pairs,
+            [CandidateEdge("seed", "neighbor", 0.94, ("u1", "hippo"))],
+        )
+
+    def test_pair_direction_and_score_are_stable_across_scan_order(self):
+        a = _memory("a", "fact a", "u1", "hippo")
+        b = _memory("b", "fact b", "u1", "hippo")
+        neighbors = {
+            a["memory"]: [_point(a, 1.0), _point(b, 0.86)],
+            b["memory"]: [_point(b, 1.0), _point(a, 0.99)],
+        }
+
+        first = self._discovery([a, b], neighbors).discover(
+            scope="project", project_id="hippo"
+        )
+        reversed_scan = self._discovery([b, a], neighbors).discover(
+            scope="project", project_id="hippo"
+        )
+
+        expected = [CandidateEdge("b", "a", 0.99, ("u1", "hippo"))]
+        self.assertEqual(first.candidate_pairs, expected)
+        self.assertEqual(reversed_scan.candidate_pairs, expected)
 
     def test_invalid_ann_scores_fail_closed(self):
         seed = _memory("seed", "seed fact", "u1", "hippo")
