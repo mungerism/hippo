@@ -245,6 +245,13 @@ class OperationJournal:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        # fsync the directory too so the rename itself survives power loss
+        # or an OS crash, not only the temp file contents.
+        dir_fd = os.open(self.base_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 @contextmanager
@@ -403,6 +410,10 @@ class ConsolidationApplier:
             and stored_patch
             and self._winner_patch_already_applied(winner, stored_patch)
         ):
+            # Our merge landed before the journal flip. Adopt the record as
+            # it stands now as the post-apply baseline and let the strict
+            # post-apply validation below take over from here.
+            entry["post_winner_version"] = record_version(winner)
             steps["winner_update"] = True
             winner_pending = False
             self._save(entry)
@@ -414,10 +425,21 @@ class ConsolidationApplier:
             loser_pending = False
             self._save(entry)
 
-        # Observed-version revalidation BEFORE any mutation: a Hot/Warm write
-        # to either not-yet-applied side rejects the whole plan as stale.
-        # Steps already completed above are exempt — those are our own writes.
-        if winner_pending and record_version(winner) != plan.observed_winner_version:
+        # Observed-version revalidation BEFORE any mutation. EVERY side is
+        # validated, mutated or not: sides already merged by us are checked
+        # against their persisted post-apply fingerprint (so a Hot/Warm write
+        # after a partial apply can never be mistaken for a clean recovery),
+        # untouched sides against the planning-time fingerprint.
+        if plan.relation == RELATION_EQUIVALENT:
+            post_winner = entry.get("post_winner_version")
+            if post_winner is not None:
+                if record_version(winner) != post_winner:
+                    return self._mark_stale(entry, plan, "winner", winner)
+            elif record_version(winner) != plan.observed_winner_version:
+                return self._mark_stale(entry, plan, "winner", winner)
+        elif record_version(winner) != plan.observed_winner_version:
+            # CONFLICT never mutates the winner, but a Hot/Warm write to it
+            # still invalidates the plan.
             return self._mark_stale(entry, plan, "winner", winner)
         if loser_pending and record_version(loser) != plan.observed_loser_version:
             return self._mark_stale(entry, plan, "loser", loser)
@@ -433,6 +455,12 @@ class ConsolidationApplier:
             self._save(entry)
             self.engine.update(plan.winner_id, metadata=dict(winner_patch))
             winner_updated = True
+            merged_winner = self.engine.get(plan.winner_id)
+            # Persist the post-apply fingerprint so any retry can prove the
+            # merged winner was not touched by Hot/Warm afterwards.
+            entry["post_winner_version"] = (
+                record_version(merged_winner) if merged_winner is not None else None
+            )
             steps["winner_update"] = True
             self._save(entry)
 
@@ -448,6 +476,9 @@ class ConsolidationApplier:
             )
             loser_superseded = True
             steps["loser_supersede"] = True
+            # No post-apply fingerprint needed here: supersede is the final
+            # step, no pending mutation remains that a later retry could
+            # misapply against a further-touched loser.
             self._save(entry)
 
         entry["status"] = STATUS_COMPLETED

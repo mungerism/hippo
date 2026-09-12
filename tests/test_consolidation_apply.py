@@ -400,6 +400,21 @@ class TestStalePlans(unittest.TestCase):
         self.assertEqual(winner_calls, [])
         self.assertEqual(harness.journal.load(plan.operation_id)["status"], "stale")
 
+    def test_hot_or_warm_update_to_conflict_winner_rejects_the_plan(self):
+        """The CONFLICT winner is never mutated, but its observed version is
+        still enforced — a stale plan must not supersede the loser."""
+        harness, plan = self._harness_with_plan()
+        self.addCleanup(harness.cleanup)
+        harness.engine.update("mem-a", metadata={"unrelated": "hot write"})
+        calls_before = list(harness.engine.update_calls)
+
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_STALE_PLAN)
+        self.assertIn("winner", result.error)
+        self.assertEqual(harness.engine.update_calls, calls_before)
+        self.assertEqual(harness.journal.load(plan.operation_id)["status"], "stale")
+
     def test_stale_journal_is_terminal_for_that_operation(self):
         harness, plan = self._harness_with_plan()
         self.addCleanup(harness.cleanup)
@@ -558,6 +573,36 @@ class TestCrashRecovery(unittest.TestCase):
         self.assertEqual(winner["metadata"]["merged_ids"], ["mem-b"])
         self.assertEqual(loser["metadata"]["status"], "superseded")
         self.assertEqual(loser["metadata"]["superseded_by"], "mem-a")
+
+    def test_hot_write_to_merged_winner_rejects_the_original_plan_on_retry(self):
+        """Regression (PR #33 review): winner merge succeeds -> loser update
+        crashes -> Hot/Warm updates the winner -> retrying the original
+        operation must return stale_plan and leave the loser active."""
+        harness = _ApplyHarness(self._records())
+        self.addCleanup(harness.cleanup)
+        winner = harness.engine.records["mem-a"]
+        loser = harness.engine.records["mem-b"]
+        plan = build_operation_plan(
+            _equivalent_decision(), winner_record=winner, loser_record=loser
+        )
+
+        harness.engine.fail_on = {"mem-b"}
+        with self.assertRaises(RuntimeError):
+            harness.applier.apply(plan)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+
+        harness.engine.fail_on = None
+        harness.engine.update("mem-a", metadata={"unrelated": "hot write after merge"})
+
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_STALE_PLAN)
+        self.assertIn("winner", result.error)
+        self.assertEqual(loser["metadata"].get("status", "active"), "active")
+        loser_calls = [
+            call for call in harness.engine.update_calls if call["id"] == "mem-b"
+        ]
+        self.assertEqual(loser_calls, [])
 
     def test_missing_record_fails_then_recovers_when_it_reappears(self):
         harness = _ApplyHarness(self._records())
