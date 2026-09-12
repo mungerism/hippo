@@ -319,6 +319,82 @@ class HippoEngine:
             logger.error("Error applying relevance gate to search results: %s", e)
             return []
 
+    def search_semantic_neighbors(
+        self,
+        query: str,
+        *,
+        filters: Dict[str, Any],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        """Return raw semantic ANN neighbors without Mem0's hybrid reranking.
+
+        Mem0's public ``search`` combines semantic, BM25, and entity scores before
+        applying ``top_k``. Candidate discovery needs the semantic ordering itself,
+        so this gateway isolates the smallest necessary compatibility seam. Callers
+        must include all eligibility constraints in ``filters`` so the vector store
+        can execute one bounded ANN query.
+        """
+        if top_k <= 0:
+            return []
+
+        memory = self.memory
+        embedding = memory.embedding_model.embed(query, "search")
+        raw_points = memory.vector_store.search(
+            query=query,
+            vectors=embedding,
+            top_k=top_k,
+            filters=filters,
+        )
+        return [
+            self._format_semantic_point(point)
+            for point in list(raw_points or [])[:top_k]
+        ]
+
+    @staticmethod
+    def _semantic_point_id(point: Any) -> str:
+        point_id = point.get("id", "") if isinstance(point, dict) else point.id
+        return str(point_id)
+
+    @staticmethod
+    def _format_semantic_point(point: Any) -> Dict[str, Any]:
+        payload = (
+            point.get("payload", {}) if isinstance(point, dict) else point.payload
+        ) or {}
+        score = point.get("score") if isinstance(point, dict) else point.score
+        promoted_keys = {
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+            "attributed_to",
+            "expiration_date",
+        }
+        core_keys = {
+            "data",
+            "hash",
+            "created_at",
+            "updated_at",
+            "id",
+            "text_lemmatized",
+            *promoted_keys,
+        }
+        result: Dict[str, Any] = {
+            "id": HippoEngine._semantic_point_id(point),
+            "memory": payload.get("data", ""),
+            "hash": payload.get("hash"),
+            "created_at": payload.get("created_at"),
+            "updated_at": payload.get("updated_at"),
+            "semantic_score": score,
+        }
+        for key in promoted_keys:
+            if key in payload:
+                result[key] = payload[key]
+        metadata = {key: value for key, value in payload.items() if key not in core_keys}
+        if metadata:
+            result["metadata"] = metadata
+        return result
+
     def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a single memory by its ID."""
         try:
