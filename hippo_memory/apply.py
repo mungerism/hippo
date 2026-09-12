@@ -79,7 +79,7 @@ DEFAULT_LOCKS_DIR = HIPPO_HOME / "consolidation" / "locks"
 # identity inside one process would deadlock without this registry; the
 # RLock additionally serializes same-identity writer threads in-process.
 _REGISTRY_GUARD = threading.Lock()
-_IDENTITY_LOCKS: dict[tuple[str, str], dict[str, Any]] = {}
+_IDENTITY_LOCKS: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
 def _utc_now_iso() -> str:
