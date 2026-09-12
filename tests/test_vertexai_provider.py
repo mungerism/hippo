@@ -54,7 +54,7 @@ class TestVertexAIProvider(unittest.TestCase):
             "GOOGLE_CLOUD_PROJECT": "custom-project",
             "GOOGLE_CLOUD_LOCATION": "us",
             "VERTEX_LLM_MODEL": "gemini-custom",
-            "VERTEX_EMBEDDING_MODEL": "gemini-embedding-2-preview",
+            "VERTEX_EMBEDDING_MODEL": "gemini-embedding-2",
             "VERTEX_EMBEDDING_DIMS": "256",
         }
         with patch.dict(os.environ, env, clear=True), patch(
@@ -67,12 +67,12 @@ class TestVertexAIProvider(unittest.TestCase):
         self.assertEqual(mem0_config["llm"]["config"]["location"], "us")
         self.assertEqual(
             mem0_config["embedder"]["config"]["model"],
-            "gemini-embedding-2-preview",
+            "gemini-embedding-2",
         )
         self.assertEqual(mem0_config["embedder"]["config"]["embedding_dims"], 256)
         self.assertEqual(
             mem0_config["vector_store"]["config"]["collection_name"],
-            "hippo_memories_vertexai_gemini_embedding_2_preview_256",
+            "hippo_memories_vertexai_gemini_embedding_2_256",
         )
 
     def test_vertex_requires_project(self):
@@ -193,6 +193,18 @@ class TestVertexAIProvider(unittest.TestCase):
         env = {"GOOGLE_CLOUD_PROJECT": "hippo-test"}
         config = BaseEmbedderConfig(
             model="gemini-embedding-001",
+            embedding_dims=768,
+        )
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(
+                ValueError, "Vertex AI provider currently only supports gemini-embedding-2"
+            ):
+                VertexAIGenAIEmbedding(config)
+
+    def test_embedding_2_preview_rejected(self):
+        env = {"GOOGLE_CLOUD_PROJECT": "hippo-test"}
+        config = BaseEmbedderConfig(
+            model="gemini-embedding-2-preview",
             embedding_dims=768,
         )
         with patch.dict(os.environ, env, clear=True):

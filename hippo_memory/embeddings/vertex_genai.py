@@ -27,7 +27,7 @@ class VertexAIGenAIEmbedding(EmbeddingBase):
         self.config.embedding_dims = self.config.embedding_dims or 768
 
         model_id = (self.config.model or "").split("/")[-1]
-        if not model_id.startswith("gemini-embedding-2"):
+        if model_id != "gemini-embedding-2":
             raise ValueError(
                 f"Vertex AI provider currently only supports gemini-embedding-2 (got '{self.config.model}')"
             )
