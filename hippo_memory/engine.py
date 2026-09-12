@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
+from hippo_memory.apply import consolidation_lock, resolve_lock_namespace
 from hippo_memory.config import HippoConfig
+from hippo_memory.decision import resolve_identity
 from hippo_memory.exceptions import HippoValidationError
 from hippo_memory.router import ScopeRouter
 
@@ -135,27 +137,32 @@ class HippoEngine:
                 params["metadata"]["image_path"] = str(img_p)
 
         conversation = build_conversation(text=full_content, content=None, messages=messages)
-        try:
-            result = self.memory.add(conversation, **params)
-        except Exception as e:
-            err_str = str(e)
-            # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
-            should_fallback = any(
-                code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
-            )
-            if should_fallback and hasattr(self.memory, "llm"):
-                orig_model = getattr(self.memory.llm.config, "model", "")
-                fallback_model = "gemini-3.5-flash-lite"
-                if orig_model != fallback_model:
-                    try:
-                        self.memory.llm.config.model = fallback_model
-                        result = self.memory.add(conversation, **params)
-                    finally:
-                        self.memory.llm.config.model = orig_model
+        # Join the shared per-identity write protocol: Mem0's infer=True flow
+        # may update existing records, so Hot/Warm writes must hold the same
+        # lock the consolidation applier holds across its check-then-act
+        # window (see hippo_memory.apply.consolidation_lock).
+        with self._write_lock(params["user_id"], params["agent_id"]):
+            try:
+                result = self.memory.add(conversation, **params)
+            except Exception as e:
+                err_str = str(e)
+                # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
+                should_fallback = any(
+                    code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
+                )
+                if should_fallback and hasattr(self.memory, "llm"):
+                    orig_model = getattr(self.memory.llm.config, "model", "")
+                    fallback_model = "gemini-3.5-flash-lite"
+                    if orig_model != fallback_model:
+                        try:
+                            self.memory.llm.config.model = fallback_model
+                            result = self.memory.add(conversation, **params)
+                        finally:
+                            self.memory.llm.config.model = orig_model
+                    else:
+                        raise
                 else:
                     raise
-            else:
-                raise
         return result
 
     def add_explicit(
@@ -402,6 +409,31 @@ class HippoEngine:
         except Exception:
             return None
 
+    def _write_lock(self, user_id: str, agent_id: str):
+        """Per-identity write lock shared with the consolidation applier.
+
+        Every engine-mediated mutation participates in the same
+        synchronization protocol as the Cold Path apply layer, which closes
+        the check-then-act window between the applier's version
+        revalidation and its store updates. Writers bypassing HippoEngine
+        are outside the protocol by definition. The lock is re-entrant so
+        the applier can call back into ``update`` while holding it.
+        """
+        return consolidation_lock(
+            user_id,
+            agent_id,
+            base_dir=resolve_lock_namespace(self),
+            timeout=getattr(self.config, "consolidation_lock_timeout", None),
+        )
+
+    def _get_for_write(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """Record read for mutation paths — unlike the public ``get()``,
+        backing-store errors propagate. A swallowed transient failure must
+        never downgrade a mutation into an unlocked write (PR #33 review
+        round 3): if identity cannot be proven, fail closed instead.
+        """
+        return self.memory.get(memory_id)
+
     def update(
         self,
         memory_id: str,
@@ -414,7 +446,17 @@ class HippoEngine:
             kwargs["text"] = text
         if metadata is not None:
             kwargs["metadata"] = metadata
-        return self.memory.update(memory_id, **kwargs)
+        record = self._get_for_write(memory_id)
+        if record is None:
+            raise ValueError(f"memory {memory_id} not found")
+        identity = resolve_identity(record)
+        if identity is None:
+            raise ValueError(
+                f"cannot prove (user_id, agent_id) identity for {memory_id}; "
+                "refusing unlocked mutation"
+            )
+        with self._write_lock(*identity):
+            return self.memory.update(memory_id, **kwargs)
 
     def get_memories(
         self,
@@ -479,11 +521,18 @@ class HippoEngine:
 
     def delete(self, memory_id: str) -> bool:
         """Delete a specific memory by its ID."""
-        try:
-            self.memory.delete(memory_id)
-            return True
-        except Exception:
+        record = self._get_for_write(memory_id)
+        if record is None:
             return False
+        identity = resolve_identity(record)
+        if identity is None:
+            raise ValueError(
+                f"cannot prove (user_id, agent_id) identity for {memory_id}; "
+                "refusing unlocked mutation"
+            )
+        with self._write_lock(*identity):
+            self.memory.delete(memory_id)
+        return True
 
     def delete_all(
         self,
@@ -493,7 +542,14 @@ class HippoEngine:
         scope: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> bool:
-        """Bulk delete memories within a given scope."""
+        """Bulk delete memories within a given scope.
+
+        Joins the shared per-identity write protocol whenever the identity
+        is resolvable (``agent_id``, ``scope="global"`` or
+        ``scope="project"``). ``scope=None``/"all" spans every identity and
+        has no single lock granularity: it is an admin-level operation
+        outside the shared per-identity write protocol.
+        """
         uid = user_id or self.config.user_id
         aid = agent_id
         if scope == "global":
@@ -507,11 +563,21 @@ class HippoEngine:
         if run_id:
             kwargs["run_id"] = run_id
 
-        try:
-            self.memory.delete_all(**kwargs)
-            return True
-        except Exception:
-            return False
+        if aid is None:
+            # scope="all" spans every identity and has no single
+            # per-identity lock; it stays an admin-level operation outside
+            # the shared per-identity write protocol.
+            try:
+                self.memory.delete_all(**kwargs)
+                return True
+            except Exception:
+                return False
+        with self._write_lock(uid, aid):
+            try:
+                self.memory.delete_all(**kwargs)
+                return True
+            except Exception:
+                return False
 
     def list_entities(self) -> Dict[str, Any]:
         """List users and projects/agents stored in memories."""
