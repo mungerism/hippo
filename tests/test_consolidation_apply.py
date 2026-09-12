@@ -31,6 +31,7 @@ from hippo_memory.apply import (
     consolidation_lock,
     identity_lock_path,
     record_version,
+    resolve_lock_namespace,
 )
 from hippo_memory.decision import ConsolidationDecision
 from hippo_memory.engine import HippoEngine
@@ -103,6 +104,12 @@ class _ApplyHarness:
         self.engine = _FakeEngine(records)
         self.journal_dir = Path(self.tmp.name) / "operations"
         self.lock_dir = Path(self.tmp.name) / "locks"
+        # The fake engine must carry the same lock namespace the applier
+        # resolves, mirroring the real HippoEngine contract.
+        self.engine.config = SimpleNamespace(
+            consolidation_lock_dir=self.lock_dir,
+            consolidation_lock_timeout=None,
+        )
         self.applier = ConsolidationApplier(
             self.engine,
             journal=OperationJournal(self.journal_dir),
@@ -1056,6 +1063,51 @@ class TestWriterLockProtocol(unittest.TestCase):
                 journal=OperationJournal(Path(self.tmp.name) / "ops"),
                 lock_dir=Path(self.tmp.name) / "locks-other",
             )
+
+
+    def test_applier_override_rejected_even_when_engine_has_no_lock_dir(self):
+        """Regression (PR #33 review round 5): with no configured
+        consolidation_lock_dir the engine falls back to the shared default;
+        an explicit applier override must still be rejected instead of
+        silently splitting the namespace."""
+        engine = HippoEngine(SimpleNamespace(user_id="u1"))
+        with self.assertRaises(ValueError):
+            ConsolidationApplier(
+                engine,
+                journal=OperationJournal(Path(self.tmp.name) / "ops"),
+                lock_dir=Path(self.tmp.name) / "locks-other",
+            )
+        # No explicit override: the applier inherits the engine namespace.
+        applier = ConsolidationApplier(engine)
+        self.assertEqual(applier.lock_dir, resolve_lock_namespace(engine))
+
+    def test_lock_namespace_paths_are_canonicalized(self):
+        """Regression (PR #33 review round 5): equivalent spellings of the
+        same directory (unresolved temp path vs resolved absolute path) must
+        map to ONE registry entry and ONE flock, never two fake-independent
+        namespaces."""
+        import hippo_memory.apply as apply_module
+
+        alias = self.lock_dir
+        canonical = alias.expanduser().resolve()
+
+        with consolidation_lock(
+            "u1", "hippo", base_dir=alias, timeout=None
+        ):
+            canonical_key = ("u1", "hippo", str(canonical))
+            alias_key = ("u1", "hippo", str(alias))
+            # Exactly ONE registry entry for the namespace, keyed by the
+            # canonical path: the unresolved alias must not mint a second
+            # fake-independent entry (same-thread re-entrancy through the
+            # shared RLock already proves they are the same lock).
+            self.assertIn(canonical_key, apply_module._IDENTITY_LOCKS)
+            self.assertNotIn(alias_key, apply_module._IDENTITY_LOCKS)
+            entry = apply_module._IDENTITY_LOCKS[canonical_key]
+            self.assertEqual(entry["depth"], 1)
+
+        # Clean bookkeeping after release.
+        entry = apply_module._IDENTITY_LOCKS[canonical_key]
+        self.assertEqual((entry["depth"], entry["fd"]), (0, None))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
-from hippo_memory.apply import consolidation_lock
+from hippo_memory.apply import consolidation_lock, resolve_lock_namespace
 from hippo_memory.config import HippoConfig
 from hippo_memory.decision import resolve_identity
 from hippo_memory.exceptions import HippoValidationError
@@ -422,7 +422,7 @@ class HippoEngine:
         return consolidation_lock(
             user_id,
             agent_id,
-            base_dir=getattr(self.config, "consolidation_lock_dir", None),
+            base_dir=resolve_lock_namespace(self),
             timeout=getattr(self.config, "consolidation_lock_timeout", None),
         )
 

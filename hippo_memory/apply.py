@@ -260,6 +260,26 @@ class OperationJournal:
             os.close(dir_fd)
 
 
+def _canonical_dir(path: Path) -> Path:
+    """Canonical lock-namespace path: expanduser + resolve, so equivalent
+    spellings (relative paths, ``/tmp`` vs ``/private/tmp`` symlinks) share
+    one registry entry and one flock file."""
+    return Path(path).expanduser().resolve()
+
+
+def resolve_lock_namespace(engine: Any) -> Path:
+    """Canonical lock namespace for an engine — the single source of truth
+    shared by ``HippoEngine._write_lock`` and ``ConsolidationApplier``.
+    Splitting this resolution is what reopens the TOCTOU window (PR #33
+    review round 5)."""
+    engine_dir = getattr(
+        getattr(engine, "config", None), "consolidation_lock_dir", None
+    )
+    return _canonical_dir(engine_dir) if engine_dir else _canonical_dir(
+        DEFAULT_LOCKS_DIR
+    )
+
+
 def identity_lock_path(
     user_id: str,
     agent_id: str,
@@ -272,7 +292,11 @@ def identity_lock_path(
     lock file (lossy character sanitization would map e.g. ``foo bar`` and
     ``foo_bar`` onto one flock and break per-identity independence).
     """
-    lock_dir = Path(base_dir) if base_dir is not None else DEFAULT_LOCKS_DIR
+    lock_dir = (
+        _canonical_dir(base_dir)
+        if base_dir is not None
+        else _canonical_dir(DEFAULT_LOCKS_DIR)
+    )
     canonical = json.dumps([str(user_id), str(agent_id)], ensure_ascii=False)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
     return lock_dir / f"identity-{digest}.lock"
@@ -302,7 +326,11 @@ def consolidation_lock(
     comes from the flock on the identity's lock file. Different identities
     lock different files and never block each other.
     """
-    lock_dir = Path(base_dir) if base_dir is not None else DEFAULT_LOCKS_DIR
+    lock_dir = (
+        _canonical_dir(base_dir)
+        if base_dir is not None
+        else _canonical_dir(DEFAULT_LOCKS_DIR)
+    )
     # The namespace is part of the registry key: nested acquires against a
     # different lock directory are independent locks, not re-entrancy.
     key = (str(user_id), str(agent_id), str(lock_dir))
@@ -395,24 +423,19 @@ class ConsolidationApplier:
     ) -> None:
         self.engine = engine
         self.journal = journal or OperationJournal()
-        # One source of truth for the lock namespace: the engine's own
-        # configuration. An explicit override that disagrees with it would
-        # split the shared protocol into two namespaces and reopen the
-        # TOCTOU window, so it is rejected outright.
-        engine_dir = getattr(
-            getattr(engine, "config", None), "consolidation_lock_dir", None
-        )
-        if (
-            lock_dir is not None
-            and engine_dir is not None
-            and Path(lock_dir) != Path(engine_dir)
-        ):
+        # One source of truth for the lock namespace: resolve_lock_namespace
+        # resolves the engine's configuration INCLUDING its default fallback,
+        # so an explicit override can never silently split the protocol into
+        # two namespaces when the engine has no configured directory (PR #33
+        # review round 5).
+        resolved = resolve_lock_namespace(engine)
+        if lock_dir is not None and _canonical_dir(lock_dir) != resolved:
             raise ValueError(
-                f"applier lock_dir {Path(lock_dir)} differs from the engine's "
-                f"consolidation_lock_dir {Path(engine_dir)}; both sides must "
-                "share exactly one lock namespace"
+                f"applier lock_dir {_canonical_dir(lock_dir)} differs from the "
+                f"engine's lock namespace {resolved}; both sides must share "
+                "exactly one lock namespace"
             )
-        self.lock_dir = Path(lock_dir or engine_dir or DEFAULT_LOCKS_DIR)
+        self.lock_dir = resolved
         self.lock_timeout = lock_timeout
 
     def _save(self, entry: dict[str, Any]) -> None:
