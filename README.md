@@ -16,31 +16,54 @@
   - **全局习惯 (`global`)**：记录开发者的个人偏好（如 macOS 环境、Surge 代理设置、代码风格）。
   - **项目专有 (`project`)**：基于当前 Git 仓库自动隔离（架构决策、踩坑记录、技术选型）。
 - **零外部服务依赖**：基于嵌入式 Qdrant 本地文件存储（`~/.hippo/storage/qdrant`），无需 Docker 或单独数据库守护进程。
-- **多模型灵活适配**：支持 Google Gemini（`gemini-2.5-flash` + `text-embedding-004`，推荐）或 OpenAI（`gpt-4o-mini` + `text-embedding-3-small`）。
+- **多模型灵活适配**：支持 Google Gemini Developer API、Google Vertex AI（ADC）或 OpenAI；Vertex AI 可使用 `gemini-embedding-2`。
 - **终端快捷 CLI**：提供 `hippo` 命令行工具，随时手工查阅、新增、删除与诊断。
 
 ---
 
 ## 🚀 快速开始
 
-### 1. 配置 API Key
+### 1. 配置模型 Provider
 
-系统配置文件位于 `~/.hippo/.env`。请填入你的 Google Gemini 或 OpenAI API Key：
+系统配置文件位于 `~/.hippo/.env`。
 
 ```bash
 # 编辑配置文件
 vim ~/.hippo/.env
 ```
 
-例如使用 Google Gemini：
+使用 Google Gemini Developer API：
 ```env
 HIPPO_PROVIDER=gemini
 GOOGLE_API_KEY=AIzaSy...
-GEMINI_LLM_MODEL=gemini-2.5-flash
-GEMINI_EMBEDDING_MODEL=models/text-embedding-004
+GEMINI_LLM_MODEL=gemini-3.5-flash-lite
+GEMINI_EMBEDDING_MODEL=models/gemini-embedding-2
 ```
 
-或使用 OpenAI：
+使用 Google Vertex AI：
+
+```bash
+# 本地开发：配置 Application Default Credentials (ADC)
+gcloud auth application-default login
+```
+
+```env
+HIPPO_PROVIDER=vertexai
+GOOGLE_CLOUD_PROJECT=your-gcp-project
+GOOGLE_CLOUD_LOCATION=global
+VERTEX_LLM_MODEL=gemini-3.5-flash-lite
+VERTEX_EMBEDDING_MODEL=gemini-embedding-2
+VERTEX_EMBEDDING_DIMS=768
+```
+
+Vertex AI 必须通过 `HIPPO_PROVIDER=vertexai` 显式启用，不参与 `auto` 检测，避免开发机上已有 ADC 时意外切换 Provider。生产环境建议使用运行环境绑定的 Service Account / ADC，而不是保存长期凭证文件。
+
+`gemini-embedding-2` 在 Vertex AI 上通过 `google-genai` 的 `embedContent` API 调用。Google 对该模型不支持 `task_type` 字段，因此 Hippo 会按照检索场景将任务说明写入输入文本：搜索 query 使用 `task: search result | query: ...`，记忆文档使用 `title: none | text: ...`。
+
+> [!NOTE]
+> 不同 embedding Provider / 模型产生的向量空间不能直接混用。为兼容已有数据，Gemini/OpenAI 仍沿用历史 `hippo_memories` collection；Vertex AI 默认使用独立的 `hippo_memories_vertexai_<model>_<dims>` collection。可通过 `HIPPO_COLLECTION_NAME` 显式覆盖，但只有在确认向量空间兼容时才应复用旧 collection。切换已有记忆到新的 embedding 模型仍需要后续 reindex / migration。
+
+使用 OpenAI：
 ```env
 HIPPO_PROVIDER=openai
 OPENAI_API_KEY=sk-...
@@ -230,7 +253,7 @@ hippo service install
 hippo service status
 hippo service uninstall
 
-# 一键巡检：Qdrant 连通、collection、配置与 API Key、服务状态、5 家客户端接入、依赖版本
+# 一键巡检：Qdrant 连通、collection、Provider 凭证/ADC、服务状态、5 家客户端接入、依赖版本
 hippo doctor
 ```
 
