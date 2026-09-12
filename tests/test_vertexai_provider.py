@@ -295,6 +295,42 @@ class TestVertexAIProvider(unittest.TestCase):
         self.assertFalse(collection_checks[0]["ok"])
         self.assertIn("must be an integer", collection_checks[0]["detail"])
 
+    def test_sanitize_google_application_credentials_removes_missing_file(self):
+        from hippo_memory.config import sanitize_google_application_credentials
+
+        fake_path = "/tmp/hippo-test-nonexistent-key-999.json"
+        with patch.dict(os.environ, {"GOOGLE_APPLICATION_CREDENTIALS": fake_path}):
+            removed = sanitize_google_application_credentials()
+            self.assertEqual(removed, fake_path)
+            self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", os.environ)
+
+    def test_sanitize_google_application_credentials_preserves_existing_file(self):
+        from hippo_memory.config import sanitize_google_application_credentials
+
+        with tempfile.NamedTemporaryFile() as tmp:
+            with patch.dict(os.environ, {"GOOGLE_APPLICATION_CREDENTIALS": tmp.name}):
+                removed = sanitize_google_application_credentials()
+                self.assertIsNone(removed)
+                self.assertEqual(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), tmp.name)
+
+    def test_doctor_cleans_up_missing_credentials(self):
+        from hippo_memory import doctor
+
+        fake_path = "/tmp/hippo-test-nonexistent-key-888.json"
+        env = {
+            "HIPPO_PROVIDER": "vertexai",
+            "GOOGLE_CLOUD_PROJECT": "hippo-test",
+            "GOOGLE_APPLICATION_CREDENTIALS": fake_path,
+        }
+        with patch.dict(os.environ, env):
+            with patch(
+                "google.auth.default",
+                return_value=(object(), "detected-project"),
+            ):
+                ok, _ = doctor._provider_credentials_status("vertexai")
+                self.assertTrue(ok)
+                self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", os.environ)
+
 
 if __name__ == "__main__":
     unittest.main()

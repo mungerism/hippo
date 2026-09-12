@@ -24,6 +24,26 @@ if not os.getenv("GOOGLE_API_KEY"):
             break
 
 
+def sanitize_google_application_credentials() -> Optional[str]:
+    """Remove GOOGLE_APPLICATION_CREDENTIALS if it points to a non-existent file.
+
+    When an invalid or deleted service account path remains in the environment,
+    Google client libraries raise FileNotFoundError instead of falling back to
+    Application Default Credentials (ADC).
+    """
+    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if cred_path:
+        expanded = Path(cred_path).expanduser()
+        if not expanded.exists():
+            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            return cred_path
+    return None
+
+
+# Clean up dangling GOOGLE_APPLICATION_CREDENTIALS pointing to non-existent files
+sanitize_google_application_credentials()
+
+
 def ensure_qdrant_server():
     """Ensure Qdrant server is running on 127.0.0.1:6333."""
     import socket
@@ -120,6 +140,8 @@ class HippoConfig:
             storage_dir or os.getenv("HIPPO_STORAGE_DIR", str(DEFAULT_STORAGE_DIR))
         ).expanduser()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+
+        sanitize_google_application_credentials()
 
         self.qdrant_host = os.getenv("QDRANT_HOST", "127.0.0.1")
         self.qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
