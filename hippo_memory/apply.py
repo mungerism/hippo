@@ -46,13 +46,11 @@ from hippo_memory.decision import (
     resolve_identity,
     source_of,
 )
+from hippo_memory.lifecycle import STATUS_ACTIVE, STATUS_SUPERSEDED, status_of
 
 
 SUPERSEDE_REASON_EQUIVALENT = "equivalent_merged"
 SUPERSEDE_REASON_CONFLICT = "conflict_overridden"
-
-LIFECYCLE_ACTIVE = "active"
-LIFECYCLE_SUPERSEDED = "superseded"
 
 STATUS_PLANNED = "planned"
 STATUS_APPLYING = "applying"
@@ -132,7 +130,7 @@ def record_version(record: Mapping[str, Any]) -> str:
     contract); any Hot/Warm write to the record changes the fingerprint and
     invalidates plans observed beforehand.
     """
-    status = metadata_of(record).get("status", record.get("status", LIFECYCLE_ACTIVE))
+    status = status_of(record)
     canonical = json.dumps(
         [record.get("updated_at"), record.get("hash"), status],
         sort_keys=True,
@@ -386,10 +384,11 @@ def consolidation_lock(
 
 
 def _already_superseded_by(record: Mapping[str, Any], winner_id: str, reason: str) -> bool:
+    if status_of(record) != STATUS_SUPERSEDED:
+        return False
     record_metadata = metadata_of(record)
     return (
-        record_metadata.get("status", record.get("status")) == LIFECYCLE_SUPERSEDED
-        and record_metadata.get("superseded_by", record.get("superseded_by")) == winner_id
+        record_metadata.get("superseded_by", record.get("superseded_by")) == winner_id
         and record_metadata.get("supersede_reason", record.get("supersede_reason")) == reason
     )
 
@@ -555,7 +554,7 @@ class ConsolidationApplier:
             self.engine.update(
                 plan.loser_id,
                 metadata={
-                    "status": LIFECYCLE_SUPERSEDED,
+                    "status": STATUS_SUPERSEDED,
                     "superseded_by": plan.winner_id,
                     "superseded_at": _utc_now_iso(),
                     "supersede_reason": self._supersede_reason(plan),

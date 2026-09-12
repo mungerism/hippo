@@ -8,6 +8,7 @@ import math
 from typing import Any, Mapping
 
 from hippo_memory.engine import HippoEngine
+from hippo_memory.lifecycle import add_lifecycle_exclusion, is_active_memory
 
 
 MemoryIdentity = tuple[str, str]
@@ -72,18 +73,19 @@ class CandidateDiscovery:
         user_id: str | None = None,
     ) -> CandidateSet:
         identity = self._resolve_identity(scope, project_id, user_id)
-        filters = {
-            "user_id": identity[0],
-            "agent_id": identity[1],
-            "NOT": [
-                {"status": "superseded"},
-                {
-                    "expiration_date": {
-                        "lt": datetime.now(timezone.utc).date().isoformat()
-                    }
-                },
-            ],
-        }
+        filters = add_lifecycle_exclusion(
+            {
+                "user_id": identity[0],
+                "agent_id": identity[1],
+                "NOT": [
+                    {
+                        "expiration_date": {
+                            "lt": datetime.now(timezone.utc).date().isoformat()
+                        }
+                    },
+                ],
+            }
+        )
         scan_probe = self.engine.memory.get_all(
             filters=filters,
             top_k=self.scan_limit + 1,
@@ -114,7 +116,7 @@ class CandidateDiscovery:
         active = [
             memory
             for memory in raw_memories
-            if self._matches_identity(memory, identity) and self._is_active(memory)
+            if self._matches_identity(memory, identity) and is_active_memory(memory)
         ]
         normalized_since = self._normalize_datetime(since) if since is not None else None
         seeds = [
@@ -149,7 +151,7 @@ class CandidateDiscovery:
                     or not math.isfinite(float(score))
                     or float(score) < self.semantic_threshold
                     or not self._matches_identity(neighbor, identity)
-                    or not self._is_active(neighbor)
+                    or not is_active_memory(neighbor)
                 ):
                     continue
                 edge = CandidateEdge(
@@ -196,10 +198,6 @@ class CandidateDiscovery:
             item.get("user_id", metadata.get("user_id")) == identity[0]
             and item.get("agent_id", metadata.get("agent_id")) == identity[1]
         )
-
-    @classmethod
-    def _is_active(cls, item: Mapping[str, Any]) -> bool:
-        return cls._metadata(item).get("status", item.get("status", "active")) != "superseded"
 
     @staticmethod
     def _normalize_datetime(value: datetime) -> datetime:
