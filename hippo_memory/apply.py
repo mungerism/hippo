@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 import time
 from typing import Any, Iterator, Mapping, Optional
 
@@ -43,7 +44,6 @@ from hippo_memory.decision import (
     confirmed_at,
     confirmation_count_of,
     metadata_of,
-    parse_timestamp,
     resolve_identity,
     source_of,
 )
@@ -74,6 +74,13 @@ RESULT_FAILED = "failed"
 
 DEFAULT_OPERATIONS_DIR = HIPPO_HOME / "consolidation" / "operations"
 DEFAULT_LOCKS_DIR = HIPPO_HOME / "consolidation" / "locks"
+
+# In-process view of the per-identity consolidation locks. flock is granted
+# per file descriptor, so re-entering consolidation_lock for the same
+# identity inside one process would deadlock without this registry; the
+# RLock additionally serializes same-identity writer threads in-process.
+_REGISTRY_GUARD = threading.Lock()
+_IDENTITY_LOCKS: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _utc_now_iso() -> str:
@@ -262,36 +269,70 @@ def consolidation_lock(
     base_dir: Optional[Path] = None,
     timeout: Optional[float] = None,
 ) -> Iterator[None]:
-    """Advisory mutex between consolidators for one ``(user_id, agent_id)``.
+    """Shared synchronization protocol for one ``(user_id, agent_id)``.
 
-    The lock serializes consolidation runs only; it cannot stop Hot/Warm
-    writes, which is why apply must additionally revalidate observed
-    versions. Different identities lock different files and never block
-    each other.
+    This is NOT consolidator-only bookkeeping: every Hippo writer that can
+    touch a memory record (``HippoEngine.add`` / ``update`` / ``delete``)
+    takes the same per-identity lock, which is what turns the applier's
+    re-read + version-compare + mutate sequence into a critical section —
+    a check-then-act guard alone could never stop a Hot/Warm write landing
+    between the check and the store update (TOCTOU).
+
+    Re-entrant inside a process (the applier holds the lock while calling
+    ``engine.update``); cross-process exclusion comes from the flock on
+    ``<lock_dir>/<user_id>__<agent_id>.lock``. Different identities lock
+    different files and never block each other.
     """
     lock_dir = Path(base_dir) if base_dir is not None else DEFAULT_LOCKS_DIR
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{user_id}__{agent_id}")
-    path = lock_dir / f"{safe_name}.lock"
-    handle = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    key = (str(user_id), str(agent_id))
+    with _REGISTRY_GUARD:
+        entry = _IDENTITY_LOCKS.get(key)
+        if entry is None:
+            entry = {"rlock": threading.RLock(), "depth": 0, "fd": None}
+            _IDENTITY_LOCKS[key] = entry
+    rlock = entry["rlock"]
+    if not rlock.acquire(timeout=timeout if timeout is not None else -1):
+        raise TimeoutError(f"consolidation lock busy for identity={key!r}")
     try:
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"consolidation lock busy for identity={(user_id, agent_id)!r}"
-                    )
-                time.sleep(0.02)
+        with _REGISTRY_GUARD:
+            entry["depth"] += 1
+            outermost = entry["depth"] == 1
+        fd: Optional[int] = None
+        if outermost:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{key[0]}__{key[1]}")
+            path = lock_dir / f"{safe_name}.lock"
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        with _REGISTRY_GUARD:
+                            entry["depth"] -= 1
+                        os.close(fd)
+                        rlock.release()
+                        raise TimeoutError(
+                            f"consolidation lock busy for identity={key!r}"
+                        )
+                    time.sleep(0.02)
+            with _REGISTRY_GUARD:
+                entry["fd"] = fd
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            with _REGISTRY_GUARD:
+                entry["depth"] -= 1
+                fd_to_release = entry["fd"] if entry["depth"] == 0 else None
+                if fd_to_release is not None:
+                    entry["fd"] = None
+            if fd_to_release is not None:
+                fcntl.flock(fd_to_release, fcntl.LOCK_UN)
+                os.close(fd_to_release)
     finally:
-        os.close(handle)
+        rlock.release()
 
 
 def _already_superseded_by(record: Mapping[str, Any], winner_id: str, reason: str) -> bool:
@@ -394,29 +435,9 @@ class ConsolidationApplier:
         winner_updated = False
         loser_superseded = False
 
-        # Crash-window recovery first: a previous attempt may have landed a
-        # mutation in the window before its journal step flip. Detecting the
-        # planned post-state marks the step done instead of re-deriving it
-        # (recomputing a merge from an already-merged winner would double-
-        # count lineage). Hot/Warm writes never produce these exact values,
-        # so this cannot mask external changes.
         winner_pending = plan.relation == RELATION_EQUIVALENT and not steps.get(
             "winner_update"
         )
-        stored_patch = entry.get("winner_patch")
-        if (
-            winner_pending
-            and isinstance(stored_patch, dict)
-            and stored_patch
-            and self._winner_patch_already_applied(winner, stored_patch)
-        ):
-            # Our merge landed before the journal flip. Adopt the record as
-            # it stands now as the post-apply baseline and let the strict
-            # post-apply validation below take over from here.
-            entry["post_winner_version"] = record_version(winner)
-            steps["winner_update"] = True
-            winner_pending = False
-            self._save(entry)
         loser_pending = not steps.get("loser_supersede")
         if loser_pending and _already_superseded_by(
             loser, plan.winner_id, self._supersede_reason(plan)
@@ -430,6 +451,15 @@ class ConsolidationApplier:
         # against their persisted post-apply fingerprint (so a Hot/Warm write
         # after a partial apply can never be mistaken for a clean recovery),
         # untouched sides against the planning-time fingerprint.
+        #
+        # There is deliberately NO crash-window adoption: if a previous
+        # attempt landed the winner mutation but crashed before persisting
+        # ``post_winner_version``, the record no longer matches the
+        # planning-time fingerprint and the operation fails closed as stale.
+        # That ambiguity is unresolvable in place — Hot/Warm churn inside the
+        # window is indistinguishable from a clean partial merge — and
+        # re-planning always converges thanks to the lineage dedup in
+        # ``_equivalent_winner_patch``.
         if plan.relation == RELATION_EQUIVALENT:
             post_winner = entry.get("post_winner_version")
             if post_winner is not None:
@@ -445,12 +475,7 @@ class ConsolidationApplier:
             return self._mark_stale(entry, plan, "loser", loser)
 
         if winner_pending:
-            stored_patch = entry.get("winner_patch")
-            winner_patch = (
-                stored_patch
-                if isinstance(stored_patch, dict)
-                else self._equivalent_winner_patch(plan, winner, loser)
-            )
+            winner_patch = self._equivalent_winner_patch(plan, winner, loser)
             entry["winner_patch"] = winner_patch
             self._save(entry)
             self.engine.update(plan.winner_id, metadata=dict(winner_patch))
@@ -551,33 +576,6 @@ class ConsolidationApplier:
         # CONFLICT never reaches here; V1 keeps the winner text untouched and
         # only aggregates metadata of the equivalent lineage.
         return patch
-
-    @staticmethod
-    def _winner_patch_already_applied(
-        winner: Mapping[str, Any], patch: Mapping[str, Any]
-    ) -> bool:
-        """True when the record already carries exactly the planned patch.
-
-        Covers the crash window between the backing-store write and the
-        journal step flip: the step is then detected as done instead of
-        being applied a second time. An empty patch never matches.
-        """
-        if not patch:
-            return False
-        winner_meta = metadata_of(winner)
-        for key, expected in patch.items():
-            current = winner_meta.get(key, winner.get(key))
-            if isinstance(expected, list):
-                if sorted(str(item) for item in (current or [])) != sorted(
-                    str(item) for item in expected
-                ):
-                    return False
-            elif key == "last_confirmed_at":
-                if parse_timestamp(current) != parse_timestamp(expected):
-                    return False
-            elif current != expected:
-                return False
-        return True
 
     def _mark_stale(
         self,

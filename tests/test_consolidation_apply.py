@@ -8,9 +8,11 @@ recorded for audit.
 
 import json
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from hippo_memory.apply import (
     RESULT_ALREADY_APPLIED,
@@ -28,6 +30,7 @@ from hippo_memory.apply import (
     record_version,
 )
 from hippo_memory.decision import ConsolidationDecision
+from hippo_memory.engine import HippoEngine
 
 
 def _memory(
@@ -351,7 +354,7 @@ class TestConflictSupersede(unittest.TestCase):
 
 
 class TestStalePlans(unittest.TestCase):
-    def _harness_with_plan(self):
+    def _harness_with_plan(self, decision=None):
         harness = _ApplyHarness(
             [
                 _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-03T00:00:00+00:00"),
@@ -364,7 +367,7 @@ class TestStalePlans(unittest.TestCase):
             ]
         )
         plan = build_operation_plan(
-            _equivalent_decision(),
+            decision or _equivalent_decision(),
             winner_record=harness.engine.records["mem-a"],
             loser_record=harness.engine.records["mem-b"],
         )
@@ -403,8 +406,9 @@ class TestStalePlans(unittest.TestCase):
     def test_hot_or_warm_update_to_conflict_winner_rejects_the_plan(self):
         """The CONFLICT winner is never mutated, but its observed version is
         still enforced — a stale plan must not supersede the loser."""
-        harness, plan = self._harness_with_plan()
+        harness, plan = self._harness_with_plan(decision=_conflict_decision())
         self.addCleanup(harness.cleanup)
+        self.assertEqual(plan.relation, "CONFLICT")
         harness.engine.update("mem-a", metadata={"unrelated": "hot write"})
         calls_before = list(harness.engine.update_calls)
 
@@ -475,7 +479,12 @@ class TestCrashRecovery(unittest.TestCase):
         ]
         self.assertEqual(len(winner_updates), 1)
 
-    def test_crash_between_store_write_and_journal_flip_is_detected(self):
+    def test_crash_window_without_journal_flip_fails_closed_then_converges(self):
+        """Regression (PR #33 review round 2): the crash window between the
+        winner store write and the journal flip is unresolvable in place —
+        Hot/Warm churn inside it is indistinguishable from a clean partial
+        merge — so the old operation must fail closed as stale, and
+        re-planning must converge to the single-success state."""
         harness = _ApplyHarness(self._records())
         self.addCleanup(harness.cleanup)
         winner = harness.engine.records["mem-a"]
@@ -484,26 +493,50 @@ class TestCrashRecovery(unittest.TestCase):
             _equivalent_decision(), winner_record=winner, loser_record=loser
         )
 
-        # Simulate a crash in the window after the winner write landed but
-        # before the journal step flipped: perform the patch by hand and keep
-        # the journal at the pre-step state.
-        harness.applier.apply(plan)  # normal run first to plant winner_patch
-        entry = harness.journal.load(plan.operation_id)
-        entry["status"] = "applying"
-        entry["steps"]["winner_update"] = False
-        harness.journal.save(entry)
-        # Undo nothing on disk: winner still carries the patch from run one.
+        # Simulate the window: the winner mutation landed, but the journal
+        # step flip and post-apply fingerprint were never persisted.
+        winner["metadata"]["confirmation_count"] = 4
+        winner["metadata"]["merged_ids"] = ["mem-b"]
+        winner["metadata"]["merged_sources"] = [
+            "agent_explicit",
+            "session_distillation",
+        ]
+        winner["metadata"]["last_confirmed_at"] = "2026-09-03T00:00:00+00:00"
+        winner["updated_at"] = "2026-09-10T00:00:00+00:00"
+        harness.journal.save(
+            {
+                **plan.to_dict(),
+                "status": "applying",
+                "steps": {"winner_update": False, "loser_supersede": False},
+                "attempts": 1,
+                "created_at": "2026-09-10T00:00:00+00:00",
+                "error": None,
+            }
+        )
 
         result = harness.applier.apply(plan)
 
-        self.assertEqual(result.status, RESULT_APPLIED)
-        self.assertFalse(result.winner_updated)
-        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
-        winner_updates = [
-            call for call in harness.engine.update_calls if call["id"] == "mem-a"
+        self.assertEqual(result.status, RESULT_STALE_PLAN)
+        self.assertEqual(loser["metadata"].get("status", "active"), "active")
+        loser_calls = [
+            call for call in harness.engine.update_calls if call["id"] == "mem-b"
         ]
-        self.assertEqual(len(winner_updates), 1)
+        self.assertEqual(loser_calls, [])
+
+        # Re-planning observes the partial merge and converges: the lineage
+        # dedup credits the shared subtree once, so confirmations stay at 4.
+        replan = build_operation_plan(
+            _equivalent_decision(),
+            winner_record=harness.engine.get("mem-a"),
+            loser_record=harness.engine.get("mem-b"),
+        )
+        result = harness.applier.apply(replan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertEqual(winner["metadata"]["confirmation_count"], 4)
+        self.assertEqual(winner["metadata"]["merged_ids"], ["mem-b"])
         self.assertEqual(loser["metadata"]["status"], "superseded")
+        self.assertEqual(loser["metadata"]["superseded_by"], "mem-a")
 
     def test_crash_after_loser_supersede_completes_idempotently(self):
         harness = _ApplyHarness(self._records())
@@ -664,17 +697,36 @@ class TestConsolidationLock(unittest.TestCase):
             _conflict_decision(), winner_record=winner, loser_record=loser
         )
 
-    def test_same_identity_lock_is_exclusive(self):
+    def test_same_identity_lock_is_exclusive_across_threads(self):
+        """The lock is re-entrant per thread (the applier nests engine
+        updates inside it), so exclusion is meaningful across threads."""
         harness = _ApplyHarness(self._plan_for()[:2])
         self.addCleanup(harness.cleanup)
         _, _, plan = self._plan_for()
-        harness.applier.lock_timeout = 0
+        harness.applier.lock_timeout = 0.1
+        acquired = threading.Event()
+        release = threading.Event()
 
-        with consolidation_lock(
-            "u1", "hippo", base_dir=harness.lock_dir, timeout=None
-        ):
+        def hold():
+            with consolidation_lock(
+                "u1", "hippo", base_dir=harness.lock_dir, timeout=None
+            ):
+                acquired.set()
+                release.wait(timeout=2)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            self.assertTrue(acquired.wait(timeout=2))
             with self.assertRaises(TimeoutError):
                 harness.applier.apply(plan)
+        finally:
+            release.set()
+            holder.join(timeout=2)
+
+        # Once the holder released, the same plan applies normally.
+        result = harness.applier.apply(plan)
+        self.assertEqual(result.status, RESULT_APPLIED)
 
     def test_different_identities_do_not_block_each_other(self):
         harness = _ApplyHarness(
@@ -701,6 +753,122 @@ class TestConsolidationLock(unittest.TestCase):
         self.assertEqual(result.status, RESULT_APPLIED)
         self.assertEqual(
             harness.engine.records["mem-d"]["metadata"]["superseded_by"], "mem-c"
+        )
+
+
+class _StubMemory:
+    """Mem0-like memory seam for exercising the engine write protocol."""
+
+    def __init__(self, records):
+        self.records = {record["id"]: dict(record) for record in records}
+        self.calls = []
+
+    def get(self, memory_id):
+        record = self.records.get(memory_id)
+        return dict(record) if record is not None else None
+
+    def update(self, memory_id, **kwargs):
+        self.calls.append(("update", memory_id, kwargs))
+        record = self.records[memory_id]
+        if kwargs.get("metadata"):
+            merged = dict(record.get("metadata", {}))
+            merged.update(kwargs["metadata"])
+            record["metadata"] = merged
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return memory_id
+
+    def delete(self, memory_id):
+        self.calls.append(("delete", memory_id))
+        self.records.pop(memory_id, None)
+
+    def add(self, conversation, **params):
+        self.calls.append(("add", conversation, params))
+        return {"results": [{"id": "new-1"}]}
+
+
+class TestWriterLockProtocol(unittest.TestCase):
+    """All engine-mediated Hot/Warm writers join the applier's lock protocol,
+    which is what turns the applier's re-read + version-compare + mutate
+    sequence into a real critical section (PR #33 review round 2)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock_dir = Path(self.tmp.name) / "locks"
+
+    def _engine(self, lock_timeout=0.0):
+        engine = HippoEngine(
+            SimpleNamespace(
+                user_id="u1",
+                consolidation_lock_timeout=lock_timeout,
+                consolidation_lock_dir=self.lock_dir,
+            )
+        )
+        engine._memory = _StubMemory(
+            [_memory("mem-a", "text a"), _memory("mem-b", "text b")]
+        )
+        return engine
+
+    def test_engine_update_blocked_while_consolidation_lock_held(self):
+        engine = self._engine(lock_timeout=0.0)
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold():
+            with consolidation_lock(
+                "u1", "hippo", base_dir=self.lock_dir, timeout=None
+            ):
+                acquired.set()
+                release.wait(timeout=2)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            self.assertTrue(acquired.wait(timeout=2))
+            with self.assertRaises(TimeoutError):
+                engine.update("mem-a", metadata={"status": "hot"})
+        finally:
+            release.set()
+            holder.join(timeout=2)
+
+        self.assertEqual(engine._memory.calls, [])
+
+    def test_engine_add_blocked_while_consolidation_lock_held(self):
+        engine = self._engine(lock_timeout=0.0)
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold():
+            with consolidation_lock(
+                "u1", "hippo", base_dir=self.lock_dir, timeout=None
+            ):
+                acquired.set()
+                release.wait(timeout=2)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            self.assertTrue(acquired.wait(timeout=2))
+            with self.assertRaises(TimeoutError):
+                engine.add(text="a fact", infer=False, project_id="hippo")
+        finally:
+            release.set()
+            holder.join(timeout=2)
+
+        self.assertEqual(engine._memory.calls, [])
+
+    def test_consolidation_lock_is_re_entrant_for_engine_writers(self):
+        """The applier holds the lock and calls back into engine.update —
+        nesting must never deadlock."""
+        engine = self._engine(lock_timeout=0.0)
+        with consolidation_lock(
+            "u1", "hippo", base_dir=self.lock_dir, timeout=None
+        ):
+            engine.update("mem-a", metadata={"note": "nested"})
+            engine.delete("mem-b")
+
+        self.assertEqual(
+            [call[0] for call in engine._memory.calls], ["update", "delete"]
         )
 
 

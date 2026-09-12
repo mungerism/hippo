@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from mem0 import Memory
+from hippo_memory.apply import consolidation_lock
 from hippo_memory.config import HippoConfig
+from hippo_memory.decision import resolve_identity
 from hippo_memory.exceptions import HippoValidationError
 from hippo_memory.router import ScopeRouter
 
@@ -135,27 +137,32 @@ class HippoEngine:
                 params["metadata"]["image_path"] = str(img_p)
 
         conversation = build_conversation(text=full_content, content=None, messages=messages)
-        try:
-            result = self.memory.add(conversation, **params)
-        except Exception as e:
-            err_str = str(e)
-            # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
-            should_fallback = any(
-                code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
-            )
-            if should_fallback and hasattr(self.memory, "llm"):
-                orig_model = getattr(self.memory.llm.config, "model", "")
-                fallback_model = "gemini-3.5-flash-lite"
-                if orig_model != fallback_model:
-                    try:
-                        self.memory.llm.config.model = fallback_model
-                        result = self.memory.add(conversation, **params)
-                    finally:
-                        self.memory.llm.config.model = orig_model
+        # Join the shared per-identity write protocol: Mem0's infer=True flow
+        # may update existing records, so Hot/Warm writes must hold the same
+        # lock the consolidation applier holds across its check-then-act
+        # window (see hippo_memory.apply.consolidation_lock).
+        with self._write_lock(params["user_id"], params["agent_id"]):
+            try:
+                result = self.memory.add(conversation, **params)
+            except Exception as e:
+                err_str = str(e)
+                # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
+                should_fallback = any(
+                    code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
+                )
+                if should_fallback and hasattr(self.memory, "llm"):
+                    orig_model = getattr(self.memory.llm.config, "model", "")
+                    fallback_model = "gemini-3.5-flash-lite"
+                    if orig_model != fallback_model:
+                        try:
+                            self.memory.llm.config.model = fallback_model
+                            result = self.memory.add(conversation, **params)
+                        finally:
+                            self.memory.llm.config.model = orig_model
+                    else:
+                        raise
                 else:
                     raise
-            else:
-                raise
         return result
 
     def add_explicit(
@@ -402,6 +409,23 @@ class HippoEngine:
         except Exception:
             return None
 
+    def _write_lock(self, user_id: str, agent_id: str):
+        """Per-identity write lock shared with the consolidation applier.
+
+        Every engine-mediated mutation participates in the same
+        synchronization protocol as the Cold Path apply layer, which closes
+        the check-then-act window between the applier's version
+        revalidation and its store updates. Writers bypassing HippoEngine
+        are outside the protocol by definition. The lock is re-entrant so
+        the applier can call back into ``update`` while holding it.
+        """
+        return consolidation_lock(
+            user_id,
+            agent_id,
+            base_dir=getattr(self.config, "consolidation_lock_dir", None),
+            timeout=getattr(self.config, "consolidation_lock_timeout", None),
+        )
+
     def update(
         self,
         memory_id: str,
@@ -414,7 +438,14 @@ class HippoEngine:
             kwargs["text"] = text
         if metadata is not None:
             kwargs["metadata"] = metadata
-        return self.memory.update(memory_id, **kwargs)
+        record = self.get(memory_id)
+        identity = resolve_identity(record) if record is not None else None
+        if identity is None:
+            # Unknown identity (missing or already-deleted record): surface
+            # the backing store's own error instead of guessing a lock.
+            return self.memory.update(memory_id, **kwargs)
+        with self._write_lock(*identity):
+            return self.memory.update(memory_id, **kwargs)
 
     def get_memories(
         self,
@@ -480,7 +511,13 @@ class HippoEngine:
     def delete(self, memory_id: str) -> bool:
         """Delete a specific memory by its ID."""
         try:
-            self.memory.delete(memory_id)
+            record = self.get(memory_id)
+            identity = resolve_identity(record) if record is not None else None
+            if identity is None:
+                self.memory.delete(memory_id)
+                return True
+            with self._write_lock(*identity):
+                self.memory.delete(memory_id)
             return True
         except Exception:
             return False
