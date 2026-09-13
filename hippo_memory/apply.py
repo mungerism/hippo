@@ -750,8 +750,9 @@ class ConsolidationApplier:
                 continue
             # Union members without a resolved freshness (snapshot-covered
             # members) still contribute their record's confirmed_at — the
-            # evolved-member freshness must not be lost.
-            member_record = _fetch(member)
+            # evolved-member freshness must not be lost. Strict read: a
+            # transient failure must not silently drop the timestamp.
+            member_record = _fetch_strict(member)
             if member_record is not None:
                 confirmed = confirmed_at(member_record)
                 if confirmed is not None:
