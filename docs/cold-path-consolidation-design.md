@@ -191,7 +191,8 @@ audit 语义与 recall 分离：`get(memory_id)` 与 history 可读取 supersede
 |---|---|
 | winner 已更新 / loser 未 supersede | journal 重放跳过已完成步骤，仅补 loser；计数不重复 |
 | loser 已 supersede / journal 未 completed | recovery pass 零 mutation 补完 journal（该 pair 已不可被 rediscover） |
-| journal `applying` / 进程崩溃 | **不是一律 stale**：逐侧比对指纹——步骤已完成且匹配 post-apply（或 loser 已处于目标状态）→ 原地续跑或只补完 journal；步骤未执行则按 observed 指纹校验后续跑。仅当某侧既不匹配 post-apply 也不匹配 observed（存在外部写入）时才 fail-closed 为 stale → 重规划经 lineage 去重收敛 |
+| winner 写盘后、journal 翻转前崩溃 | 无已持久化的 post-apply 指纹 → 不匹配 observed → fail-closed stale → 重规划经 lineage 去重收敛（`test_crash_window_without_journal_flip_fails_closed_then_converges` 固定该行为） |
+| journal `applying` / 进程崩溃（一般） | **不是一律 stale**，逐侧比对指纹：已完成步骤匹配 post-apply（或 loser 已处于目标状态）→ 原地续跑或只补完 journal；未执行步骤按 observed 校验后续跑；任一侧与 observed 和 post-apply 均不匹配（外部写入）→ stale |
 
 ---
 

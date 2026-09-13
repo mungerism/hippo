@@ -24,7 +24,7 @@
    - 暴露公共接口 `MemoryConsolidator.consolidate(scope="project", project_id=None, since=None, dry_run=False, *, user_id=None) -> ConsolidationResult`；
    - 支持通过 CLI 命令 (`hippo consolidate`)、定时守护进程或离线 Job 调用；
    - 并发互斥采用 **per-identity 共享写锁**（`~/.hippo/consolidation/locks/`，文件名为 identity 的 SHA-256 摘要）：进程内可重入（RLock），跨进程 flock；
-   - 关键约束：**`HippoEngine.add / update / delete` 等所有写入方都参与同一把锁**——Cold Path 的 re-read + 版本比对 + mutation 只在共享锁内才构成真正的临界区，仅 consolidator 之间互斥无法阻止 Hot/Warm 并发写入（TOCTOU）。
+   - 关键约束：**`HippoEngine.add / update / delete` 等所有可解析为单一 identity 的写入方都参与同一把锁**——Cold Path 的 re-read + 版本比对 + mutation 只在共享锁内才构成真正的临界区，仅 consolidator 之间互斥无法阻止 Hot/Warm 并发写入（TOCTOU）。显式例外：未提供 agent_id / scope 的 `delete_all(scope=all)` 是 admin 级批量操作，按 user 执行、不取 per-identity 锁。
 
 3. **软删除治理与历史血统完整保留 (Soft-delete & Full Provenance)**：
    - 严禁物理硬删除被合并或被淘汰的记忆；
