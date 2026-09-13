@@ -24,6 +24,7 @@ from hippo_memory.apply import (
     ApplyResult,
     ConsolidationApplier,
     OperationJournal,
+    build_operation_plan,
 )
 from hippo_memory.candidate_discovery import CandidateDiscovery
 from hippo_memory.cli import app as cli_app
@@ -467,6 +468,8 @@ class TestFailureSemantics(unittest.TestCase):
         self.addCleanup(harness.cleanup)
 
         class _AlwaysStaleApplier:
+            journal = OperationJournal(harness.operations_dir)
+
             def apply(self, plan):
                 return ApplyResult(
                     operation_id=plan.operation_id,
@@ -542,13 +545,80 @@ class TestFailureSemantics(unittest.TestCase):
         harness.store.fail_on = None
         second = harness.consolidator.consolidate(scope="project", project_id="hippo")
 
+        # The unfinished journal is resumed by the recovery pass (before
+        # discovery), finishing the loser supersede — final state equals a
+        # single successful execution and the winner was written exactly once.
         self.assertTrue(second.is_success)
         self.assertEqual(winner["metadata"]["confirmation_count"], 3)
         self.assertEqual(loser["metadata"]["status"], "superseded")
+        self.assertEqual(second.details[0]["result"], "recovery:applied")
+        self.assertEqual(second.candidate_pairs, 0)
         winner_updates = [
             call for call in harness.store.update_calls if call["id"] == "mem-a"
         ]
-        self.assertEqual(len(winner_updates), 2)  # initial merge + idempotent re-write
+        self.assertEqual(len(winner_updates), 1)
+
+    def test_recovery_pass_completes_journal_after_loser_supersede_crash(self):
+        """Regression (PR #36 review round 3): a crash after the loser was
+        superseded but before the journal was marked completed leaves the
+        pair undiscoverable — the recovery pass must complete it with zero
+        further mutations."""
+        harness = _Harness(
+            [
+                _memory(
+                    "mem-a",
+                    "项目使用 PostgreSQL",
+                    confirmed_at="2026-09-05T00:00:00+00:00",
+                    confirmation_count=2,
+                ),
+                _memory(
+                    "mem-b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                ),
+            ],
+            semantic_scores={frozenset(("mem-a", "mem-b")): 0.93},
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        winner = harness.store.records["mem-a"]
+        loser = harness.store.records["mem-b"]
+        from hippo_memory.decision import ConsolidationDecision
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=winner,
+            loser_record=loser,
+        )
+        import hippo_memory.apply as apply_module
+
+        harness.consolidator.applier.apply(plan)
+        # Rewind to the crash window: mutations landed, completion missing.
+        entry = harness.consolidator.applier.journal.load(plan.operation_id)
+        entry["status"] = "applying"
+        harness.consolidator.applier.journal.save(entry)
+        calls_before = list(harness.store.update_calls)
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.details[0]["result"], "recovery:applied")
+        self.assertEqual(harness.store.update_calls, calls_before)
+        self.assertEqual(
+            harness.consolidator.applier.journal.load(plan.operation_id)["status"],
+            "completed",
+        )
+        self.assertEqual(apply_module.OperationJournal(
+            harness.operations_dir
+        ).unfinished(), [])
 
 
 class TestClassifierIsolation(unittest.TestCase):
@@ -720,6 +790,75 @@ class TestCli(unittest.TestCase):
         )
         # The scripted classifier LLM got pinned deterministically.
         self.assertEqual(scripted.config.temperature, 0.0)
+
+
+class TestOverlappingEdges(unittest.TestCase):
+    def test_overlapping_edges_never_regovern_a_superseded_memory(self):
+        """Regression (PR #36 review round 3): with edges A-B and B-C, the
+        first merge supersedes B — the second edge must skip instead of
+        re-governing it. Full convergence (C into A) then happens on the
+        next pass through the direct A-C edge."""
+        harness = _Harness(
+            [
+                _memory(
+                    "a",
+                    "项目使用 PostgreSQL",
+                    confirmed_at="2026-09-05T00:00:00+00:00",
+                    confirmation_count=2,
+                ),
+                _memory(
+                    "b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-02T00:00:00+00:00",
+                ),
+                _memory(
+                    "c",
+                    "项目数据库使用 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                ),
+            ],
+            semantic_scores={
+                frozenset(("a", "b")): 0.93,
+                frozenset(("b", "c")): 0.92,
+                frozenset(("a", "c")): 0.91,
+            },
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        a = harness.store.records["a"]
+        b = harness.store.records["b"]
+        c = harness.store.records["c"]
+
+        first = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        # The batch fully converges in one pass: A absorbs both B and C via
+        # the direct edges, and the stale B-C edge (B already superseded by
+        # the earlier A-B operation) is skipped instead of re-governing it.
+        self.assertEqual(first.merged, 2)
+        self.assertEqual(first.superseded, 2)
+        self.assertEqual(b["metadata"]["status"], "superseded")
+        self.assertEqual(b["metadata"]["superseded_by"], "a")
+        self.assertEqual(c["metadata"]["status"], "superseded")
+        self.assertEqual(c["metadata"]["superseded_by"], "a")
+        self.assertEqual(a["metadata"]["confirmation_count"], 4)
+        self.assertEqual(a["metadata"]["merged_ids"], ["b", "c"])
+        self.assertEqual(first.details[-1]["result"], "skipped_superseded")
+        # Every superseded memory was governed exactly once — B appears as
+        # loser through its direct A-B decision only, never re-governed via
+        # the stale B-C edge.
+        loser_ids = [d["loser_id"] for d in first.details if d["loser_id"]]
+        self.assertEqual(loser_ids.count("b"), 1)
+        self.assertEqual(loser_ids.count("c"), 1)
+        recall = harness.recall("PostgreSQL")
+        self.assertEqual([item["id"] for item in recall], ["a"])
+
+        # Fully converged: another pass finds nothing and mutates nothing.
+        calls_before = list(harness.store.update_calls)
+        second = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        self.assertEqual(second.candidate_pairs, 0)
+        self.assertEqual(harness.store.update_calls, calls_before)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,21 @@ from hippo_memory.lifecycle import add_lifecycle_exclusion, is_active_memory
 MemoryIdentity = tuple[str, str]
 
 
+def resolve_scope_identity(
+    engine: HippoEngine,
+    scope: str,
+    project_id: str | None = None,
+    user_id: str | None = None,
+) -> MemoryIdentity:
+    """Resolve the storage identity ``(user_id, agent_id)`` for a scope."""
+    uid = user_id or engine.config.user_id
+    if scope == "global":
+        return uid, "global"
+    if scope == "project":
+        return uid, engine.router.resolve_project(project_id)
+    raise ValueError("scope must be 'project' or 'global'")
+
+
 class CandidateScanLimitExceeded(RuntimeError):
     """Raised when discovery cannot prove that the seed scan is complete."""
 
@@ -179,12 +194,9 @@ class CandidateDiscovery:
         project_id: str | None,
         user_id: str | None,
     ) -> MemoryIdentity:
-        uid = user_id or self.engine.config.user_id
-        if scope == "global":
-            return uid, "global"
-        if scope == "project":
-            return uid, self.engine.router.resolve_project(project_id)
-        raise ValueError("scope must be 'project' or 'global'")
+        return resolve_scope_identity(
+            self.engine, scope, project_id=project_id, user_id=user_id
+        )
 
     @staticmethod
     def _metadata(item: Mapping[str, Any]) -> Mapping[str, Any]:
