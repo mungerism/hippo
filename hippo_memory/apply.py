@@ -682,11 +682,19 @@ class ConsolidationApplier:
                 own_cache[member_id] = snapshot[member_id]
                 own = snapshot[member_id]
             else:
-                count = confirmation_count_of(record) if record is not None else 1
-                if record is not None:
-                    confirmed = confirmed_at(record)
-                    if confirmed is not None:
-                        freshness_cache[member_id] = confirmed
+                if record is None:
+                    # Physically deleted member: the only surviving evidence
+                    # of its contribution is the hint pre-seeded from a
+                    # referencing snapshot — never downgrade it to the
+                    # default 1.
+                    own = max(own_cache.get(member_id, 0), 1)
+                    own_cache[member_id] = own
+                    members_cache[member_id] = {member_id}
+                    return own
+                count = confirmation_count_of(record)
+                confirmed = confirmed_at(record)
+                if confirmed is not None:
+                    freshness_cache[member_id] = confirmed
                 descendants: set[str] = set()
                 for child in sorted(_merged_ids_of(record)):
                     resolve(child, inner)  # memoized: repeats are cheap
@@ -713,6 +721,12 @@ class ConsolidationApplier:
             own_cache.setdefault(member, 1)
             members_cache.setdefault(member, {member})
 
+        merged_sources: set[str] = set()
+        for member in sorted(union_members):
+            member_record = _fetch(member)
+            if member_record is not None:
+                merged_sources |= _merged_sources_of(member_record)
+
         confirmed_values = []
         for member in sorted(union_members):
             if member in freshness_cache:
@@ -733,9 +747,7 @@ class ConsolidationApplier:
                 m: own_cache[m] for m in sorted(union_members)
             },
             "merged_ids": sorted(union_members - {winner_id}),
-            "merged_sources": sorted(
-                _merged_sources_of(winner) | _merged_sources_of(loser)
-            ),
+            "merged_sources": sorted(merged_sources),
         }
         if confirmed_values:
             patch["last_confirmed_at"] = max(confirmed_values).isoformat()
