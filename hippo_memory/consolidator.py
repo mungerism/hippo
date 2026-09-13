@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from hippo_memory.apply import (
     OperationJournal,
+    OperationPlan,
     RESULT_APPLIED,
     RESULT_ALREADY_APPLIED,
     RESULT_FAILED,
@@ -33,7 +34,12 @@ from hippo_memory.apply import (
     ConsolidationApplier,
     build_operation_plan,
 )
-from hippo_memory.candidate_discovery import CandidateDiscovery, CandidateScanLimitExceeded
+from hippo_memory.candidate_discovery import (
+    CandidateDiscovery,
+    CandidateScanLimitExceeded,
+    resolve_scope_identity,
+)
+from hippo_memory.lifecycle import is_active_memory
 from hippo_memory.decision import (
     RELATION_CONFLICT,
     RELATION_DISTINCT,
@@ -224,6 +230,20 @@ class MemoryConsolidator:
         result = ConsolidationResult(scope=scope, project_id=project_id)
 
         try:
+            identity = resolve_scope_identity(
+                self.engine, scope, project_id=project_id, user_id=user_id
+            )
+        except ValueError as exc:
+            result.errors.append(f"[discovery] {exc}")
+            return result
+
+        # Crash recovery BEFORE discovery: a crash in the window after the
+        # loser was superseded but before the journal was completed leaves
+        # an unfinished operation the (now superseded) pair can no longer
+        # be rediscovered for — finish it here instead (#25 review round 3).
+        self._recover_unfinished(identity, result)
+
+        try:
             candidate_set = self.discovery.discover(
                 scope=scope, project_id=project_id, since=since, user_id=user_id
             )
@@ -246,22 +266,98 @@ class MemoryConsolidator:
             )
 
         for edge in candidate_set.candidate_pairs:
+            # Phase/operation context for the failure-report contract.
+            context: Dict[str, Any] = {"phase": "decision", "operation_id": None}
             try:
-                self._process_edge(edge, decider, dry_run, result)
+                self._process_edge(edge, decider, dry_run, result, context)
             except Exception as exc:  # one failure must not sink the batch
                 logger.warning("consolidation of edge %s failed: %s", edge, exc)
+                operation = (
+                    f" operation {context['operation_id']}"
+                    if context["operation_id"]
+                    else ""
+                )
                 result.errors.append(
-                    f"edge {edge.seed_id}/{edge.neighbor_id}: {exc}"
+                    f"[{context['phase']}] edge {edge.seed_id}/{edge.neighbor_id}"
+                    f"{operation}: {exc}"
                 )
         return result
 
-    def _process_edge(self, edge, decider, dry_run: bool, result: ConsolidationResult) -> None:
+    def _recover_unfinished(self, identity, result: ConsolidationResult) -> None:
+        """Resume this identity's unfinished operations before discovery."""
+        for entry in self.applier.journal.unfinished():
+            try:
+                if list(entry.get("identity") or []) != [identity[0], identity[1]]:
+                    continue
+                plan = OperationPlan(
+                    operation_id=str(entry["operation_id"]),
+                    user_id=identity[0],
+                    agent_id=identity[1],
+                    relation=str(entry["relation"]),
+                    winner_id=str(entry["winner_id"]),
+                    loser_id=str(entry["loser_id"]),
+                    observed_winner_version=str(entry["observed_winner_version"]),
+                    observed_loser_version=str(entry["observed_loser_version"]),
+                    reason=str(entry.get("reason") or ""),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                result.errors.append(f"[recovery] malformed journal entry: {exc}")
+                continue
+            try:
+                apply_result = self.applier.apply(plan)
+            except Exception as exc:
+                result.errors.append(
+                    f"[recovery] operation {plan.operation_id}: {exc}"
+                )
+                continue
+            if apply_result.status == RESULT_FAILED:
+                result.errors.append(
+                    f"[recovery] operation {plan.operation_id} failed: "
+                    f"{apply_result.error}"
+                )
+            elif apply_result.status == RESULT_STALE_PLAN:
+                result.stale_plans += 1
+            elif apply_result.status == RESULT_APPLIED:
+                result.merged += 1
+                if apply_result.loser_superseded:
+                    result.superseded += 1
+            result.details.append(
+                {
+                    "operation_id": plan.operation_id,
+                    "relation": plan.relation,
+                    "winner_id": plan.winner_id,
+                    "loser_id": plan.loser_id,
+                    "reason": plan.reason,
+                    "result": f"recovery:{apply_result.status}",
+                }
+            )
+
+    def _process_edge(
+        self, edge, decider, dry_run: bool, result: ConsolidationResult, context: Dict[str, Any]
+    ) -> None:
         first = self.engine.get(edge.seed_id)
         second = self.engine.get(edge.neighbor_id)
         if first is None or second is None:
             result.errors.append(
                 f"[decision] edge {edge.seed_id}/{edge.neighbor_id}: "
                 "record vanished since discovery"
+            )
+            return
+
+        # Edges were all discovered up front: an earlier edge in this batch
+        # may already have superseded one side (e.g. A-B then B-C). Re-check
+        # the lifecycle invariant so superseded records never take part in
+        # another winner/loser decision.
+        if not is_active_memory(first) or not is_active_memory(second):
+            result.details.append(
+                {
+                    "operation_id": None,
+                    "relation": None,
+                    "winner_id": None,
+                    "loser_id": None,
+                    "reason": "side already superseded by an earlier operation",
+                    "result": "skipped_superseded",
+                }
             )
             return
 
@@ -290,15 +386,18 @@ class MemoryConsolidator:
             if decision.winner_id == edge.seed_id
             else (second, first)
         )
+        context["phase"] = "planning"
         plan = build_operation_plan(
             decision, winner_record=winner_record, loser_record=loser_record
         )
+        context["operation_id"] = plan.operation_id
 
         if dry_run:
             # Preview only: no mutation, no journal transition.
             result.details.append(self._detail(decision, result="dry_run", plan=plan))
             return
 
+        context["phase"] = "apply"
         try:
             apply_result = self.applier.apply(plan)
         except Exception as exc:
