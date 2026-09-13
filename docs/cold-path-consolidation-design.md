@@ -166,9 +166,9 @@ flowchart TD
 ### 3.3 幂等应用 (#23, `build_operation_plan` + `ConsolidationApplier`)
 
 - **Operation Plan**：`operation_id` 由 (identity, relation, winner, loser, 双侧 observed 版本指纹) 确定性哈希生成——相同规划必然命中同一 journal 条目；
-- **Operation Journal**：`~/.hippo/consolidation/operations/<operation_id>.json`，原子写（tmp + fsync + 目录 fsync + rename），状态机 `planned -> applying -> completed`（`failed` 可重试；`stale` 终态，由重规划产生新 ID）；`unfinished()` 供 crash 恢复扫描；
+- **Operation Journal**：`~/.hippo/consolidation/operations/<operation_id>.json`，原子持久化顺序为「写临时文件并 fsync → rename → 对父目录 fsync」（目录 fsync 必须在 rename 之后，否则断电可能丢失目录项），状态机 `planned -> applying -> completed`（`failed` 可重试；`stale` 终态，由重规划产生新 ID）；`unfinished()` 供 crash 恢复扫描；
 - **Apply 顺序**：持锁 → journal 落盘（planned，winner patch 先于任何 mutation 持久化）→ crash-window 检测 → **双侧 observed/post-apply 版本重验 → 才允许 mutation** → 逐步骤翻转 journal → completed；
-- **stale 语义**：任一侧被 Hot/Warm 写过（无论是否已被本层部分修改），整个 plan 拒绝为 `stale_plan`、零 mutation；重规划经 lineage 去重必然收敛；
+- **stale 语义**：任一侧被 Hot/Warm 写过 → 拒绝执行**后续** mutation 并标记 `stale_plan`。注意 stale ≠ 完全无副作用：崩溃前已落盘的部分变更（如 winner 合并）不会回滚，但其终态由 post-apply 指纹记录、可审计；重规划经 lineage 去重必然收敛；
 - **等价合并**（全部为绝对值聚合，禁止 `+=`）：`merged_ids = set-union(winner lineage, loser, loser lineage)`（重叠去重，共享子树按其 recorded count 扣一次贡献）；`confirmation_count = unique lineage 聚合`；`last_confirmed_at = max(lineage)`；**winner 文本永不改写**；
 - **冲突消解**：winner 不继承 loser 确认数；loser 软删除并指向 winner。
 
