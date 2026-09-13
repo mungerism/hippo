@@ -237,7 +237,8 @@ class TestEquivalentMerge(unittest.TestCase):
 
         self.assertEqual(self.winner["memory"], "项目使用 PostgreSQL")
         metadata = self.winner["metadata"]
-        self.assertEqual(metadata["confirmation_count"], 4)
+        # Legacy own floor: every absorbed member keeps its creation vote.
+        self.assertEqual(metadata["confirmation_count"], 5)
         self.assertEqual(metadata["merged_ids"], ["m1", "m2", "mem-b"])
         self.assertEqual(
             metadata["merged_sources"], ["agent_explicit", "session_distillation"]

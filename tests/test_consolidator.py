@@ -1248,10 +1248,11 @@ class TestOverlappingEdges(unittest.TestCase):
         first = harness.consolidator.consolidate(scope="project", project_id="hippo")
         self.assertEqual(len(first.errors), 1)  # batch survives the crash
         harness.store.fail_on = None
-        # Hot/Warm re-absorption: B later absorbs D.
-        b["metadata"]["confirmation_count"] = 2
+        # Hot/Warm re-absorption: B later absorbs D (B was confirmed twice,
+        # so its own contribution in the new snapshot is 2).
+        b["metadata"]["confirmation_count"] = 3
         b["metadata"]["merged_ids"] = ["mem-d"]
-        b["metadata"]["merged_contributions"] = {"mem-b": 1, "mem-d": 1}
+        b["metadata"]["merged_contributions"] = {"mem-b": 2, "mem-d": 1}
         harness.store.records["mem-d"] = _memory(
             "mem-d", "事实甲补充", confirmed_at="2026-09-06T00:00:00+00:00"
         )
@@ -1274,7 +1275,6 @@ class TestOverlappingEdges(unittest.TestCase):
         result = harness.consolidator.applier.apply(plan2)
 
         self.assertEqual(result.status, "applied")
-        self.assertEqual(a["metadata"]["confirmation_count"], 4)
         self.assertEqual(
             set(a["metadata"]["merged_contributions"]),
             {"mem-a", "mem-b", "mem-d", "mem-e"},
@@ -1289,6 +1289,13 @@ class TestOverlappingEdges(unittest.TestCase):
         )
         self.assertEqual(
             harness.store.records["mem-e"]["metadata"]["status"], "superseded"
+        )
+        # Legacy own floor: A keeps its creation confirmation even though
+        # B's unit value grew after A's aggregation (codex: 5 = A1+B2+D1+E1).
+        self.assertEqual(a["metadata"]["confirmation_count"], 5)
+        self.assertEqual(
+            a["metadata"]["merged_contributions"],
+            {"mem-a": 1, "mem-b": 2, "mem-d": 1, "mem-e": 1},
         )
 
 

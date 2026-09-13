@@ -604,7 +604,7 @@ class ConsolidationApplier:
           verbatim no matter how the record's mutable count/lineage evolved
           afterwards (Hot/Warm re-absorption, crash-window replans).
         - Records without a snapshot contribute
-          ``own = max(0, count(member) - Σ own(union-deduplicated members
+          ``own = max(1, count(member) - Σ own(union-deduplicated members
           of merged_ids(member)))``, expanding through CURRENT lineage
           records so later-evolved snapshots (a re-activated member
           absorbing new facts) are picked up; per-member deduplication
@@ -692,8 +692,13 @@ class ConsolidationApplier:
                     resolve(child, inner)  # memoized: repeats are cheap
                     descendants.add(child)
                     descendants |= members_cache.get(child, set())
+                # Floor at 1: every memory contributes at least its creation
+                # confirmation. The recursive subtraction attributes
+                # descendants first, so an ancestor whose count was partially
+                # consumed by a descendant's later evolution keeps its own
+                # creation vote (codex: A(3,{B}) + B(2,{D}) + E -> 5).
                 own = max(
-                    0, count - sum(own_cache[d] for d in sorted(descendants))
+                    1, count - sum(own_cache[d] for d in sorted(descendants))
                 )
                 own_cache[member_id] = own
                 members_cache[member_id] = descendants | {member_id}
