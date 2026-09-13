@@ -251,18 +251,26 @@ class TestEquivalentMerge(unittest.TestCase):
         self.assertIn("superseded_at", loser_metadata)
 
     def test_flat_lineage_shared_descendant_not_double_subtracted(self):
-        """Regression (codex review round 5): after A absorbs B which had
-        absorbed C, A's flat lineage is {B, C} - merging A with a disjoint
-        D must subtract B's and C's own contributions once each
-        (own(A) = 3 - 1 - 1 = 1), giving 4, never re-subtracting C through
-        B's subtree (which would yield 3)."""
+        """Regression (codex review round 5, exact scenario): A(count=3)
+        absorbed B(count=2) which had absorbed C(count=1) - A's flat
+        lineage is {B, C}. Merging A with a disjoint D(count=1) must
+        subtract each unique descendant's own contribution exactly once:
+        own(C)=1, own(B)=2-1=1, own(A)=3-(1+1)=1, total=4."""
         harness = self.harness
         a = harness.engine.records["mem-a"]
         b = harness.engine.records["mem-b"]
-        # The post-crash flat state: A already aggregated B and C
-        # (own contributions 1 + 1 + 1 = 3).
+        c = _memory(
+            "mem-c",
+            "事实甲从句二",
+            source="session_distillation",
+            confirmed_at="2026-09-01T00:00:00+00:00",
+        )
+        harness.engine.records["mem-c"] = c
+        # The post-crash flat state: A aggregated B (which had aggregated C).
         a["metadata"]["confirmation_count"] = 3
         a["metadata"]["merged_ids"] = ["mem-b", "mem-c"]
+        b["metadata"]["confirmation_count"] = 2
+        b["metadata"]["merged_ids"] = ["mem-c"]
 
         from hippo_memory.decision import ConsolidationDecision
 
@@ -289,9 +297,9 @@ class TestEquivalentMerge(unittest.TestCase):
             a["metadata"]["merged_ids"], ["mem-b", "mem-c", "mem-d"]
         )
         self.assertEqual(loser["metadata"]["status"], "superseded")
-        # B still contributes exactly once; C (absent from the store)
-        # contributed its default 1 through the flat lineage.
-        self.assertEqual(b["metadata"]["confirmation_count"], 1)
+        # B and C each still contribute exactly once.
+        self.assertEqual(b["metadata"]["confirmation_count"], 2)
+        self.assertEqual(c["metadata"]["confirmation_count"], 1)
 
     def test_journal_records_the_full_operation_for_audit(self):
         self.harness.applier.apply(self.plan)

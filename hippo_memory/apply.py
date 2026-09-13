@@ -637,14 +637,16 @@ class ConsolidationApplier:
             lineage = sorted(_merged_ids_of(record)) if record is not None else []
             inner = stack | {member_id}
             descendants: set[str] = set()
-            children_own = 0
             for child in lineage:
-                if child in descendants or child == member_id:
-                    continue  # already counted through a sibling's subtree
-                children_own += resolve_own(child, inner)
+                resolve_own(child, inner)  # memoized: repeats are cheap
                 descendants.add(child)
                 descendants |= descendants_cache.get(child, set())
-            own = max(0, count - children_own)
+            # Subtract every unique descendant's own contribution exactly
+            # once — never a per-child subtree sum, which double-subtracts
+            # shared descendants across flat-lineage paths.
+            own = max(
+                0, count - sum(own_cache[d] for d in sorted(descendants))
+            )
             own_cache[member_id] = own
             descendants_cache[member_id] = descendants
             return own
