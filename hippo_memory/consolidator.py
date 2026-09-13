@@ -55,7 +55,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConsolidationResult:
-    """Aggregated, auditable outcome of one consolidation run."""
+    """Aggregated, auditable outcome of one consolidation run.
+
+    Counter semantics: ``merged`` / ``superseded`` / ``unchanged`` /
+    ``stale_plans`` count governance OPERATIONS completed by this run, not
+    raw store mutations. An idempotent replay (``already_applied``) —
+    including a recovery that lost a race against another consolidator —
+    counts as ``unchanged``; a crash-window recovery that resumes an
+    operation whose mutations already landed still counts as
+    ``merged``/``superseded`` because the operation was completed by this
+    run. DISTINCT decisions are reported solely via ``classified_distinct``.
+    """
 
     scope: str
     project_id: Optional[str] = None
@@ -337,6 +347,10 @@ class MemoryConsolidator:
                 )
             elif apply_result.status == RESULT_STALE_PLAN:
                 result.stale_plans += 1
+            elif apply_result.status == RESULT_ALREADY_APPLIED:
+                # Lost a race: another consolidator completed the operation
+                # between listing and applying (#25 review round 5).
+                result.unchanged += 1
             elif apply_result.status == RESULT_APPLIED:
                 # Same accounting as the normal apply path: only equivalent
                 # merges count as merged; conflict recoveries supersede.
