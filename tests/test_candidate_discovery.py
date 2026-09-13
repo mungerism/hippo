@@ -561,6 +561,49 @@ class TestCandidateDiscovery(unittest.TestCase):
         self.assertEqual(first.candidate_pairs, expected)
         self.assertEqual(reversed_scan.candidate_pairs, expected)
 
+    def test_expired_neighbor_is_excluded_defensively_after_ann_return(self):
+        """If the store adapter fails to execute the expiration push-down,
+        the discovery-side re-check must still keep expired memories from
+        forming destructive candidate edges."""
+        seed = _memory("seed", "uses postgres", "u1", "hippo")
+        expired = _memory(
+            "expired",
+            "database is postgres",
+            "u1",
+            "hippo",
+            expiration_date="2000-01-01",
+        )
+        discovery = self._discovery(
+            [seed, expired],
+            {
+                seed["memory"]: [
+                    _point(seed, 1.0),
+                    _point(expired, 0.97),
+                ]
+            },
+        )
+        # Simulate a broken store adapter: strip the NOT conditions so the
+        # push-down cannot hide the expired neighbor.
+        original_get_all = discovery.engine.memory.get_all
+        original_vector_search = discovery.engine.memory.vector_store.search
+        discovery.engine.memory.get_all = lambda **kwargs: original_get_all(
+            filters={k: v for k, v in kwargs["filters"].items() if k != "NOT"},
+            top_k=kwargs["top_k"],
+            show_expired=kwargs.get("show_expired", False),
+        )
+        discovery.engine.memory.vector_store.search = (
+            lambda *, query, vectors, top_k, filters: original_vector_search(
+                query=query,
+                vectors=vectors,
+                top_k=top_k,
+                filters={k: v for k, v in filters.items() if k != "NOT"},
+            )
+        )
+
+        result = discovery.discover(scope="project", project_id="hippo")
+
+        self.assertEqual(result.candidate_pairs, [])
+
     def test_invalid_ann_scores_fail_closed(self):
         seed = _memory("seed", "seed fact", "u1", "hippo")
         nan_neighbor = _memory("nan", "nan neighbor", "u1", "hippo")

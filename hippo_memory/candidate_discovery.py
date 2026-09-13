@@ -134,6 +134,11 @@ class CandidateDiscovery:
             if self._matches_identity(memory, identity) and is_active_memory(memory)
         ]
         normalized_since = self._normalize_datetime(since) if since is not None else None
+        active = [
+            memory
+            for memory in active
+            if not self._is_expired(memory)
+        ]
         seeds = [
             memory
             for memory in active
@@ -167,6 +172,7 @@ class CandidateDiscovery:
                     or float(score) < self.semantic_threshold
                     or not self._matches_identity(neighbor, identity)
                     or not is_active_memory(neighbor)
+                    or self._is_expired(neighbor)
                 ):
                     continue
                 edge = CandidateEdge(
@@ -234,6 +240,19 @@ class CandidateDiscovery:
                 except ValueError:
                     continue
         return max(timestamps, default=datetime.min.replace(tzinfo=timezone.utc))
+
+    @classmethod
+    def _is_expired(cls, item: Mapping[str, Any]) -> bool:
+        """Defensive re-check mirroring the expiration push-down: a store
+        adapter that fails to execute the NOT condition must not let an
+        expired memory form a destructive candidate edge (#24 review)."""
+        raw = item.get("expiration_date", cls._metadata(item).get("expiration_date"))
+        if not raw:
+            return False
+        try:
+            return datetime.fromisoformat(str(raw)).date() < datetime.now(timezone.utc).date()
+        except ValueError:
+            return False
 
     @staticmethod
     def _edge_preference(edge: CandidateEdge) -> tuple[float, str, str]:
