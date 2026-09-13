@@ -21,7 +21,7 @@
    - Consolidation 逻辑绝不在前台 `add_memory` 或 `search_memories` 链路中同步执行，完全与前台交互解耦。
 
 2. **定义独立的 Consolidation Seam**：
-   - 暴露公共接口 `MemoryConsolidator.consolidate(scope, project_id=None, since=None, dry_run=False) -> ConsolidationResult`；
+   - 暴露公共接口 `MemoryConsolidator.consolidate(scope="project", project_id=None, since=None, dry_run=False, *, user_id=None) -> ConsolidationResult`；
    - 支持通过 CLI 命令 (`hippo consolidate`)、定时守护进程或离线 Job 调用；
    - 并发互斥采用 **per-identity 共享写锁**（`~/.hippo/consolidation/locks/`，文件名为 identity 的 SHA-256 摘要）：进程内可重入（RLock），跨进程 flock；
    - 关键约束：**`HippoEngine.add / update / delete` 等所有写入方都参与同一把锁**——Cold Path 的 re-read + 版本比对 + mutation 只在共享锁内才构成真正的临界区，仅 consolidator 之间互斥无法阻止 Hot/Warm 并发写入（TOCTOU）。

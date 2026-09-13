@@ -121,21 +121,25 @@ class ConsolidationResult:
 
 ```mermaid
 flowchart TD
-    A[MemoryConsolidator.consolidate] --> R[recovery pass: 补完本 identity 的 unfinished journal]
-    R --> B[解析 identity 并获取 per-identity 共享写锁]
-    B --> C[CandidateDiscovery: 增量 seed + ANN 邻域, 纯读]
+    A[MemoryConsolidator.consolidate] --> B[resolve_scope_identity 解析 identity]
+    B --> R[recovery pass: 筛选该 identity 的 unfinished journal 并补完]
+    R --> C[CandidateDiscovery: 增量 seed + ANN 邻域, 纯读, 不持锁]
     C --> D{存在 candidate edge?}
-    D -- 否 --> E[unchanged = scanned, 结束]
+    D -- 否 --> E[直接结束: operation counters 保持 0]
     D -- 是 --> F[逐 edge: 重查 lifecycle + 双记录读取]
     F --> G[两阶段决策: 关系分类 → winner 仲裁]
     G --> H[固化 Operation Plan: 确定性 operation_id]
     H --> I{dry_run?}
     I -- 是 --> J[仅记录 decision 预览, 零 mutation]
-    I -- 否 --> K[Idempotent Apply: journal + 版本重验 + 原子落盘]
+    I -- 否 --> K[Idempotent Apply: apply() 逐 operation 获取共享写锁, journal + 版本重验 + 原子落盘]
     K --> L[按 operation outcome 聚合统计]
     J --> L
     L --> M[ConsolidationResult]
 ```
+
+> 锁粒度说明：共享写锁不是 run 级长锁——discovery 与分类阶段全程不持锁，由
+> `ConsolidationApplier.apply()` 围绕每次 re-read、指纹校验与 mutation 获取，
+> Hot/Warm 写入方因此在两次治理操作之间不受阻塞。
 
 ### 3.1 候选发现 (#21, `CandidateDiscovery`)
 - 以 `(user_id, agent_id)` 为硬 identity 边界，不跨 identity 治理；
@@ -187,7 +191,7 @@ audit 语义与 recall 分离：`get(memory_id)` 与 history 可读取 supersede
 |---|---|
 | winner 已更新 / loser 未 supersede | journal 重放跳过已完成步骤，仅补 loser；计数不重复 |
 | loser 已 supersede / journal 未 completed | recovery pass 零 mutation 补完 journal（该 pair 已不可被 rediscover） |
-| journal applying / 进程崩溃 | 窗口不可原地判别 → fail-closed stale → 重规划经 lineage 去重收敛 |
+| journal `applying` / 进程崩溃 | **不是一律 stale**：逐侧比对指纹——步骤已完成且匹配 post-apply（或 loser 已处于目标状态）→ 原地续跑或只补完 journal；步骤未执行则按 observed 指纹校验后续跑。仅当某侧既不匹配 post-apply 也不匹配 observed（存在外部写入）时才 fail-closed 为 stale → 重规划经 lineage 去重收敛 |
 
 ---
 
