@@ -148,6 +148,67 @@ def list(
 
 
 @app.command()
+def recent(
+    today: bool = typer.Option(False, "--today", help="只看今天（本地时区零点起，优先于 --hours）"),
+    hours: int = typer.Option(24, "--hours", help="回溯窗口小时数（默认 24）"),
+    scope: str = typer.Option("all", "--scope", "-s", help="范围: all | global | project"),
+    limit: int = typer.Option(50, "--limit", "-n", help="最大返回条数（上限 100）"),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
+):
+    """按时间窗口回顾近期记忆事件（ADD/UPDATE/DELETE），适合每日复盘与任务交接。"""
+    from datetime import datetime
+
+    if scope not in ("all", "global", "project"):
+        console.print(f"[bold red]✗ 无效的 --scope:[/bold red] {scope}（仅支持 all / global / project）")
+        raise typer.Exit(1)
+
+    engine = _get_engine()
+    since = None
+    if today:
+        since = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    window_label = f"今天（自 {since.strftime('%Y-%m-%d %H:%M')} 起）" if today else f"近 {hours} 小时"
+
+    with console.status(f"[bold cyan]正在拉取近期记忆事件 ({window_label}，Scope: {scope})...[/bold cyan]"):
+        try:
+            items = engine.get_recent_memories(
+                hours=hours, scope=scope, project_id=project, limit=limit, since=since
+            )
+        except Exception as e:
+            console.print(f"[bold red]✗ 获取近期记忆失败:[/bold red] {e}")
+            raise typer.Exit(1)
+
+    if not items:
+        console.print(f"[yellow]{window_label} 内没有新增或变更的记忆 (Scope: {scope})。[/yellow]")
+        return
+
+    event_styles = {"ADD": "green", "UPDATE": "yellow", "DELETE": "red"}
+    table = Table(title=f"近期记忆时间线 ({window_label}，共 {len(items)} 条，Scope: {scope})")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("本地时间", style="cyan", width=19)
+    table.add_column("事件", width=8)
+    table.add_column("Scope", style="magenta", width=18)
+    table.add_column("记忆事实", style="bold")
+    table.add_column("Memory ID", style="dim", width=36)
+
+    for idx, item in enumerate(items, 1):
+        event = str(item.get("event", ""))
+        style = event_styles.get(event, "white")
+        scope_label = "未知" if not item.get("scope") else (
+            "Global" if item.get("scope") == "global" else f"Project:{item['scope']}"
+        )
+        table.add_row(
+            str(idx),
+            str(item.get("timestamp", "")),
+            f"[{style}]{event}[/{style}]",
+            scope_label,
+            item.get("memory") or "-",
+            str(item.get("memory_id", "")),
+        )
+
+    console.print(table)
+
+
+@app.command()
 def profile(
     user_id: Optional[str] = typer.Option(None, "--user", "-u", help="用户 ID"),
 ):

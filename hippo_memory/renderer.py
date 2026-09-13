@@ -76,3 +76,43 @@ def render_untrusted_memories(
 
     content = "\n".join(lines)
     return f"{ENVELOPE_START_TAG}\n{content}\n{ENVELOPE_END_TAG}"
+
+
+def render_untrusted_recent_memories(
+    items: List[Dict[str, Any]],
+    hours: int = 24,
+    scope: str = "all",
+    empty_message: Optional[str] = None,
+) -> str:
+    """Render recent-memory timeline events inside the untrusted envelope.
+
+    Same defense-in-depth contract as ``render_untrusted_memories``: every
+    fact text and scope label is escaped before entering the envelope.
+    """
+    if not items:
+        if empty_message is not None:
+            msg = escape_untrusted_text(empty_message)
+        else:
+            safe_hours = escape_untrusted_text(str(hours))
+            safe_scope = escape_untrusted_text(scope)
+            msg = (
+                f"近 {safe_hours} 小时内没有新增或变更的记忆事实 (Scope: {safe_scope})。"
+                "时间范围检索与语义检索互补：需要按主题查找时请改用 search_memories。"
+            )
+        return f"{ENVELOPE_START_TAG}\n{msg}\n{ENVELOPE_END_TAG}"
+
+    lines = [f"### 近期记忆时间线 (共 {len(items)} 条，近 {escape_untrusted_text(str(hours))} 小时，Scope: {escape_untrusted_text(scope)}):"]
+    for idx, item in enumerate(items, 1):
+        event = escape_untrusted_text(str(item.get("event", "")))
+        ts = escape_untrusted_text(str(item.get("timestamp", "")))
+        aid = item.get("scope")
+        aid_escaped = escape_untrusted_text(str(aid)) if aid else "unknown"
+        tag = "Global" if aid == "global" else f"Project: {aid_escaped}"
+        mem_text = escape_untrusted_text(item.get("memory", ""))
+        mem_id = escape_untrusted_text(str(item.get("memory_id", "")))
+        lines.append(
+            f"{idx}. [{ts} | {event} | {tag}] {mem_text} (memory_id: `{mem_id}`)"
+        )
+
+    content = "\n".join(lines)
+    return f"{ENVELOPE_START_TAG}\n{content}\n{ENVELOPE_END_TAG}"

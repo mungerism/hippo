@@ -10,6 +10,7 @@ from hippo_memory.lifecycle import add_lifecycle_exclusion, filter_active_memori
 from hippo_memory.config import HippoConfig
 from hippo_memory.decision import resolve_identity
 from hippo_memory.exceptions import HippoValidationError
+from hippo_memory.recent import fetch_recent_memories
 from hippo_memory.router import ScopeRouter
 
 logger = logging.getLogger(__name__)
@@ -543,6 +544,33 @@ class HippoEngine:
     ) -> List[Dict[str, Any]]:
         """List stored memories under the specified scope (convenience alias)."""
         return self.get_memories(scope=scope, project_id=project_id, limit=limit)
+
+    def get_recent_memories(
+        self,
+        hours: int = 24,
+        scope: str = "all",
+        project_id: Optional[str] = None,
+        limit: int = 50,
+        since: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Pull ADD/UPDATE/DELETE memory events inside a recent time window.
+
+        Time-range recall over the history journal — complements semantic
+        search, which cannot see "今天 / 近 24 小时" style temporal intents.
+        One bounded history query plus one batched scope resolution; no
+        per-row ``get()`` fan-out. See ``hippo_memory.recent`` for the
+        contract details (lifecycle and ownership invariants included).
+        """
+        return fetch_recent_memories(
+            self,
+            hours=hours,
+            scope=scope,
+            project_id=project_id,
+            limit=limit,
+            since=since,
+            user_id=user_id,
+        )
 
     def get_user_profile(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Retrieve all persistent global preferences and profile facts for the user.

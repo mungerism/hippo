@@ -11,7 +11,11 @@ from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
-from hippo_memory.renderer import UNTRUSTED_CONTEXT_INSTRUCTION, render_untrusted_memories
+from hippo_memory.renderer import (
+    UNTRUSTED_CONTEXT_INSTRUCTION,
+    render_untrusted_memories,
+    render_untrusted_recent_memories,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -203,6 +207,72 @@ def search_memories(
             query=query,
             scope=scope,
             empty_message="记忆检索失败，请检查服务配置或稍后重试。",
+        )
+
+
+@mcp_server.tool(
+    description=(
+        "Retrieve recent memory events (ADD/UPDATE/DELETE) inside a time window. "
+        "Use this for temporal questions that semantic search cannot answer, such as "
+        "'今天新增了什么记忆', '昨天做出了哪些技术决策', or task handover over the last "
+        "N hours. Complements search_memories (topic-oriented) with time-oriented recall. "
+        "hours defaults to 24 (hard-capped 1..8760); limit defaults to 30 (hard-capped 1..100). "
+        + UNTRUSTED_CONTEXT_INSTRUCTION
+    )
+)
+def get_recent_memories(
+    hours: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=8760,
+            description="Look-back window in hours (default 24, max 1 year).",
+        ),
+    ] = 24,
+    scope: Annotated[
+        Literal["all", "project", "global"],
+        Field(
+            description=(
+                "Retrieval scope: 'all' (default, project + global) | 'global' (personal "
+                "habits) | 'project' (current Git repository)."
+            )
+        ),
+    ] = "all",
+    limit: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=100,
+            description="Maximum number of timeline events to return (default 30).",
+        ),
+    ] = 30,
+) -> str:
+    """Retrieve recent memory events inside a time window.
+
+    Args:
+        hours: Look-back window in hours (default 24).
+        scope: Retrieval scope: 'all' (default) | 'global' | 'project'.
+        limit: Maximum number of timeline events (default 30, max 100).
+
+    Returns:
+        Markdown-formatted timeline of ADD/UPDATE/DELETE events (newest first,
+        local timezone) enclosed inside an untrusted context envelope.
+    """
+    try:
+        engine = get_engine()
+        results = engine.get_recent_memories(
+            hours=hours,
+            scope=scope,
+            limit=limit,
+        )
+        return render_untrusted_recent_memories(results, hours=hours, scope=scope)
+    except Exception as e:
+        logger.error("Failed to retrieve recent memories: %s", e, exc_info=True)
+        return render_untrusted_recent_memories(
+            [],
+            hours=hours,
+            scope=scope,
+            empty_message="近期记忆检索失败，请检查服务配置或稍后重试。",
         )
 
 
