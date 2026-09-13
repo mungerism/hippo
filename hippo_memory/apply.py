@@ -587,37 +587,6 @@ class ConsolidationApplier:
             else SUPERSEDE_REASON_CONFLICT
         )
 
-    @staticmethod
-    def _unit_contributions(record: Mapping[str, Any]) -> Dict[str, int]:
-        """Immutable member→own contribution snapshot of one aggregated unit.
-
-        Records carrying ``merged_contributions`` (written by this layer)
-        are authoritative; simple records contribute their own count, minus
-        one per flat absorbed member — exact for every pre-snapshot
-        union-sum write, since those count formulas equal
-        ``own(record) + Σ 1 per member``.
-        """
-        record_id = str(record.get("id", "") or "")
-        raw = metadata_of(record).get("merged_contributions")
-        if isinstance(raw, Mapping) and raw:
-            unit: Dict[str, int] = {}
-            for member, value in raw.items():
-                try:
-                    unit[str(member)] = max(1, int(value))
-                except (TypeError, ValueError):
-                    unit[str(member)] = 1
-            return unit
-        lineage = _merged_ids_of(record)
-        # Pre-snapshot union-sum invariant: count = own(record) + 1 per
-        # flat absorbed member. max(0, ...) keeps the unit sum equal to
-        # count even for inconsistent legacy rows; union-max resolves the
-        # rest.
-        own = max(0, confirmation_count_of(record) - len(lineage))
-        unit = {record_id: own}
-        for member in sorted(lineage):
-            unit.setdefault(str(member), 1)
-        return unit
-
     def _equivalent_winner_patch(
         self,
         plan: OperationPlan,
