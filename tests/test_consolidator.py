@@ -1253,7 +1253,7 @@ class TestOverlappingEdges(unittest.TestCase):
         b["metadata"]["merged_ids"] = ["mem-d"]
         b["metadata"]["merged_contributions"] = {"mem-b": 1, "mem-d": 1}
         harness.store.records["mem-d"] = _memory(
-            "mem-d", "事实甲补充", confirmed_at="2026-09-04T00:00:00+00:00"
+            "mem-d", "事实甲补充", confirmed_at="2026-09-06T00:00:00+00:00"
         )
         harness.store.records["mem-e"] = _memory(
             "mem-e", "事实甲另一面", confirmed_at="2026-09-04T00:00:00+00:00"
@@ -1281,6 +1281,11 @@ class TestOverlappingEdges(unittest.TestCase):
         )
         self.assertEqual(
             a["metadata"]["merged_ids"], ["mem-b", "mem-d", "mem-e"]
+        )
+        # Freshness propagates from evolved lineage members: D's newer
+        # confirmation wins over A's original one.
+        self.assertEqual(
+            a["metadata"]["last_confirmed_at"], "2026-09-06T00:00:00+00:00"
         )
         self.assertEqual(
             harness.store.records["mem-e"]["metadata"]["status"], "superseded"
