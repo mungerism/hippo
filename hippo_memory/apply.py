@@ -624,42 +624,106 @@ class ConsolidationApplier:
     ) -> dict[str, Any]:
         """Deterministic lineage aggregation for the equivalent merge.
 
-        Everything is computed as absolute values from immutable
-        contribution snapshots persisted by previous merges
-        (``merged_contributions``), never as increments, so a replayed
-        apply converges instead of accumulating.
-
         ``confirmation_count`` implements the spec formula "sum of unique
-        equivalent lineage confirmations (default 1)": the two sides'
-        contribution snapshots are union-max-deduplicated (a member present
-        on both sides — e.g. the loser re-activated by Hot/Warm after a
-        crash window — contributes exactly once; a shared descendant
-        reachable through multiple flat ``merged_ids`` paths is likewise
-        counted once), and the merged count is the sum over the deduplicated
-        union. For disjoint lineages this equals
-        ``count(winner) + count(loser)``; for nested or partially
-        overlapping lineages (crash-window states) it neither
-        double-deducts nor double-counts.
+        equivalent lineage confirmations (default 1)" over the union of
+        both lineages, resolved as follows:
+
+        - Records carrying an immutable ``merged_contributions`` snapshot
+          are authoritative: their own and their recorded lineage
+          contributions are taken verbatim, no matter how their mutable
+          count/lineage evolved afterwards (Hot/Warm re-absorption,
+          crash-window replans).
+        - Records without a snapshot contribute
+          ``own = count(member) - Σ own(union-deduplicated members of
+          merged_ids(member))``, expanding through current lineage records
+          so later-evolved snapshots (a re-activated member absorbing new
+          facts) are picked up; the per-member deduplication keeps shared
+          flat-lineage descendants from being subtracted twice.
+
+        The merged count is Σ own over the unique union members. For
+        disjoint simple lineages this equals
+        ``count(winner) + count(loser)``; nested / evolved / partially
+        overlapping states neither double-deduct nor double-count.
         """
         winner_id = str(winner.get("id", "") or "")
-        winner_lineage = _merged_ids_of(winner)
-        loser_lineage = _merged_ids_of(loser)
-        loser_side = loser_lineage | {plan.loser_id}
+        loser_id = str(loser.get("id", "") or "")
 
-        contributions: Dict[str, int] = {}
-        for unit in (
-            self._unit_contributions(winner),
-            self._unit_contributions(loser),
-        ):
-            for member, value in unit.items():
-                contributions[member] = max(contributions.get(member, 0), value)
+        own_cache: Dict[str, int] = {}
+        members_cache: Dict[str, set[str]] = {}
+
+        def _snapshot_of(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, int]]:
+            if record is None:
+                return None
+            raw = metadata_of(record).get("merged_contributions")
+            if not isinstance(raw, Mapping) or not raw:
+                return None
+            snapshot: Dict[str, int] = {}
+            for member, value in raw.items():
+                try:
+                    snapshot[str(member)] = max(1, int(value))
+                except (TypeError, ValueError):
+                    snapshot[str(member)] = 1
+            return snapshot
+
+        def resolve(member_id: str, stack: frozenset[str]) -> int:
+            # Both caches must be populated: an own value without its member
+            # set means a stale-snapshot entry that still needs full
+            # resolution (evolved descendants hang off the lineage).
+            if member_id in own_cache and member_id in members_cache:
+                return own_cache[member_id]
+            if member_id in stack:  # cycle guard (defensive)
+                return 0
+            record = self.engine.get(member_id)
+            if record is None:
+                record = winner if member_id == winner_id else (
+                    loser if member_id == loser_id else None
+                )
+            snapshot = _snapshot_of(record)
+            if snapshot is not None:
+                # Immutable snapshot: authoritative for this member's OWN
+                # contribution and its recorded lineage, regardless of how
+                # its mutable count/lineage evolved afterwards.
+                for member, value in snapshot.items():
+                    own_cache[member] = max(own_cache.get(member, 0), value)
+                members = set(snapshot)
+                # Expand through CURRENT lineage members so descendants that
+                # joined after a stale snapshot (crash-window replans,
+                # Hot/Warm re-absorption) still contribute their own values.
+                inner = stack | {member_id}
+                for child in sorted(_merged_ids_of(record)):
+                    resolve(child, inner)
+                    members |= members_cache.get(child, set())
+                members_cache[member_id] = members
+                own_cache[member_id] = snapshot[member_id]
+                return own_cache[member_id]
+
+            count = confirmation_count_of(record) if record is not None else 1
+            lineage = sorted(_merged_ids_of(record)) if record is not None else []
+            inner = stack | {member_id}
+            descendants: set[str] = set()
+            for child in lineage:
+                resolve(child, inner)  # memoized: repeats are cheap
+                descendants.add(child)
+                descendants |= members_cache.get(child, set())
+            own = max(
+                0, count - sum(own_cache[d] for d in sorted(descendants))
+            )
+            own_cache[member_id] = own
+            members_cache[member_id] = descendants | {member_id}
+            return own
+
+        for member in sorted({winner_id, loser_id}):
+            resolve(member, frozenset())
+        union_members: set[str] = set()
+        for member in (winner_id, loser_id):
+            union_members |= members_cache.get(member, set()) | {member}
 
         patch: dict[str, Any] = {
-            "confirmation_count": max(1, sum(contributions.values())),
-            # The winner's own id never enters its merged lineage: a later
-            # B-wins replan must not create an A<->B lineage cycle.
-            "merged_ids": sorted((winner_lineage | loser_side) - {winner_id}),
-            "merged_contributions": dict(sorted(contributions.items())),
+            "confirmation_count": max(1, sum(own_cache.get(m, 1) for m in sorted(union_members))),
+            "merged_contributions": {
+                m: own_cache.get(m, 1) for m in sorted(union_members)
+            },
+            "merged_ids": sorted(union_members - {winner_id}),
             "merged_sources": sorted(
                 _merged_sources_of(winner) | _merged_sources_of(loser)
             ),

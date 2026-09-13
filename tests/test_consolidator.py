@@ -35,6 +35,7 @@ from hippo_memory.consolidator import (
     parse_since,
 )
 import hippo_memory.consolidator as consolidator_module
+from hippo_memory.decision import ConsolidationDecision
 from hippo_memory.engine import HippoEngine
 
 
@@ -1212,6 +1213,78 @@ class TestOverlappingEdges(unittest.TestCase):
         self.assertEqual(a["metadata"]["merged_ids"], ["mem-b", "mem-c"])
         self.assertEqual(b["metadata"]["status"], "superseded")
         self.assertEqual(b["metadata"]["superseded_by"], "mem-a")
+
+
+    def test_evolved_lineage_member_contributes_through_snapshot(self):
+        """Regression (codex review round 8): A absorbs B in a crash window
+        (A snapshot {A,B}, B stays active), B later absorbs D - merging A
+        with a disjoint E must include D through B's evolved unit:
+        count = own(A)+own(B)+own(D)+own(E) = 4, never 3."""
+        harness = _Harness(
+            [
+                _memory("mem-a", "事实甲", confirmed_at="2026-09-05T00:00:00+00:00"),
+                _memory("mem-b", "事实甲变体", confirmed_at="2026-09-03T00:00:00+00:00"),
+            ],
+            semantic_scores={frozenset(("mem-a", "mem-b")): 0.93},
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        a = harness.store.records["mem-a"]
+        b = harness.store.records["mem-b"]
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=dict(a),
+            loser_record=dict(b),
+        )
+        harness.store.fail_on = {"mem-b"}
+        first = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        self.assertEqual(len(first.errors), 1)  # batch survives the crash
+        harness.store.fail_on = None
+        # Hot/Warm re-absorption: B later absorbs D.
+        b["metadata"]["confirmation_count"] = 2
+        b["metadata"]["merged_ids"] = ["mem-d"]
+        b["metadata"]["merged_contributions"] = {"mem-b": 1, "mem-d": 1}
+        harness.store.records["mem-d"] = _memory(
+            "mem-d", "事实甲补充", confirmed_at="2026-09-04T00:00:00+00:00"
+        )
+        harness.store.records["mem-e"] = _memory(
+            "mem-e", "事实甲另一面", confirmed_at="2026-09-04T00:00:00+00:00"
+        )
+
+        plan2 = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-e",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=dict(a),
+            loser_record=dict(harness.store.records["mem-e"]),
+        )
+        result = harness.consolidator.applier.apply(plan2)
+
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(a["metadata"]["confirmation_count"], 4)
+        self.assertEqual(
+            set(a["metadata"]["merged_contributions"]),
+            {"mem-a", "mem-b", "mem-d", "mem-e"},
+        )
+        self.assertEqual(
+            a["metadata"]["merged_ids"], ["mem-b", "mem-d", "mem-e"]
+        )
+        self.assertEqual(
+            harness.store.records["mem-e"]["metadata"]["status"], "superseded"
+        )
 
 
 if __name__ == "__main__":
