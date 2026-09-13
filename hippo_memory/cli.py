@@ -238,6 +238,79 @@ def status():
 
 
 @app.command()
+def consolidate(
+    scope: str = typer.Option("project", "--scope", help="治理范围：project 或 global"),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名称"),
+    since: Optional[str] = typer.Option(None, "--since", help="增量窗口：<n>h / <n>d / <n>w 或 ISO-8601 时间"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览 decisions/plans，不修改任何记忆"),
+    user_id: Optional[str] = typer.Option(None, "--user", help="显式指定用户标识"),
+):
+    """运行 Cold Path 记忆治理：合并等价事实、消解冲突、收敛 canonical state。
+
+    属于离线治理入口，默认不绑定每次写入，也不启用自动调度。
+    """
+    from hippo_memory.consolidator import MemoryConsolidator, parse_since
+
+    if scope not in ("project", "global"):
+        console.print(f"[bold red]✗ 无效的 --scope:[/bold red] {scope}（仅支持 project / global）")
+        raise typer.Exit(1)
+    try:
+        since_dt = parse_since(since)
+    except ValueError as e:
+        console.print(f"[bold red]✗ 无效的 --since:[/bold red] {e}")
+        raise typer.Exit(1)
+
+    engine = _get_engine()
+    consolidator = MemoryConsolidator(engine)
+
+    mode_label = "[bold yellow]DRY-RUN 预览（不修改任何记忆）[/bold yellow]" if dry_run else \
+        "[bold red]DESTRUCTIVE 执行（将合并/废弃记忆元数据）[/bold red]"
+    console.print(f"[bold cyan]Cold Path 记忆治理 | scope={scope} | {mode_label}[/bold cyan]")
+
+    try:
+        result = consolidator.consolidate(
+            scope=scope, project_id=project, since=since_dt, dry_run=dry_run, user_id=user_id
+        )
+    except Exception as e:
+        console.print(f"[bold red]✗ 治理失败:[/bold red] {e}")
+        raise typer.Exit(1)
+
+    labels = {
+        "scanned": "scanned（扫描）",
+        "seeds": "seeds（增量种子）",
+        "candidate_pairs": "candidate_pairs（候选对）",
+        "classified_equivalent": "classified_equivalent（等价）",
+        "classified_conflict": "classified_conflict（冲突）",
+        "classified_distinct": "classified_distinct（独立）",
+        "merged": "merged（已合并）",
+        "superseded": "superseded（已废弃）",
+        "unchanged": "unchanged（无变化）",
+        "stale_plans": "stale_plans（过期计划）",
+        "errors": "errors（错误）",
+    }
+    table = Table(title="Consolidation 统计", show_header=False)
+    table.add_column("指标", style="cyan")
+    table.add_column("数值", justify="right")
+    for key, value in result.stats().items():
+        table.add_row(labels.get(key, key), str(value))
+    console.print(table)
+
+    if result.details:
+        console.print("[bold]决策明细:[/bold]")
+        for detail in result.details:
+            console.print(
+                f"  • [{detail['relation']}] winner={detail['winner_id']} "
+                f"loser={detail['loser_id']} reason={detail['reason']} "
+                f"→ {detail['result']}"
+            )
+    for error in result.errors:
+        console.print(f"[red]  ✗ {error}[/red]")
+
+    if result.errors:
+        raise typer.Exit(1)
+
+
+@app.command()
 def serve():
     """启动 Hippo MCP Server（标准 stdio 模式，供各 IDE 接入）。"""
     from hippo_memory.server import main as run_server
