@@ -232,6 +232,14 @@ class _Harness:
             ),
         )
 
+    def applier_journal_entries(self):
+        journal = self.consolidator.applier.journal
+        return [
+            entry
+            for path in sorted(self.operations_dir.glob("*.json"))
+            if (entry := journal.load(path.stem)) is not None
+        ]
+
     def cleanup(self):
         self.tmp.cleanup()
 
@@ -540,6 +548,10 @@ class TestFailureSemantics(unittest.TestCase):
         harness.store.fail_on = {"mem-b"}
         first = harness.consolidator.consolidate(scope="project", project_id="hippo")
         self.assertEqual(len(first.errors), 1)
+        # Failure reporting contract: phase + operation id in the message.
+        self.assertIn("[apply]", first.errors[0])
+        journal_entry = harness.applier_journal_entries()[0]
+        self.assertIn(journal_entry["operation_id"], first.errors[0])
         self.assertEqual(winner["metadata"]["confirmation_count"], 3)
 
         harness.store.fail_on = None
@@ -859,6 +871,110 @@ class TestOverlappingEdges(unittest.TestCase):
         second = harness.consolidator.consolidate(scope="project", project_id="hippo")
         self.assertEqual(second.candidate_pairs, 0)
         self.assertEqual(harness.store.update_calls, calls_before)
+
+
+    def test_dry_run_never_applies_pending_recovery(self):
+        """Regression (PR #36 review round 4): --dry-run with an unfinished
+        journal must preview the pending recovery without applying it."""
+        harness = _Harness(
+            [
+                _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-05T00:00:00+00:00"),
+                _memory("mem-b", "项目数据库为 PostgreSQL", confirmed_at="2026-09-01T00:00:00+00:00"),
+            ],
+            semantic_scores={frozenset(("mem-a", "mem-b")): 0.93},
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        winner = harness.store.records["mem-a"]
+        loser = harness.store.records["mem-b"]
+        from hippo_memory.decision import ConsolidationDecision
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=winner,
+            loser_record=loser,
+        )
+        harness.consolidator.applier.journal.save(
+            {
+                **plan.to_dict(),
+                "status": "planned",
+                "steps": {"winner_update": False, "loser_supersede": False},
+                "attempts": 0,
+                "created_at": "2026-09-12T00:00:00+00:00",
+                "error": None,
+            }
+        )
+
+        result = harness.consolidator.consolidate(
+            scope="project", project_id="hippo", dry_run=True
+        )
+
+        recovery_details = [
+            d for d in result.details if d["result"] == "recovery:dry_run"
+        ]
+        self.assertEqual(len(recovery_details), 1)
+        self.assertEqual(recovery_details[0]["operation_id"], plan.operation_id)
+        self.assertEqual(harness.store.update_calls, [])
+        entry = harness.consolidator.applier.journal.load(plan.operation_id)
+        self.assertEqual(entry["status"], "planned")  # journal untouched
+        self.assertIsNone(loser["metadata"].get("status"))
+
+        # A later non-dry run applies the pending operation normally.
+        applied = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        self.assertEqual(applied.details[0]["result"], "recovery:applied")
+        self.assertEqual(applied.merged, 1)
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+
+    def test_conflict_recovery_counts_superseded_not_merged(self):
+        """Regression (PR #36 review round 4): recovery accounting matches
+        the normal apply path — CONFLICT recoveries supersede, never merge."""
+        harness = _Harness(
+            [
+                _memory("old-fact", "项目使用 PostgreSQL", confirmed_at="2026-09-01T00:00:00+00:00"),
+                _memory("new-fact", "项目已迁移至 MySQL", confirmed_at="2026-09-08T00:00:00+00:00"),
+            ],
+            semantic_scores={frozenset(("old-fact", "new-fact")): 0.91},
+            scripted="CONFLICT",
+        )
+        self.addCleanup(harness.cleanup)
+        old_fact = harness.store.records["old-fact"]
+        from hippo_memory.decision import ConsolidationDecision
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="CONFLICT",
+                winner_id="new-fact",
+                loser_id="old-fact",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=harness.store.records["new-fact"],
+            loser_record=old_fact,
+        )
+        harness.consolidator.applier.journal.save(
+            {
+                **plan.to_dict(),
+                "status": "planned",
+                "steps": {"winner_update": False, "loser_supersede": False},
+                "attempts": 0,
+                "created_at": "2026-09-12T00:00:00+00:00",
+                "error": None,
+            }
+        )
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        self.assertEqual(result.merged, 0)
+        self.assertEqual(result.superseded, 1)
+        self.assertEqual(old_fact["metadata"]["supersede_reason"], "conflict_overridden")
 
 
 if __name__ == "__main__":

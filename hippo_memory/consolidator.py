@@ -241,7 +241,9 @@ class MemoryConsolidator:
         # loser was superseded but before the journal was completed leaves
         # an unfinished operation the (now superseded) pair can no longer
         # be rediscovered for — finish it here instead (#25 review round 3).
-        self._recover_unfinished(identity, result)
+        # Under dry-run the recovery is preview-only: pending operations are
+        # reported, never applied, keeping the zero-mutation contract.
+        self._recover_unfinished(identity, result, dry_run=dry_run)
 
         try:
             candidate_set = self.discovery.discover(
@@ -283,8 +285,14 @@ class MemoryConsolidator:
                 )
         return result
 
-    def _recover_unfinished(self, identity, result: ConsolidationResult) -> None:
-        """Resume this identity's unfinished operations before discovery."""
+    def _recover_unfinished(
+        self, identity, result: ConsolidationResult, *, dry_run: bool = False
+    ) -> None:
+        """Resume this identity's unfinished operations before discovery.
+
+        With ``dry_run`` the pending operations are only reported
+        (``result="recovery:dry_run"``); nothing is applied.
+        """
         for entry in self.applier.journal.unfinished():
             try:
                 if list(entry.get("identity") or []) != [identity[0], identity[1]]:
@@ -303,6 +311,18 @@ class MemoryConsolidator:
             except (KeyError, TypeError, ValueError) as exc:
                 result.errors.append(f"[recovery] malformed journal entry: {exc}")
                 continue
+            if dry_run:
+                result.details.append(
+                    {
+                        "operation_id": plan.operation_id,
+                        "relation": plan.relation,
+                        "winner_id": plan.winner_id,
+                        "loser_id": plan.loser_id,
+                        "reason": plan.reason,
+                        "result": "recovery:dry_run",
+                    }
+                )
+                continue
             try:
                 apply_result = self.applier.apply(plan)
             except Exception as exc:
@@ -318,7 +338,10 @@ class MemoryConsolidator:
             elif apply_result.status == RESULT_STALE_PLAN:
                 result.stale_plans += 1
             elif apply_result.status == RESULT_APPLIED:
-                result.merged += 1
+                # Same accounting as the normal apply path: only equivalent
+                # merges count as merged; conflict recoveries supersede.
+                if plan.relation == RELATION_EQUIVALENT:
+                    result.merged += 1
                 if apply_result.loser_superseded:
                     result.superseded += 1
             result.details.append(
@@ -402,9 +425,11 @@ class MemoryConsolidator:
             apply_result = self.applier.apply(plan)
         except Exception as exc:
             # A crash inside apply (store down, simulated fault) is reported
-            # with its phase; the journal marks the operation resumable.
+            # with its phase and operation; the journal marks the operation
+            # resumable for the next recovery pass.
             result.errors.append(
-                f"[apply] edge {edge.seed_id}/{edge.neighbor_id}: {exc}"
+                f"[apply] edge {edge.seed_id}/{edge.neighbor_id} "
+                f"operation {plan.operation_id}: {exc}"
             )
             return
         detail = self._detail(decision, result=apply_result.status, plan=plan)
