@@ -1116,5 +1116,45 @@ class TestOverlappingEdges(unittest.TestCase):
         self.assertEqual(loser["metadata"]["status"], "superseded")
 
 
+    def test_nested_lineage_overlap_converges_without_double_deduction(self):
+        """Nested lineages (B already absorbed C) must not double-deduct:
+        lineage reads are non-recursive, so the crash-window replan keeps
+        the confirmations of a single successful execution."""
+        harness = _Harness(
+            [
+                _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-05T00:00:00+00:00"),
+                _memory(
+                    "mem-b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-02T00:00:00+00:00",
+                    confirmation_count=2,
+                    merged_ids=["c"],
+                ),
+            ],
+            semantic_scores={frozenset(("mem-a", "mem-b")): 0.93},
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        winner = harness.store.records["mem-a"]
+        loser = harness.store.records["mem-b"]
+
+        harness.store.fail_on = {"mem-b"}
+        first = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        self.assertEqual(len(first.errors), 1)
+        # Partial merge landed: A aggregated B's nested lineage (1 + 2 = 3).
+        self.assertEqual(winner["metadata"]["confirmation_count"], 3)
+
+        harness.store.fail_on = None
+        second = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        # Overlap {mem-b} is credited once by its recorded count (2):
+        # 3 + 2 - 2 = 3 — exactly a single successful execution.
+        self.assertEqual(winner["metadata"]["confirmation_count"], 3)
+        # A's lineage covers B and B's absorbed C.
+        self.assertEqual(winner["metadata"]["merged_ids"], ["c", "mem-b"])
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -273,23 +273,6 @@ class TestEquivalentMerge(unittest.TestCase):
             [call["id"] for call in self.harness.engine.update_calls], history_ids
         )
 
-    def test_lineage_overlap_dedupes_instead_of_double_counting(self):
-        # Overlap is unreachable through correct operation (superseded
-        # members are never re-discovered); it must still converge via the
-        # spec's set-union + unique-member accounting, not fail forever.
-        self.winner["metadata"]["merged_ids"] = ["m2", "m1"]
-        self.loser["metadata"]["merged_ids"] = ["m2"]
-        self.loser["metadata"]["confirmation_count"] = 2
-
-        result = self.harness.applier.apply(self.plan)
-
-        self.assertEqual(result.status, RESULT_APPLIED)
-        metadata = self.winner["metadata"]
-        # 3 + 2 - 1 shared-subtree credit for m2 (absent record defaults 1).
-        self.assertEqual(metadata["confirmation_count"], 4)
-        self.assertEqual(metadata["merged_ids"], ["m1", "m2", "mem-b"])
-        self.assertEqual(self.loser["metadata"]["status"], "superseded")
-
     def test_journal_discovery_lists_only_unfinished_operations(self):
         engine = self.harness.engine
         # Completed operation: this harness's own plan.

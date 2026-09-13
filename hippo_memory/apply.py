@@ -597,29 +597,34 @@ class ConsolidationApplier:
         (set-union / summed confirmations / max timestamp), never as
         increments, so a replayed apply converges instead of accumulating.
 
-        Under correct operation winner and loser lineages are disjoint — a
-        superseded member is never re-discovered. Should an overlap ever
-        appear (e.g. a partial merge followed by Hot/Warm churn), the union
-        still dedupes ``merged_ids`` and each shared subtree is subtracted
-        once via its recorded ``confirmation_count``, so confirmations are
-        never double-counted and re-planning converges instead of stalling.
+        ``confirmation_count`` implements the spec formula "sum of unique
+        equivalent lineage confirmations (default 1)". Only two lineage
+        shapes are reachable, and both have exact closed forms:
+
+        - disjoint (the normal case): every member contributes once, so the
+          count is ``count(winner) + count(loser)``;
+        - full containment (a crash window where a partial merge already
+          wrote the loser into the winner's recorded lineage):
+          ``count(winner)`` already includes every contribution, so the
+          count simply stays — subtracting anything would double-deduct
+          nested members (flat ``merged_ids`` loses the nesting structure).
+
+        Partial overlaps between these two shapes are unreachable: store
+        updates are atomic, so a crashed merge either wrote the complete
+        union patch or nothing.
         """
+        winner_id = str(winner.get("id", "") or "")
         winner_lineage = _merged_ids_of(winner)
-        loser_lineage = _merged_ids_of(loser) | {plan.loser_id}
-        overlap = winner_lineage & loser_lineage
-        overlap_credit = 0
-        for member in sorted(overlap):
-            record = self.engine.get(member)
-            overlap_credit += confirmation_count_of(record) if record else 1
+        loser_side = _merged_ids_of(loser) | {plan.loser_id}
+        fully_absorbed = loser_side <= (winner_lineage | {winner_id})
 
         patch: dict[str, Any] = {
             "confirmation_count": max(
                 1,
                 confirmation_count_of(winner)
-                + confirmation_count_of(loser)
-                - overlap_credit,
+                + (0 if fully_absorbed else confirmation_count_of(loser)),
             ),
-            "merged_ids": sorted(winner_lineage | loser_lineage),
+            "merged_ids": sorted(winner_lineage | loser_side),
             "merged_sources": sorted(
                 _merged_sources_of(winner) | _merged_sources_of(loser)
             ),
