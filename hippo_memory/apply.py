@@ -585,6 +585,7 @@ class ConsolidationApplier:
             else SUPERSEDE_REASON_CONFLICT
         )
 
+    @staticmethod
     def _unit_contributions(record: Mapping[str, Any]) -> Dict[str, int]:
         """Immutable member→own contribution snapshot of one aggregated unit.
 
@@ -605,7 +606,11 @@ class ConsolidationApplier:
                     unit[str(member)] = 1
             return unit
         lineage = _merged_ids_of(record)
-        own = max(1, confirmation_count_of(record) - len(lineage))
+        # Pre-snapshot union-sum invariant: count = own(record) + 1 per
+        # flat absorbed member. max(0, ...) keeps the unit sum equal to
+        # count even for inconsistent legacy rows; union-max resolves the
+        # rest.
+        own = max(0, confirmation_count_of(record) - len(lineage))
         unit = {record_id: own}
         for member in sorted(lineage):
             unit.setdefault(str(member), 1)
@@ -619,19 +624,19 @@ class ConsolidationApplier:
     ) -> dict[str, Any]:
         """Deterministic lineage aggregation for the equivalent merge.
 
-        Everything is computed as absolute values from the re-read records
-        (set-union / summed confirmations / max timestamp), never as
-        increments, so a replayed apply converges instead of accumulating.
+        Everything is computed as absolute values from immutable
+        contribution snapshots persisted by previous merges
+        (``merged_contributions``), never as increments, so a replayed
+        apply converges instead of accumulating.
 
         ``confirmation_count`` implements the spec formula "sum of unique
-        equivalent lineage confirmations (default 1)" computed exactly over
-        the union DAG: each member's OWN confirmations are
-        ``count(member) - Σ own(union-deduplicated members of
-        merged_ids(member))`` — deduplication by member, because flat
-        ``merged_ids`` can reference the same descendant through multiple
-        paths after a crash-window replan (a naive per-child subtree sum
-        would subtract shared descendants twice). The merged count is Σ own
-        over the unique union members. For disjoint lineages this equals
+        equivalent lineage confirmations (default 1)": the two sides'
+        contribution snapshots are union-max-deduplicated (a member present
+        on both sides — e.g. the loser re-activated by Hot/Warm after a
+        crash window — contributes exactly once; a shared descendant
+        reachable through multiple flat ``merged_ids`` paths is likewise
+        counted once), and the merged count is the sum over the deduplicated
+        union. For disjoint lineages this equals
         ``count(winner) + count(loser)``; for nested or partially
         overlapping lineages (crash-window states) it neither
         double-deducts nor double-counts.
@@ -641,51 +646,20 @@ class ConsolidationApplier:
         loser_lineage = _merged_ids_of(loser)
         loser_side = loser_lineage | {plan.loser_id}
 
-        own_cache: Dict[str, int] = {}
-        descendants_cache: Dict[str, set[str]] = {}
-
-        def _record_for(member_id: str) -> Optional[Mapping[str, Any]]:
-            if member_id == winner_id:
-                return winner
-            if member_id == plan.loser_id:
-                return loser
-            return self.engine.get(member_id)
-
-        def resolve_own(member_id: str, stack: frozenset[str]) -> int:
-            """Own confirmations of one member; memoizes its descendants."""
-            cached = own_cache.get(member_id)
-            if cached is not None:
-                return cached
-            if member_id in stack:  # cycle guard (unreachable in practice)
-                return 0
-            record = _record_for(member_id)
-            count = confirmation_count_of(record) if record is not None else 1
-            lineage = sorted(_merged_ids_of(record)) if record is not None else []
-            inner = stack | {member_id}
-            descendants: set[str] = set()
-            for child in lineage:
-                resolve_own(child, inner)  # memoized: repeats are cheap
-                descendants.add(child)
-                descendants |= descendants_cache.get(child, set())
-            # Subtract every unique descendant's own contribution exactly
-            # once — never a per-child subtree sum, which double-subtracts
-            # shared descendants across flat-lineage paths.
-            own = max(
-                0, count - sum(own_cache[d] for d in sorted(descendants))
-            )
-            own_cache[member_id] = own
-            descendants_cache[member_id] = descendants
-            return own
-
-        members = sorted(
-            winner_lineage | loser_lineage | {winner_id, plan.loser_id}
-        )
-        for member in members:
-            resolve_own(member, frozenset())
+        contributions: Dict[str, int] = {}
+        for unit in (
+            self._unit_contributions(winner),
+            self._unit_contributions(loser),
+        ):
+            for member, value in unit.items():
+                contributions[member] = max(contributions.get(member, 0), value)
 
         patch: dict[str, Any] = {
-            "confirmation_count": max(1, sum(own_cache.get(m, 1) for m in members)),
-            "merged_ids": sorted(winner_lineage | loser_side),
+            "confirmation_count": max(1, sum(contributions.values())),
+            # The winner's own id never enters its merged lineage: a later
+            # B-wins replan must not create an A<->B lineage cycle.
+            "merged_ids": sorted((winner_lineage | loser_side) - {winner_id}),
+            "merged_contributions": dict(sorted(contributions.items())),
             "merged_sources": sorted(
                 _merged_sources_of(winner) | _merged_sources_of(loser)
             ),
