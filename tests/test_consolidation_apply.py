@@ -251,6 +251,64 @@ class TestEquivalentMerge(unittest.TestCase):
         self.assertEqual(loser_metadata["supersede_reason"], SUPERSEDE_REASON_EQUIVALENT)
         self.assertIn("superseded_at", loser_metadata)
 
+    def test_transient_fetch_error_fails_closed_during_resolution(self):
+        """Regression (codex review round 15): a transient backing-store
+        error while resolving an evolved lineage member must propagate
+        (fail closed) instead of silently downgrading the member to
+        missing."""
+        harness = self.harness
+        a = harness.engine.records["mem-a"]
+        # A's flat lineage references m1; its fetch fails transiently.
+        a["metadata"]["merged_ids"] = ["m1"]
+        original_get = harness.engine.get
+
+        def flaky_get(memory_id):
+            if memory_id == "m1":
+                raise RuntimeError("transient backend failure")
+            return original_get(memory_id)
+
+        harness.engine.get = flaky_get
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=dict(a),
+            loser_record=dict(harness.engine.records["mem-b"]),
+        )
+
+        with self.assertRaises(RuntimeError):
+            harness.applier.apply(plan)
+
+    def test_cross_identity_lineage_member_fails_closed(self):
+        """A lineage member from a different identity (mis-scoped history)
+        must fail the aggregation closed, never be governed cross-scope."""
+        harness = self.harness
+        a = harness.engine.records["mem-a"]
+        foreign = _memory("mem-x", "外来记录", user_id="u9", agent_id="other")
+        harness.engine.records["mem-x"] = foreign
+        a["metadata"]["merged_ids"] = ["mem-x"]
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=dict(harness.engine.records["mem-a"]),
+            loser_record=dict(harness.engine.records["mem-b"]),
+        )
+
+        with self.assertRaises(ValueError):
+            harness.applier.apply(plan)
+
     def test_flat_lineage_shared_descendant_not_double_subtracted(self):
         """Regression (codex review round 5, exact scenario): A(count=3)
         absorbed B(count=2) which had absorbed C(count=1) - A's flat

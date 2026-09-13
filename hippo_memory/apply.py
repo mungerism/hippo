@@ -649,6 +649,22 @@ class ConsolidationApplier:
                     snapshot[str(member)] = 1
             return snapshot
 
+        def _fetch_strict(member_id: str) -> Optional[Mapping[str, Any]]:
+            """Lineage resolution fetch: propagates backing-store errors (a
+            swallowed transient failure would silently drop an evolved
+            member's contribution) and rejects cross-identity members."""
+            strict = getattr(self.engine, "_get_for_write", None)
+            record = strict(member_id) if strict is not None else self.engine.get(member_id)
+            if record is not None:
+                identity = resolve_identity(record)
+                expected = (plan.user_id, plan.agent_id)
+                if identity is not None and identity != expected:
+                    raise ValueError(
+                        f"cross-identity lineage member {member_id}: "
+                        f"{identity} != {expected}"
+                    )
+            return record
+
         def resolve(member_id: str, stack: frozenset[str]) -> int:
             # Both caches must be populated: an own value without its member
             # set means a stale-snapshot entry that still needs full
@@ -659,7 +675,7 @@ class ConsolidationApplier:
                 own_cache.setdefault(member_id, 0)
                 members_cache.setdefault(member_id, {member_id})
                 return 0
-            record = _fetch(member_id)
+            record = _fetch_strict(member_id)
             snapshot = _snapshot_of(record)
             inner = stack | {member_id}
             if snapshot is not None:
