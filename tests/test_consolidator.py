@@ -185,6 +185,31 @@ class _ColdStore:
         return memory_id
 
 
+class _RacingApplier:
+    """Simulates losing a recovery race: another consolidator completes the
+    journal entry first, so our apply() observes already_applied."""
+
+    def __init__(self, real):
+        self.real = real
+        self.journal = real.journal
+        self.raced = False
+
+    def apply(self, plan):
+        if self.raced:
+            return self.real.apply(plan)
+        # Lose the recovery race: the other consolidator really applies the
+        # operation (journal completed AND store mutated); our apply() then
+        # observes the entry as already completed.
+        self.raced = True
+        real_result = self.real.apply(plan)
+        return ApplyResult(
+            operation_id=plan.operation_id,
+            status="already_applied",
+            winner_updated=real_result.winner_updated,
+            loser_superseded=real_result.loser_superseded,
+        )
+
+
 class _ScriptedLLM:
     """Cold Path classifier LLM: deterministic scripted verdicts."""
 
@@ -975,6 +1000,74 @@ class TestOverlappingEdges(unittest.TestCase):
         self.assertEqual(result.merged, 0)
         self.assertEqual(result.superseded, 1)
         self.assertEqual(old_fact["metadata"]["supersede_reason"], "conflict_overridden")
+
+
+    def test_duplicate_recovery_counts_as_unchanged(self):
+        """Regression (PR #36 review round 5): two consolidators listing the
+        same unfinished operation — the loser of the race sees
+        already_applied and must count as unchanged."""
+        harness = _Harness(
+            [
+                _memory(
+                    "mem-a",
+                    "项目使用 PostgreSQL",
+                    confirmed_at="2026-09-05T00:00:00+00:00",
+                    confirmation_count=2,
+                ),
+                _memory(
+                    "mem-b",
+                    "项目数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-01T00:00:00+00:00",
+                ),
+            ],
+            semantic_scores={frozenset(("mem-a", "mem-b")): 0.93},
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        winner = harness.store.records["mem-a"]
+        loser = harness.store.records["mem-b"]
+        from hippo_memory.decision import ConsolidationDecision
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=winner,
+            loser_record=loser,
+        )
+        real_applier = harness.consolidator.applier
+        real_applier.journal.save(
+            {
+                **plan.to_dict(),
+                "status": "planned",
+                "steps": {"winner_update": False, "loser_supersede": False},
+                "attempts": 0,
+                "created_at": "2026-09-12T00:00:00+00:00",
+                "error": None,
+            }
+        )
+        harness.consolidator.applier = _RacingApplier(real_applier)
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        recovery_details = [
+            d for d in result.details if d["result"].startswith("recovery:")
+        ]
+        self.assertEqual(
+            recovery_details[0]["result"], "recovery:already_applied"
+        )
+        # Lost the race: counted as unchanged, not merged.
+        self.assertEqual(result.unchanged, 1)
+        self.assertEqual(result.merged, 0)
+        # The winning consolidator did the real work exactly once.
+        self.assertEqual(winner["metadata"]["confirmation_count"], 3)
+        self.assertEqual(loser["metadata"]["status"], "superseded")
 
 
 if __name__ == "__main__":
