@@ -237,7 +237,8 @@ class TestEquivalentMerge(unittest.TestCase):
 
         self.assertEqual(self.winner["memory"], "项目使用 PostgreSQL")
         metadata = self.winner["metadata"]
-        self.assertEqual(metadata["confirmation_count"], 4)
+        # Legacy own floor: every absorbed member keeps its creation vote.
+        self.assertEqual(metadata["confirmation_count"], 5)
         self.assertEqual(metadata["merged_ids"], ["m1", "m2", "mem-b"])
         self.assertEqual(
             metadata["merged_sources"], ["agent_explicit", "session_distillation"]
@@ -249,6 +250,115 @@ class TestEquivalentMerge(unittest.TestCase):
         self.assertEqual(loser_metadata["superseded_by"], "mem-a")
         self.assertEqual(loser_metadata["supersede_reason"], SUPERSEDE_REASON_EQUIVALENT)
         self.assertIn("superseded_at", loser_metadata)
+
+    def test_transient_fetch_error_fails_closed_during_resolution(self):
+        """Regression (codex review round 15): a transient backing-store
+        error while resolving an evolved lineage member must propagate
+        (fail closed) instead of silently downgrading the member to
+        missing."""
+        harness = self.harness
+        a = harness.engine.records["mem-a"]
+        # A's flat lineage references m1; its fetch fails transiently.
+        a["metadata"]["merged_ids"] = ["m1"]
+        original_get = harness.engine.get
+
+        def flaky_get(memory_id):
+            if memory_id == "m1":
+                raise RuntimeError("transient backend failure")
+            return original_get(memory_id)
+
+        harness.engine.get = flaky_get
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=dict(a),
+            loser_record=dict(harness.engine.records["mem-b"]),
+        )
+
+        with self.assertRaises(RuntimeError):
+            harness.applier.apply(plan)
+
+    def test_cross_identity_lineage_member_fails_closed(self):
+        """A lineage member from a different identity (mis-scoped history)
+        must fail the aggregation closed, never be governed cross-scope."""
+        harness = self.harness
+        a = harness.engine.records["mem-a"]
+        foreign = _memory("mem-x", "外来记录", user_id="u9", agent_id="other")
+        harness.engine.records["mem-x"] = foreign
+        a["metadata"]["merged_ids"] = ["mem-x"]
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=dict(harness.engine.records["mem-a"]),
+            loser_record=dict(harness.engine.records["mem-b"]),
+        )
+
+        with self.assertRaises(ValueError):
+            harness.applier.apply(plan)
+
+    def test_flat_lineage_shared_descendant_not_double_subtracted(self):
+        """Regression (codex review round 5, exact scenario): A(count=3)
+        absorbed B(count=2) which had absorbed C(count=1) - A's flat
+        lineage is {B, C}. Merging A with a disjoint D(count=1) must
+        subtract each unique descendant's own contribution exactly once:
+        own(C)=1, own(B)=2-1=1, own(A)=3-(1+1)=1, total=4."""
+        harness = self.harness
+        a = harness.engine.records["mem-a"]
+        b = harness.engine.records["mem-b"]
+        c = _memory(
+            "mem-c",
+            "事实甲从句二",
+            source="session_distillation",
+            confirmed_at="2026-09-01T00:00:00+00:00",
+        )
+        harness.engine.records["mem-c"] = c
+        # The post-crash flat state: A aggregated B (which had aggregated C).
+        a["metadata"]["confirmation_count"] = 3
+        a["metadata"]["merged_ids"] = ["mem-b", "mem-c"]
+        b["metadata"]["confirmation_count"] = 2
+        b["metadata"]["merged_ids"] = ["mem-c"]
+
+        from hippo_memory.decision import ConsolidationDecision
+
+        loser = _memory("mem-d", "事实甲补充", confirmed_at="2026-09-04T00:00:00+00:00")
+        harness.engine.records["mem-d"] = loser
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-d",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=a,
+            loser_record=loser,
+        )
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertEqual(a["metadata"]["confirmation_count"], 4)
+        self.assertEqual(
+            a["metadata"]["merged_ids"], ["mem-b", "mem-c", "mem-d"]
+        )
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+        # B and C each still contribute exactly once.
+        self.assertEqual(b["metadata"]["confirmation_count"], 2)
+        self.assertEqual(c["metadata"]["confirmation_count"], 1)
 
     def test_journal_records_the_full_operation_for_audit(self):
         self.harness.applier.apply(self.plan)
@@ -272,23 +382,6 @@ class TestEquivalentMerge(unittest.TestCase):
         self.assertEqual(
             [call["id"] for call in self.harness.engine.update_calls], history_ids
         )
-
-    def test_lineage_overlap_dedupes_instead_of_double_counting(self):
-        # Overlap is unreachable through correct operation (superseded
-        # members are never re-discovered); it must still converge via the
-        # spec's set-union + unique-member accounting, not fail forever.
-        self.winner["metadata"]["merged_ids"] = ["m2", "m1"]
-        self.loser["metadata"]["merged_ids"] = ["m2"]
-        self.loser["metadata"]["confirmation_count"] = 2
-
-        result = self.harness.applier.apply(self.plan)
-
-        self.assertEqual(result.status, RESULT_APPLIED)
-        metadata = self.winner["metadata"]
-        # 3 + 2 - 1 shared-subtree credit for m2 (absent record defaults 1).
-        self.assertEqual(metadata["confirmation_count"], 4)
-        self.assertEqual(metadata["merged_ids"], ["m1", "m2", "mem-b"])
-        self.assertEqual(self.loser["metadata"]["status"], "superseded")
 
     def test_journal_discovery_lists_only_unfinished_operations(self):
         engine = self.harness.engine
@@ -1110,5 +1203,3 @@ class TestWriterLockProtocol(unittest.TestCase):
         self.assertEqual((entry["depth"], entry["fd"]), (0, None))
 
 
-if __name__ == "__main__":
-    unittest.main()
