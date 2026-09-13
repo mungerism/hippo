@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECENT_HOURS = 24
 DEFAULT_RECENT_LIMIT = 50
 MAX_RECENT_LIMIT = 100
+#: Hard cap on the look-back window (one year); agent-facing seams expose
+#: bounded parameters only.
+MAX_RECENT_HOURS = 8760
 #: Max point ids per vector-store retrieve call; a window page can exceed
 #: this, so resolution is bounded-chunked, never unbounded.
 PAYLOAD_CHUNK_SIZE = 256
@@ -47,9 +50,14 @@ _EVENT_TIME_SQL = "COALESCE(NULLIF(updated_at, ''), NULLIF(created_at, ''))"
 
 def validate_recent_params(hours: int, limit: int, scope: str) -> None:
     """Shared parameter guard for the engine, CLI and MCP seams."""
-    if isinstance(hours, bool) or not isinstance(hours, int) or hours < 1:
+    if (
+        isinstance(hours, bool)
+        or not isinstance(hours, int)
+        or hours < 1
+        or hours > MAX_RECENT_HOURS
+    ):
         raise HippoValidationError(
-            f"hours must be a positive integer (got {hours!r})"
+            f"hours must be an integer in [1, {MAX_RECENT_HOURS}] (got {hours!r})"
         )
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise HippoValidationError(f"limit must be an integer (got {limit!r})")
@@ -300,20 +308,21 @@ def fetch_recent_memories(
     # Git auto-detection scans the filesystem — resolve once, not per row.
     resolved_project = engine.router.resolve_project(project_id) if scope == "project" else None
 
-    rows = query_recent_history(db_path, cutoff_utc, effective_limit)
-    results = _timeline_rows(
-        rows, _resolve_payloads_safely(engine, rows),
-        uid=uid, scope=scope, resolved_project=resolved_project,
-    )
-    if len(results) >= effective_limit or len(rows) < effective_limit:
+    def collect_page(page_size: int) -> tuple[int, List[Dict[str, Any]]]:
+        rows = query_recent_history(db_path, cutoff_utc, page_size)
+        return len(rows), _timeline_rows(
+            rows, _resolve_payloads_safely(engine, rows),
+            uid=uid, scope=scope, resolved_project=resolved_project,
+        )
+
+    page_rows, results = collect_page(effective_limit)
+    if len(results) >= effective_limit or page_rows < effective_limit:
+        # Enough scoped rows, or the window itself ended within the page:
+        # no refill possible or needed.
         return results[:effective_limit]
 
     # The page came back full but the lifecycle/scope filter shrank it, so
     # matching rows may sit beyond the first page. One bounded refill with
     # the #35 pool size is the best-effort fix — no unbounded scan.
-    refill_rows = query_recent_history(db_path, cutoff_utc, _recent_pool_size(effective_limit))
-    refill_results = _timeline_rows(
-        refill_rows, _resolve_payloads_safely(engine, refill_rows),
-        uid=uid, scope=scope, resolved_project=resolved_project,
-    )
+    _, refill_results = collect_page(_recent_pool_size(effective_limit))
     return refill_results[:effective_limit]

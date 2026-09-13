@@ -266,6 +266,15 @@ def get_recent_memories(
             limit=limit,
         )
         return render_untrusted_recent_memories(results, hours=hours, scope=scope)
+    except HippoValidationError as e:
+        # Client input errors are safe to echo back verbatim (already
+        # escaped by the envelope); backend faults must stay generic.
+        return render_untrusted_recent_memories(
+            [],
+            hours=hours,
+            scope=scope,
+            empty_message=str(e),
+        )
     except Exception as e:
         logger.error("Failed to retrieve recent memories: %s", e, exc_info=True)
         return render_untrusted_recent_memories(

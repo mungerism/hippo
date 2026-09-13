@@ -150,6 +150,11 @@ class TestValidateParams(unittest.TestCase):
             with self.assertRaises(HippoValidationError):
                 validate_recent_params(bad, 50, "all")
 
+    def test_hours_hard_cap(self):
+        with self.assertRaises(HippoValidationError):
+            validate_recent_params(8761, 50, "all")
+        validate_recent_params(8760, 50, "all")
+
     def test_limit_must_be_int(self):
         with self.assertRaises(HippoValidationError):
             validate_recent_params(24, "50", "all")
@@ -593,6 +598,18 @@ class TestMcpRecentTool(unittest.TestCase):
         with patch.object(server_module, "get_engine", return_value=fake_engine):
             result = server_module.get_recent_memories(hours=24, scope="global", limit=30)
         self.assertIn('<hippo_retrieved_context boundary="untrusted_memory"', result)
+        self.assertIn("</hippo_retrieved_context>", result)
+
+    def test_handler_validation_error_echoes_message(self):
+        from hippo_memory import server as server_module
+
+        def boom(**kwargs):
+            raise HippoValidationError("hours must be an integer in [1, 8760] (got 0)")
+
+        fake_engine = SimpleNamespace(get_recent_memories=boom)
+        with patch.object(server_module, "get_engine", return_value=fake_engine):
+            result = server_module.get_recent_memories(hours=0, scope="all", limit=30)
+        self.assertIn("hours must be an integer", result)
         self.assertIn("</hippo_retrieved_context>", result)
 
     def test_handler_backend_failure_returns_failure_envelope(self):

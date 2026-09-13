@@ -30,6 +30,19 @@ def escape_untrusted_text(text: Optional[str]) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _wrap_envelope(content: str) -> str:
+    return f"{ENVELOPE_START_TAG}\n{content}\n{ENVELOPE_END_TAG}"
+
+
+def _scope_tag(scope_value: Any) -> str:
+    """Human-readable, escaped scope label for an agent/scope identifier."""
+    if scope_value == "global":
+        return "Global"
+    if scope_value:
+        return f"Project: {escape_untrusted_text(str(scope_value))}"
+    return "unknown"
+
+
 def render_untrusted_memories(
     items: List[Dict[str, Any]],
     query: Optional[str] = None,
@@ -59,23 +72,20 @@ def render_untrusted_memories(
                 f"未找到与 '{safe_query}' 相关的记忆事实 (Scope: {safe_scope})。"
                 "可尝试换用更具体的关键词，或放宽 scope（如 'global' 查跨项目个人偏好）。"
             )
-        return f"{ENVELOPE_START_TAG}\n{msg}\n{ENVELOPE_END_TAG}"
+        return _wrap_envelope(msg)
 
     safe_title = escape_untrusted_text(title)
     safe_scope = escape_untrusted_text(scope)
     lines = [f"### {safe_title} (匹配 {len(items)} 条，Scope: {safe_scope}):"]
     for idx, item in enumerate(items, 1):
         mem_text = escape_untrusted_text(item.get("memory", ""))
-        aid = item.get("agent_id", "global")
-        aid_escaped = escape_untrusted_text(aid)
-        tag = "Global" if aid == "global" else f"Project: {aid_escaped}"
+        tag = _scope_tag(item.get("agent_id", "global"))
         mem_id = escape_untrusted_text(str(item.get("id", "")))
         score = item.get("score")
         score_part = f"，相关度 {score:.2f}" if isinstance(score, (int, float)) else ""
         lines.append(f"{idx}. [{tag}]{score_part} {mem_text} (ID: `{mem_id}`)")
 
-    content = "\n".join(lines)
-    return f"{ENVELOPE_START_TAG}\n{content}\n{ENVELOPE_END_TAG}"
+    return _wrap_envelope("\n".join(lines))
 
 
 def render_untrusted_recent_memories(
@@ -99,20 +109,19 @@ def render_untrusted_recent_memories(
                 f"近 {safe_hours} 小时内没有新增或变更的记忆事实 (Scope: {safe_scope})。"
                 "时间范围检索与语义检索互补：需要按主题查找时请改用 search_memories。"
             )
-        return f"{ENVELOPE_START_TAG}\n{msg}\n{ENVELOPE_END_TAG}"
+        return _wrap_envelope(msg)
 
-    lines = [f"### 近期记忆时间线 (共 {len(items)} 条，近 {escape_untrusted_text(str(hours))} 小时，Scope: {escape_untrusted_text(scope)}):"]
+    safe_hours = escape_untrusted_text(str(hours))
+    safe_scope = escape_untrusted_text(scope)
+    lines = [f"### 近期记忆时间线 (共 {len(items)} 条，近 {safe_hours} 小时，Scope: {safe_scope}):"]
     for idx, item in enumerate(items, 1):
         event = escape_untrusted_text(str(item.get("event", "")))
         ts = escape_untrusted_text(str(item.get("timestamp", "")))
-        aid = item.get("scope")
-        aid_escaped = escape_untrusted_text(str(aid)) if aid else "unknown"
-        tag = "Global" if aid == "global" else f"Project: {aid_escaped}"
+        tag = _scope_tag(item.get("scope"))
         mem_text = escape_untrusted_text(item.get("memory", ""))
         mem_id = escape_untrusted_text(str(item.get("memory_id", "")))
         lines.append(
             f"{idx}. [{ts} | {event} | {tag}] {mem_text} (memory_id: `{mem_id}`)"
         )
 
-    content = "\n".join(lines)
-    return f"{ENVELOPE_START_TAG}\n{content}\n{ENVELOPE_END_TAG}"
+    return _wrap_envelope("\n".join(lines))
