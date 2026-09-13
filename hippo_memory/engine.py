@@ -39,6 +39,26 @@ def build_conversation(
     raise ValueError("text/content 与 messages 至少需要提供一个")
 
 
+def _candidate_pool_size(limit: int) -> int:
+    """Bounded over-fetch pool for recall seams whose store page can shrink.
+
+    Superseded rows filtered out after the store returns would otherwise
+    leave the caller short of ``limit`` active results; fetching a fixed
+    multiple restores completeness in one extra bounded query instead of an
+    unbounded scan (#35).
+    """
+    return max(limit * 4, 20)
+
+
+def _unwrap_results(results: Any) -> List[Dict[str, Any]]:
+    """Normalize a Mem0 store response into its result list.
+
+    Mem0 seams return either a bare list or a ``{"results": [...]}`` mapping
+    depending on the call path; every recall read goes through here.
+    """
+    return results if isinstance(results, list) else results.get("results", [])
+
+
 class HippoEngine:
     """Core memory engine wrapping Mem0 with multi-scope and multi-provider support."""
 
@@ -303,7 +323,7 @@ class HippoEngine:
             else threshold
         )
 
-        candidate_pool_size = max(limit * 4, 20)
+        candidate_pool_size = _candidate_pool_size(limit)
 
         # Lifecycle invariant first: superseded memories never re-enter
         # Agent recall, independent of the relevance gate below (#24).
@@ -314,7 +334,7 @@ class HippoEngine:
             threshold=effective_threshold,
             explain=True,
         )
-        raw_list = results if isinstance(results, list) else results.get("results", [])
+        raw_list = _unwrap_results(results)
         raw_list = filter_active_memories(raw_list)
 
         from hippo_memory.gate import filter_search_results
@@ -486,11 +506,34 @@ class HippoEngine:
                 project_id=project_id,
             )
 
-        results = self.memory.get_all(
-            filters=add_lifecycle_exclusion(computed_filters), top_k=limit
+        lifecycle_filters = add_lifecycle_exclusion(computed_filters)
+        results = self.memory.get_all(filters=lifecycle_filters, top_k=limit)
+        raw = _unwrap_results(results)
+        active = filter_active_memories(raw)
+        if len(active) >= limit or len(raw) < limit:
+            return active[:limit]
+
+        # The store returned a full page that the lifecycle filter shrank:
+        # superseded rows consumed the top_k budget because the pushed-down
+        # NOT filter was ignored. One bounded refill (same pool size as
+        # search()) is the best-effort fix within a single extra query —
+        # no unbounded scan. The union keeps the store's ordering, and the
+        # post-filter still guarantees no superseded record can leak.
+        refill = _unwrap_results(
+            self.memory.get_all(
+                filters=lifecycle_filters, top_k=_candidate_pool_size(limit)
+            )
         )
-        raw = results if isinstance(results, list) else results.get("results", [])
-        return filter_active_memories(raw)
+        # Id-bearing rows dedupe against the first page; a row without an
+        # id cannot be proven duplicate and is kept (Mem0 rows always carry
+        # ids — this branch only guards malformed store responses).
+        page_ids = {item["id"] for item in raw if item.get("id") is not None}
+        combined = raw + [
+            item
+            for item in refill
+            if item.get("id") is None or item["id"] not in page_ids
+        ]
+        return filter_active_memories(combined)[:limit]
 
     def list_memories(
         self,
@@ -512,7 +555,7 @@ class HippoEngine:
 
         try:
             memories = self.memory.get_all(filters=filters, top_k=50)
-            items = memories if isinstance(memories, list) else memories.get("results", [])
+            items = _unwrap_results(memories)
         except Exception:
             items = []
 
