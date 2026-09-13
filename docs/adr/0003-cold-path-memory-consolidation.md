@@ -30,6 +30,7 @@
    - 严禁物理硬删除被合并或被淘汰的记忆；
    - 采用元数据状态标记：被替代项标记 `status="superseded"`，并记录 `superseded_by="<winner_id>"`、`superseded_at` 与 `supersede_reason`（`equivalent_merged | conflict_overridden`）；
    - 等价合并时，Winner 记忆原地升级（**V1 不改写 winner 文本**），`merged_ids` / `merged_sources` 按 set-union 合并，`confirmation_count` 取 unique lineage 的确定性聚合（禁止不可重放的 `+=`），`last_confirmed_at` 取 lineage 最大值；
+   - 每次合并持久化**不可变的成员贡献快照** `merged_contributions = {member_id: own}`（后续合并对两侧快照做 union-max 去重）——可变血统/计数的后见状态（crash-window 重规划、Hot/Warm 重新激活已吸收成员）无法干扰贡献值；
    - Agent-facing recall 的 superseded 过滤是**独立于 relevance gate 的 lifecycle invariant**（`hippo_memory/lifecycle.py`），在 gate 之前统一生效；`get(memory_id)` 与 history 保持 audit 语义，可读取完整血统。
 
 4. **确定性胜者仲裁矩阵 (Deterministic Arbitration)**，规则顺序固定、显式可配置：
