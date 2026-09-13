@@ -250,6 +250,49 @@ class TestEquivalentMerge(unittest.TestCase):
         self.assertEqual(loser_metadata["supersede_reason"], SUPERSEDE_REASON_EQUIVALENT)
         self.assertIn("superseded_at", loser_metadata)
 
+    def test_flat_lineage_shared_descendant_not_double_subtracted(self):
+        """Regression (codex review round 5): after A absorbs B which had
+        absorbed C, A's flat lineage is {B, C} - merging A with a disjoint
+        D must subtract B's and C's own contributions once each
+        (own(A) = 3 - 1 - 1 = 1), giving 4, never re-subtracting C through
+        B's subtree (which would yield 3)."""
+        harness = self.harness
+        a = harness.engine.records["mem-a"]
+        b = harness.engine.records["mem-b"]
+        # The post-crash flat state: A already aggregated B and C
+        # (own contributions 1 + 1 + 1 = 3).
+        a["metadata"]["confirmation_count"] = 3
+        a["metadata"]["merged_ids"] = ["mem-b", "mem-c"]
+
+        from hippo_memory.decision import ConsolidationDecision
+
+        loser = _memory("mem-d", "事实甲补充", confirmed_at="2026-09-04T00:00:00+00:00")
+        harness.engine.records["mem-d"] = loser
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-d",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=a,
+            loser_record=loser,
+        )
+        result = harness.applier.apply(plan)
+
+        self.assertEqual(result.status, RESULT_APPLIED)
+        self.assertEqual(a["metadata"]["confirmation_count"], 4)
+        self.assertEqual(
+            a["metadata"]["merged_ids"], ["mem-b", "mem-c", "mem-d"]
+        )
+        self.assertEqual(loser["metadata"]["status"], "superseded")
+        # B still contributes exactly once; C (absent from the store)
+        # contributed its default 1 through the flat lineage.
+        self.assertEqual(b["metadata"]["confirmation_count"], 1)
+
     def test_journal_records_the_full_operation_for_audit(self):
         self.harness.applier.apply(self.plan)
 
@@ -1093,5 +1136,3 @@ class TestWriterLockProtocol(unittest.TestCase):
         self.assertEqual((entry["depth"], entry["fd"]), (0, None))
 
 
-if __name__ == "__main__":
-    unittest.main()

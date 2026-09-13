@@ -599,12 +599,13 @@ class ConsolidationApplier:
 
         ``confirmation_count`` implements the spec formula "sum of unique
         equivalent lineage confirmations (default 1)" computed exactly over
-        the union DAG: every member's OWN confirmations are
-        ``count(member) - Σ subtree(merged_ids(member))`` (subtree sums are
-        union-deduplicated via memoization, since flat ``merged_ids`` can
-        reference the same descendant through multiple paths after a
-        crash-window replan), and the merged count is Σ own over the unique
-        union members. For disjoint lineages this equals
+        the union DAG: each member's OWN confirmations are
+        ``count(member) - Σ own(union-deduplicated members of
+        merged_ids(member))`` — deduplication by member, because flat
+        ``merged_ids`` can reference the same descendant through multiple
+        paths after a crash-window replan (a naive per-child subtree sum
+        would subtract shared descendants twice). The merged count is Σ own
+        over the unique union members. For disjoint lineages this equals
         ``count(winner) + count(loser)``; for nested or partially
         overlapping lineages (crash-window states) it neither
         double-deducts nor double-counts.
@@ -614,8 +615,8 @@ class ConsolidationApplier:
         loser_lineage = _merged_ids_of(loser)
         loser_side = loser_lineage | {plan.loser_id}
 
-        subtree_cache: Dict[str, int] = {}
         own_cache: Dict[str, int] = {}
+        descendants_cache: Dict[str, set[str]] = {}
 
         def _record_for(member_id: str) -> Optional[Mapping[str, Any]]:
             if member_id == winner_id:
@@ -624,9 +625,9 @@ class ConsolidationApplier:
                 return loser
             return self.engine.get(member_id)
 
-        def subtree_total(member_id: str, stack: frozenset[str]) -> int:
-            """Σ own over the unique members of this member's subtree."""
-            cached = subtree_cache.get(member_id)
+        def resolve_own(member_id: str, stack: frozenset[str]) -> int:
+            """Own confirmations of one member; memoizes its descendants."""
+            cached = own_cache.get(member_id)
             if cached is not None:
                 return cached
             if member_id in stack:  # cycle guard (unreachable in practice)
@@ -635,23 +636,24 @@ class ConsolidationApplier:
             count = confirmation_count_of(record) if record is not None else 1
             lineage = sorted(_merged_ids_of(record)) if record is not None else []
             inner = stack | {member_id}
-            children_total = 0
-            seen: set[str] = set()
+            descendants: set[str] = set()
+            children_own = 0
             for child in lineage:
-                if child in seen:
-                    continue
-                seen.add(child)
-                children_total += subtree_total(child, inner)
-            own = max(0, count - children_total)
+                if child in descendants or child == member_id:
+                    continue  # already counted through a sibling's subtree
+                children_own += resolve_own(child, inner)
+                descendants.add(child)
+                descendants |= descendants_cache.get(child, set())
+            own = max(0, count - children_own)
             own_cache[member_id] = own
-            subtree_cache[member_id] = own + children_total
-            return subtree_cache[member_id]
+            descendants_cache[member_id] = descendants
+            return own
 
         members = sorted(
             winner_lineage | loser_lineage | {winner_id, plan.loser_id}
         )
         for member in members:
-            subtree_total(member, frozenset())
+            resolve_own(member, frozenset())
 
         patch: dict[str, Any] = {
             "confirmation_count": max(1, sum(own_cache.get(m, 1) for m in members)),
