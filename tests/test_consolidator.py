@@ -1156,5 +1156,63 @@ class TestOverlappingEdges(unittest.TestCase):
         self.assertEqual(loser["metadata"]["status"], "superseded")
 
 
+    def test_partial_overlap_across_operations_sums_unique_members(self):
+        """Regression (codex review on PR #37): A→C crashes after the winner
+        write (stale — A keeps lineage={C}, C stays active), B later absorbs
+        C. Merging A and B must count each unique member once (A+B+C = 3),
+        not double-count C through both lineages."""
+        harness = _Harness(
+            [
+                _memory("mem-a", "事实甲：使用 PostgreSQL", confirmed_at="2026-09-05T00:00:00+00:00"),
+                _memory(
+                    "mem-b",
+                    "事实甲：数据库为 PostgreSQL",
+                    source="session_distillation",
+                    confirmed_at="2026-09-04T00:00:00+00:00",
+                ),
+                _memory("mem-c", "事实甲：PG 是项目数据库", confirmed_at="2026-09-01T00:00:00+00:00"),
+            ],
+            semantic_scores={
+                frozenset(("mem-a", "mem-b")): 0.93,
+            },
+            scripted="EQUIVALENT",
+        )
+        self.addCleanup(harness.cleanup)
+        a = harness.store.records["mem-a"]
+        b = harness.store.records["mem-b"]
+
+        # Reachable crash-window state: A absorbed C (winner write landed,
+        # journal flipped to stale later), C survived; B independently
+        # absorbed C.
+        a["metadata"]["confirmation_count"] = 2
+        a["metadata"]["merged_ids"] = ["mem-c"]
+        b["metadata"]["confirmation_count"] = 2
+        b["metadata"]["merged_ids"] = ["mem-c"]
+        b["metadata"]["source"] = "agent_explicit"
+
+        from hippo_memory.decision import ConsolidationDecision
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="EQUIVALENT",
+                winner_id="mem-a",
+                loser_id="mem-b",
+                reason="authority",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=a,
+            loser_record=b,
+        )
+        result = harness.consolidator.applier.apply(plan)
+
+        self.assertEqual(result.status, "applied")
+        # own(A)=1 + own(B)=1 + own(C)=1 — C counted exactly once.
+        self.assertEqual(a["metadata"]["confirmation_count"], 3)
+        self.assertEqual(a["metadata"]["merged_ids"], ["mem-b", "mem-c"])
+        self.assertEqual(b["metadata"]["status"], "superseded")
+        self.assertEqual(b["metadata"]["superseded_by"], "mem-a")
+
+
 if __name__ == "__main__":
     unittest.main()

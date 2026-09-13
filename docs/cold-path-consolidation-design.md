@@ -169,7 +169,7 @@ flowchart TD
 - **Operation Journal**：`~/.hippo/consolidation/operations/<operation_id>.json`，原子持久化顺序为「写临时文件并 fsync → rename → 对父目录 fsync」（目录 fsync 必须在 rename 之后，否则断电可能丢失目录项），状态机 `planned -> applying -> completed`（`failed` 可重试；`stale` 终态，由重规划产生新 ID）；`unfinished()` 供 crash 恢复扫描；
 - **Apply 顺序**：持锁 → journal 落盘（planned，winner patch 先于任何 mutation 持久化）→ crash-window 检测 → **双侧 observed/post-apply 版本重验 → 才允许 mutation** → 逐步骤翻转 journal → completed；
 - **stale 语义**：任一侧被 Hot/Warm 写过 → 拒绝执行**后续** mutation 并标记 `stale_plan`。注意 stale ≠ 完全无副作用：崩溃前已落盘的部分变更（如 winner 合并）不会回滚，但其终态由 post-apply 指纹记录、可审计；重规划经 lineage 去重必然收敛；
-- **等价合并**（全部为绝对值聚合，禁止 `+=`）：`merged_ids = set-union(winner lineage, loser, loser lineage)`（重叠按子树的 recorded `confirmation_count` 扣一次贡献——lineage 读取**不递归展开**，以记录字段为准；重叠在正确操作下不可达，该路径仅为 crash-window 重规划收敛保留）；`confirmation_count` 按 disjoint-lineage 聚合；`last_confirmed_at = max(lineage)`；**winner 文本永不改写**；
+- **等价合并**（全部为绝对值聚合，禁止 `+=`）：`merged_ids = set-union(winner lineage, loser, loser lineage)`；`confirmation_count` 按 spec 公式「unique lineage 确认数之和（default 1）」**精确递归计算**——每个成员的 own 贡献 = `count(member) − Σ subtree(merged_ids(member))`（子树和按 member 去重记忆化，兼容 crash-window 重规划后平面 `merged_ids` 的多路径引用），合并值 = union 去重成员的 own 之和。不相交时退化为 `count(winner) + count(loser)`；嵌套/部分重叠（crash-window 状态）不重复扣减也不重复计数；`last_confirmed_at = max(lineage)`；**winner 文本永不改写**；
 - **冲突消解**：winner 不继承 loser 确认数；loser 软删除并指向 winner。
 
 ### 3.4 检索防污染 (#24, `hippo_memory/lifecycle.py`)

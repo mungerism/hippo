@@ -598,32 +598,63 @@ class ConsolidationApplier:
         increments, so a replayed apply converges instead of accumulating.
 
         ``confirmation_count`` implements the spec formula "sum of unique
-        equivalent lineage confirmations (default 1)". Only two lineage
-        shapes are reachable, and both have exact closed forms:
-
-        - disjoint (the normal case): every member contributes once, so the
-          count is ``count(winner) + count(loser)``;
-        - full containment (a crash window where a partial merge already
-          wrote the loser into the winner's recorded lineage):
-          ``count(winner)`` already includes every contribution, so the
-          count simply stays — subtracting anything would double-deduct
-          nested members (flat ``merged_ids`` loses the nesting structure).
-
-        Partial overlaps between these two shapes are unreachable: store
-        updates are atomic, so a crashed merge either wrote the complete
-        union patch or nothing.
+        equivalent lineage confirmations (default 1)" computed exactly over
+        the union DAG: every member's OWN confirmations are
+        ``count(member) - Σ subtree(merged_ids(member))`` (subtree sums are
+        union-deduplicated via memoization, since flat ``merged_ids`` can
+        reference the same descendant through multiple paths after a
+        crash-window replan), and the merged count is Σ own over the unique
+        union members. For disjoint lineages this equals
+        ``count(winner) + count(loser)``; for nested or partially
+        overlapping lineages (crash-window states) it neither
+        double-deducts nor double-counts.
         """
         winner_id = str(winner.get("id", "") or "")
         winner_lineage = _merged_ids_of(winner)
-        loser_side = _merged_ids_of(loser) | {plan.loser_id}
-        fully_absorbed = loser_side <= (winner_lineage | {winner_id})
+        loser_lineage = _merged_ids_of(loser)
+        loser_side = loser_lineage | {plan.loser_id}
+
+        subtree_cache: Dict[str, int] = {}
+        own_cache: Dict[str, int] = {}
+
+        def _record_for(member_id: str) -> Optional[Mapping[str, Any]]:
+            if member_id == winner_id:
+                return winner
+            if member_id == plan.loser_id:
+                return loser
+            return self.engine.get(member_id)
+
+        def subtree_total(member_id: str, stack: frozenset[str]) -> int:
+            """Σ own over the unique members of this member's subtree."""
+            cached = subtree_cache.get(member_id)
+            if cached is not None:
+                return cached
+            if member_id in stack:  # cycle guard (unreachable in practice)
+                return 0
+            record = _record_for(member_id)
+            count = confirmation_count_of(record) if record is not None else 1
+            lineage = sorted(_merged_ids_of(record)) if record is not None else []
+            inner = stack | {member_id}
+            children_total = 0
+            seen: set[str] = set()
+            for child in lineage:
+                if child in seen:
+                    continue
+                seen.add(child)
+                children_total += subtree_total(child, inner)
+            own = max(0, count - children_total)
+            own_cache[member_id] = own
+            subtree_cache[member_id] = own + children_total
+            return subtree_cache[member_id]
+
+        members = sorted(
+            winner_lineage | loser_lineage | {winner_id, plan.loser_id}
+        )
+        for member in members:
+            subtree_total(member, frozenset())
 
         patch: dict[str, Any] = {
-            "confirmation_count": max(
-                1,
-                confirmation_count_of(winner)
-                + (0 if fully_absorbed else confirmation_count_of(loser)),
-            ),
+            "confirmation_count": max(1, sum(own_cache.get(m, 1) for m in members)),
             "merged_ids": sorted(winner_lineage | loser_side),
             "merged_sources": sorted(
                 _merged_sources_of(winner) | _merged_sources_of(loser)

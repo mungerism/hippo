@@ -241,12 +241,12 @@ class CandidateDiscovery:
                     continue
         return max(timestamps, default=datetime.min.replace(tzinfo=timezone.utc))
 
-    @staticmethod
-    def _is_expired(item: Mapping[str, Any]) -> bool:
+    @classmethod
+    def _is_expired(cls, item: Mapping[str, Any]) -> bool:
         """Defensive re-check mirroring the expiration push-down: a store
         adapter that fails to execute the NOT condition must not let an
         expired memory form a destructive candidate edge (#24 review)."""
-        raw = item.get("expiration_date", item.get("metadata", {}).get("expiration_date"))
+        raw = item.get("expiration_date", cls._metadata(item).get("expiration_date"))
         if not raw:
             return False
         try:
