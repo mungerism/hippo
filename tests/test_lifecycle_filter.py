@@ -66,7 +66,14 @@ def _memory(
 
 
 class _Memory:
-    """Mem0-like seam; honours the pushed-down NOT filter like the store."""
+    """Mem0-like seam; models the production store's query semantics.
+
+    Scope equality filters (``user_id`` / ``agent_id`` / ``OR`` branches)
+    are always enforced like the real store, so scope/lifecycle composition
+    bugs surface instead of passing silently (#35). ``ignore_pushdown``
+    models exactly one store failure: dropping the pushed-down ``NOT``
+    lifecycle exclusion.
+    """
 
     def __init__(self, records, search_results=None, *, ignore_pushdown=False):
         self.records = {record["id"]: dict(record) for record in records}
@@ -77,12 +84,12 @@ class _Memory:
 
     def search(self, query, *, filters, top_k, threshold, explain):
         self.search_filters.append(filters)
-        items = self._apply_not(self.search_results.get(query, []), filters)
+        items = self._query(self.search_results.get(query, []), filters)
         return {"results": items[:top_k]}
 
     def get_all(self, *, filters, top_k, show_expired=False):
         self.get_all_filters.append(filters)
-        items = self._apply_not(list(self.records.values()), filters)
+        items = self._query(list(self.records.values()), filters)
         return {"results": items[:top_k]}
 
     def get(self, memory_id):
@@ -98,10 +105,29 @@ class _Memory:
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         return memory_id
 
-    def _apply_not(self, items, filters):
+    @staticmethod
+    def _field(item, key):
+        metadata = item.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return item.get(key, metadata.get(key))
+
+    @classmethod
+    def _matches_scope(cls, item, filters):
+        for key in ("user_id", "agent_id"):
+            if key in filters and cls._field(item, key) != filters[key]:
+                return False
+        or_conditions = filters.get("OR")
+        if or_conditions and not any(
+            cls._matches_scope(item, condition) for condition in or_conditions
+        ):
+            return False
+        return True
+
+    def _query(self, items, filters):
+        result = [item for item in items if self._matches_scope(item, filters)]
         if self.ignore_pushdown:
-            return list(items)
-        result = list(items)
+            return result
         for condition in filters.get("NOT", []):
             if condition.get("status") == STATUS_SUPERSEDED:
                 result = [
@@ -275,16 +301,66 @@ class TestListingRecall(unittest.TestCase):
             sorted(item["id"] for item in results), ["active", "legacy"]
         )
 
-    def test_get_user_profile_hides_superseded(self):
-        records = self._records()
-        records.append(
-            _memory("pref", "偏好简体中文回复", agent_id="global", status="superseded")
-        )
+    def test_get_user_profile_enforces_scope_and_lifecycle(self):
+        """Profile recall composes user_id + scope (agent_id="global") with
+        the lifecycle filter. The pre-#35 double ignored scope equality, so
+        this fixture's project distractor leaked into the old expected
+        output; the cross-user record pins the user_id leg."""
+        records = [
+            _memory("g-active", "偏好简体中文回复", agent_id="global"),
+            _memory("g-old", "偏好英文回复", agent_id="global", status="superseded"),
+            _memory("p-active", "项目使用 PostgreSQL"),
+            _memory("other-user", "别人的偏好", user_id="someone-else", agent_id="global"),
+        ]
         engine = _engine(records)
 
         profile = engine.get_user_profile()
 
-        self.assertEqual(profile["facts"], ["项目使用 PostgreSQL", "没有 status 的历史记忆"])
+        self.assertEqual(profile["facts"], ["偏好简体中文回复"])
+        self.assertEqual(profile["count"], 1)
+
+    def test_get_memories_refills_when_pushdown_consumes_budget(self):
+        """If the store ignores the lifecycle push-down, superseded rows can
+        consume the top_k budget; one bounded refill must still return up to
+        ``limit`` active rows without exposing any superseded record."""
+        superseded = [
+            _memory(f"old-{i}", f"旧事实{i}", status="superseded") for i in range(3)
+        ]
+        actives = [_memory(f"active-{i}", f"事实{i}") for i in range(3)]
+        engine = _engine(superseded + actives, ignore_pushdown=True)
+
+        results = engine.get_memories(scope="project", project_id="hippo", limit=3)
+
+        self.assertEqual(
+            [item["id"] for item in results], ["active-0", "active-1", "active-2"]
+        )
+        # Two store queries: the poisoned page, then the bounded refill.
+        self.assertEqual(len(engine._memory.get_all_filters), 2)
+
+    def test_get_memories_refill_preserves_active_ordering(self):
+        records = [
+            _memory("old-0", "旧事实0", status="superseded"),
+            _memory("active-0", "事实0"),
+            _memory("old-1", "旧事实1", status="superseded"),
+            _memory("active-1", "事实1"),
+            _memory("active-2", "事实2"),
+        ]
+        engine = _engine(records, ignore_pushdown=True)
+
+        results = engine.get_memories(scope="project", project_id="hippo", limit=2)
+
+        # Page one was half superseded; the refill restores completeness
+        # while keeping the store's original active ordering and the limit.
+        self.assertEqual([item["id"] for item in results], ["active-0", "active-1"])
+
+    def test_get_memories_skips_refill_when_pushdown_honored(self):
+        """A full active page needs no second store query."""
+        engine = _engine(self._records())
+
+        results = engine.get_memories(scope="project", project_id="hippo", limit=2)
+
+        self.assertEqual([item["id"] for item in results], ["active", "legacy"])
+        self.assertEqual(len(engine._memory.get_all_filters), 1)
 
 
 class TestAuditSemantics(unittest.TestCase):
