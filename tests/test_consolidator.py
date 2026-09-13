@@ -648,6 +648,10 @@ class TestFailureSemantics(unittest.TestCase):
 
         self.assertTrue(result.is_success)
         self.assertEqual(result.details[0]["result"], "recovery:applied")
+        # Operation-level counters: the recovery completed the EQUIVALENT
+        # operation even though its raw mutations pre-landed in the crash.
+        self.assertEqual(result.merged, 1)
+        self.assertEqual(result.superseded, 1)
         self.assertEqual(harness.store.update_calls, calls_before)
         self.assertEqual(
             harness.consolidator.applier.journal.load(plan.operation_id)["status"],
@@ -656,6 +660,48 @@ class TestFailureSemantics(unittest.TestCase):
         self.assertEqual(apply_module.OperationJournal(
             harness.operations_dir
         ).unfinished(), [])
+
+    def test_conflict_recovery_in_crash_window_counts_superseded(self):
+        """CONFLICT variant: a recovery completing a crash-window operation
+        must report superseded=1, merged=0 — never look like a no-op."""
+        harness = _Harness(
+            [
+                _memory("old-fact", "项目使用 PostgreSQL", confirmed_at="2026-09-01T00:00:00+00:00"),
+                _memory("new-fact", "项目已迁移至 MySQL", confirmed_at="2026-09-08T00:00:00+00:00"),
+            ],
+            semantic_scores={frozenset(("old-fact", "new-fact")): 0.91},
+            scripted="CONFLICT",
+        )
+        self.addCleanup(harness.cleanup)
+        old_fact = harness.store.records["old-fact"]
+        from hippo_memory.decision import ConsolidationDecision
+
+        plan = build_operation_plan(
+            ConsolidationDecision(
+                relation="CONFLICT",
+                winner_id="new-fact",
+                loser_id="old-fact",
+                reason="recency",
+                confidence=0.9,
+                evidence={},
+            ),
+            winner_record=harness.store.records["new-fact"],
+            loser_record=old_fact,
+        )
+        harness.consolidator.applier.apply(plan)
+        entry = harness.consolidator.applier.journal.load(plan.operation_id)
+        entry["status"] = "applying"  # crash before completion
+        harness.consolidator.applier.journal.save(entry)
+        calls_before = list(harness.store.update_calls)
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.details[0]["result"], "recovery:applied")
+        self.assertEqual(result.merged, 0)
+        self.assertEqual(result.superseded, 1)
+        self.assertEqual(harness.store.update_calls, calls_before)
+        self.assertEqual(old_fact["metadata"]["superseded_by"], "new-fact")
 
 
 class TestClassifierIsolation(unittest.TestCase):

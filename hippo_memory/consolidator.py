@@ -352,12 +352,13 @@ class MemoryConsolidator:
                 # between listing and applying (#25 review round 5).
                 result.unchanged += 1
             elif apply_result.status == RESULT_APPLIED:
-                # Same accounting as the normal apply path: only equivalent
-                # merges count as merged; conflict recoveries supersede.
+                # Operation-outcome accounting: EQUIVALENT completions merge,
+                # every completed destructive plan supersedes the loser —
+                # counted even when the raw store mutation pre-landed in a
+                # crash window (counters mean operations, not mutations).
                 if plan.relation == RELATION_EQUIVALENT:
                     result.merged += 1
-                if apply_result.loser_superseded:
-                    result.superseded += 1
+                result.superseded += 1
             result.details.append(
                 {
                     "operation_id": plan.operation_id,
@@ -453,8 +454,9 @@ class MemoryConsolidator:
         if apply_result.status == RESULT_APPLIED:
             if decision.relation == RELATION_EQUIVALENT:
                 result.merged += 1
-            if apply_result.loser_superseded:
-                result.superseded += 1
+            # Operation-outcome accounting (see ConsolidationResult): a
+            # completed destructive plan always supersedes the loser.
+            result.superseded += 1
         elif apply_result.status == RESULT_ALREADY_APPLIED:
             result.unchanged += 1
         elif apply_result.status == RESULT_STALE_PLAN:
