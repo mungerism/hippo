@@ -90,19 +90,23 @@ hippo add "本项目后端采用 FastAPI，包管理器强制使用 uv"
 # 3. 语义检索记忆 (范围: all | global | project)
 hippo search "包管理器"
 
-# 4. 列出所有记忆
+# 4. 按时间查看记忆变更（ADD / UPDATE / DELETE）
+hippo recent --today
+hippo recent --hours 48 --scope project
+
+# 5. 列出所有记忆
 hippo list
 
-# 5. 查看全局偏好画像
+# 6. 查看全局偏好画像
 hippo profile
 
-# 6. 删除指定记忆
+# 7. 删除指定记忆
 hippo delete <memory_id>
 
-# 7. 启动 MCP Server (stdio 模式)
+# 8. 启动 MCP Server (stdio 模式)
 hippo serve
 
-# 8. 自动生命周期 Hook 与异步 Spool 队列管理
+# 9. 自动生命周期 Hook 与异步 Spool 队列管理
 hippo hook status                     # 查看 Spool 队列各状态作业与积压流水
 hippo hook worker --drain             # 立即单次排他消费当前就绪的待办作业
 hippo hook worker --daemon            # 以常驻守护进程持续消费 Spool 作业
@@ -236,10 +240,10 @@ hippo init
 ## 🛠 暴露的标准 MCP 工具集 (专为自主 Agent 极致精简的安全子集)
 
 根据 Mem0 官方对自主智能体的最佳实践，Hippo MCP 专为 Agent 暴露两个最纯粹的核心记忆工具，记忆演化与冲突消解全自动处理：
-- **`search_memories(query, ...)`**：基于向量语义与多信号混合检索相关记忆（支持 `filters`、`limit`、`scope`）。
+- **`search_memories(query, ...)`**：默认基于向量语义与多信号混合检索相关记忆；遇到“今天”“昨天”“过去 48 小时”等明确时间意图时，会在内部切换到有界时间线检索（支持 `filters`、`limit`、`scope`，传入结构化 `filters` 时保持语义检索）。
 - **`add_memory(text, ...)`**：沉淀新的个人偏好、技术规范或项目踩坑事实（单句事实 `text`，限制 2000 字符，支持本地截图图片路径）。长多轮会话记忆由后台异步 Hook 蒸馏流水线接管，避免 Agent 序列化全量上下文导致 Token 爆炸。底层由 Mem0 自动判定新增、覆盖更新或消除冲突。
 
-> 💡 **提示**：`list`、`get`、`update`、`delete`、`clear` 等确定性生命周期管理操作由面向人类开发者的 **Hippo CLI** 全权提供，避免 Agent 产生 UUID 幻觉或误操作。
+> 💡 **提示**：`recent`、`list`、`get`、`update`、`delete`、`clear` 等确定性查询与生命周期管理操作由面向人类开发者的 **Hippo CLI** 提供；Agent 无需增加独立的 `get_recent_memories` 工具即可回答时间型问题。
 
 ---
 
