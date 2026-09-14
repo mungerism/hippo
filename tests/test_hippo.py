@@ -47,7 +47,6 @@ class TestHippo(unittest.TestCase):
         expected_tools = {
             "add_memory",
             "search_memories",
-            "get_recent_memories",
         }
         self.assertEqual(set(tool_dict.keys()), expected_tools)
 

@@ -552,7 +552,9 @@ class HippoEngine:
         project_id: Optional[str] = None,
         limit: int = 50,
         since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
         user_id: Optional[str] = None,
+        verified_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """Pull ADD/UPDATE/DELETE memory events inside a recent time window.
 
@@ -569,7 +571,9 @@ class HippoEngine:
             project_id=project_id,
             limit=limit,
             since=since,
+            until=until,
             user_id=user_id,
+            verified_only=verified_only,
         )
 
     def get_user_profile(self, user_id: Optional[str] = None) -> Dict[str, Any]:

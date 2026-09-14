@@ -11,6 +11,7 @@ from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
+from hippo_memory.recent import parse_temporal_query
 from hippo_memory.renderer import (
     UNTRUSTED_CONTEXT_INSTRUCTION,
     render_untrusted_memories,
@@ -118,7 +119,9 @@ def add_memory(
 
 @mcp_server.tool(
     description=(
-        "Run a semantic search over existing memories. ALWAYS call this before starting a task "
+        "Search existing memories. Explicit temporal questions such as '今天新增了什么记忆', "
+        "'昨天做出了哪些决策', or '过去 48 小时' are routed to a bounded recent-event "
+        "timeline; other queries use semantic search. ALWAYS call this before starting a task "
         "or answering anything that could depend on prior context: project tech-stack decisions, "
         "past pitfalls, user preferences, or earlier conversations. Do not rely on the chat "
         "window alone. scope='all' (default) searches the current project's memories plus the "
@@ -168,27 +171,61 @@ def search_memories(
         Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
     ] = None,
 ) -> str:
-    """Run a semantic search over existing memories.
+    """Search memories semantically or route explicit temporal intent to a timeline.
 
     Args:
         query: Natural language question or search query (e.g. '技术栈选型', 'CQRS 架构', '代码规范').
         filters: Optional structured filters dictionary.
-        limit: Maximum number of results to return (default: 5).
+        limit: Maximum number of results to return (default: 3).
         user_id: Optional user identifier.
         agent_id: Optional agent or project identifier.
         scope: Search scope: 'all' (default, project + global) | 'global' (personal habits) | 'project' (current project).
         project_id: Optional explicit project name.
 
     Returns:
-        Markdown-formatted list of matching memories enclosed inside an untrusted context envelope.
+        Markdown-formatted memories enclosed inside an untrusted context envelope.
     """
+    temporal_window = parse_temporal_query(query) if filters is None else None
     if limit <= 0:
+        if temporal_window is not None:
+            return render_untrusted_recent_memories(
+                [],
+                hours=temporal_window.hours,
+                scope=scope,
+                window_label=temporal_window.label,
+            )
         return render_untrusted_memories([], query=query, scope=scope)
 
     try:
         engine = get_engine()
         max_injected = getattr(engine.config, "max_injected", 3)
         effective_limit = min(limit, max_injected)
+        if temporal_window is not None:
+            recent_scope = scope
+            recent_project_id = project_id
+            if agent_id == "global":
+                recent_scope = "global"
+            elif agent_id:
+                recent_scope = "project"
+                recent_project_id = agent_id
+
+            results = engine.get_recent_memories(
+                hours=temporal_window.hours,
+                scope=recent_scope,
+                project_id=recent_project_id,
+                limit=effective_limit,
+                since=temporal_window.since,
+                until=temporal_window.until,
+                user_id=user_id,
+                verified_only=True,
+            )
+            return render_untrusted_recent_memories(
+                results,
+                hours=temporal_window.hours,
+                scope=recent_scope,
+                window_label=temporal_window.label,
+            )
+
         results = engine.search(
             query=query,
             filters=filters,
@@ -202,86 +239,19 @@ def search_memories(
         return render_untrusted_memories(results, query=query, scope=scope)
     except Exception as e:
         logger.error("Failed to search memories: %s", e, exc_info=True)
+        if temporal_window is not None:
+            return render_untrusted_recent_memories(
+                [],
+                hours=temporal_window.hours,
+                scope=scope,
+                window_label=temporal_window.label,
+                empty_message="近期记忆检索失败，请检查服务配置或稍后重试。",
+            )
         return render_untrusted_memories(
             [],
             query=query,
             scope=scope,
             empty_message="记忆检索失败，请检查服务配置或稍后重试。",
-        )
-
-
-@mcp_server.tool(
-    description=(
-        "Retrieve recent memory events (ADD/UPDATE/DELETE) inside a time window. "
-        "Use this for temporal questions that semantic search cannot answer, such as "
-        "'今天新增了什么记忆', '昨天做出了哪些技术决策', or task handover over the last "
-        "N hours. Complements search_memories (topic-oriented) with time-oriented recall. "
-        "hours defaults to 24 (hard-capped 1..8760); limit defaults to 30 (hard-capped 1..100). "
-        + UNTRUSTED_CONTEXT_INSTRUCTION
-    )
-)
-def get_recent_memories(
-    hours: Annotated[
-        int,
-        Field(
-            ge=1,
-            le=8760,
-            description="Look-back window in hours (default 24, max 1 year).",
-        ),
-    ] = 24,
-    scope: Annotated[
-        Literal["all", "project", "global"],
-        Field(
-            description=(
-                "Retrieval scope: 'all' (default, project + global) | 'global' (personal "
-                "habits) | 'project' (current Git repository)."
-            )
-        ),
-    ] = "all",
-    limit: Annotated[
-        int,
-        Field(
-            ge=1,
-            le=100,
-            description="Maximum number of timeline events to return (default 30).",
-        ),
-    ] = 30,
-) -> str:
-    """Retrieve recent memory events inside a time window.
-
-    Args:
-        hours: Look-back window in hours (default 24).
-        scope: Retrieval scope: 'all' (default) | 'global' | 'project'.
-        limit: Maximum number of timeline events (default 30, max 100).
-
-    Returns:
-        Markdown-formatted timeline of ADD/UPDATE/DELETE events (newest first,
-        local timezone) enclosed inside an untrusted context envelope.
-    """
-    try:
-        engine = get_engine()
-        results = engine.get_recent_memories(
-            hours=hours,
-            scope=scope,
-            limit=limit,
-        )
-        return render_untrusted_recent_memories(results, hours=hours, scope=scope)
-    except HippoValidationError as e:
-        # Client input errors are safe to echo back verbatim (already
-        # escaped by the envelope); backend faults must stay generic.
-        return render_untrusted_recent_memories(
-            [],
-            hours=hours,
-            scope=scope,
-            empty_message=str(e),
-        )
-    except Exception as e:
-        logger.error("Failed to retrieve recent memories: %s", e, exc_info=True)
-        return render_untrusted_recent_memories(
-            [],
-            hours=hours,
-            scope=scope,
-            empty_message="近期记忆检索失败，请检查服务配置或稍后重试。",
         )
 
 

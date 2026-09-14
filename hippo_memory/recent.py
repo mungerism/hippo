@@ -17,7 +17,10 @@ chunks — never per-row ``engine.get()``.
 from __future__ import annotations
 
 import logging
+import math
+import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
@@ -46,6 +49,84 @@ _EVENT_COLUMNS = "id, memory_id, old_memory, new_memory, event, created_at, upda
 # updated_at carries the event time for UPDATE/DELETE rows; ADD rows set only
 # created_at. Empty strings normalize to NULL so COALESCE sees a clean chain.
 _EVENT_TIME_SQL = "COALESCE(NULLIF(updated_at, ''), NULLIF(created_at, ''))"
+
+
+@dataclass(frozen=True)
+class TemporalQueryWindow:
+    """A bounded time window inferred from an explicit natural-language query."""
+
+    since: datetime
+    until: Optional[datetime]
+    hours: int
+    label: str
+
+
+def parse_temporal_query(
+    query: str,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[TemporalQueryWindow]:
+    """Recognize explicit recent/today/yesterday intent in Chinese or English.
+
+    This intentionally stays narrow: a topical query continues through semantic
+    search unless it contains an unambiguous temporal phrase.
+    """
+    text = (query or "").strip()
+    if not text:
+        return None
+
+    current = now or datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.astimezone()
+    today_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    lowered = text.lower()
+
+    if "昨天" in text or "昨日" in text or re.search(r"\byesterday\b", lowered):
+        since = today_start - timedelta(days=1)
+        return TemporalQueryWindow(since=since, until=today_start, hours=24, label="昨天")
+
+    if "今天" in text or "今日" in text or re.search(r"\btoday\b", lowered):
+        elapsed = max((current - today_start).total_seconds(), 1)
+        return TemporalQueryWindow(
+            since=today_start,
+            until=None,
+            hours=max(1, math.ceil(elapsed / 3600)),
+            label="今天",
+        )
+
+    match = re.search(r"(?:近|最近|过去)\s*(\d+)\s*(小时|时|天|日|周)", text)
+    if match:
+        amount = int(match.group(1))
+        multiplier = {"小时": 1, "时": 1, "天": 24, "日": 24, "周": 168}[match.group(2)]
+        hours = min(max(amount * multiplier, 1), MAX_RECENT_HOURS)
+        return TemporalQueryWindow(
+            since=current - timedelta(hours=hours),
+            until=None,
+            hours=hours,
+            label=f"近 {hours} 小时",
+        )
+
+    match = re.search(r"\b(?:last|past)\s+(\d+)\s*(hours?|days?|weeks?)\b", lowered)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        multiplier = 1 if unit.startswith("hour") else 24 if unit.startswith("day") else 168
+        hours = min(max(amount * multiplier, 1), MAX_RECENT_HOURS)
+        return TemporalQueryWindow(
+            since=current - timedelta(hours=hours),
+            until=None,
+            hours=hours,
+            label=f"近 {hours} 小时",
+        )
+
+    if re.search(r"最近|近期", text) or re.search(r"\brecent(?:ly)?\b", lowered):
+        return TemporalQueryWindow(
+            since=current - timedelta(hours=DEFAULT_RECENT_HOURS),
+            until=None,
+            hours=DEFAULT_RECENT_HOURS,
+            label=f"近 {DEFAULT_RECENT_HOURS} 小时",
+        )
+    return None
 
 
 def validate_recent_params(hours: int, limit: int, scope: str) -> None:
@@ -115,30 +196,36 @@ def query_recent_history(
     db_path: str | Path,
     cutoff_utc: datetime,
     limit: int,
+    until_utc: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """One range query over the history journal, newest event first.
 
-    ``DATETIME()`` normalizes mixed ISO formats (with/without zone, T/space)
-    to comparable UTC values, so ordering and the cutoff comparison hold
-    across rows written by different Mem0 versions.
+    ``julianday()`` normalizes mixed ISO formats while preserving fractional
+    seconds. ``until_utc`` is exclusive, enabling exact calendar-day windows.
     """
     path = Path(db_path)
     if not path.exists():
         return []
-    cutoff_text = cutoff_utc.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_text = cutoff_utc.astimezone(timezone.utc).isoformat()
+    until_text = until_utc.astimezone(timezone.utc).isoformat() if until_utc else None
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
+        until_clause = f"AND julianday({_EVENT_TIME_SQL}) < julianday(?)" if until_text else ""
+        params: tuple[Any, ...] = (
+            (cutoff_text, until_text, limit) if until_text else (cutoff_text, limit)
+        )
         rows = connection.execute(
             f"""
             SELECT {_EVENT_COLUMNS}
             FROM history
             WHERE event IS NOT NULL
-              AND DATETIME({_EVENT_TIME_SQL}) >= DATETIME(?)
-            ORDER BY DATETIME({_EVENT_TIME_SQL}) DESC, rowid DESC
+              AND julianday({_EVENT_TIME_SQL}) >= julianday(?)
+              {until_clause}
+            ORDER BY julianday({_EVENT_TIME_SQL}) DESC, rowid DESC
             LIMIT ?
             """,
-            (cutoff_text, limit),
+            params,
         ).fetchall()
     finally:
         connection.close()
@@ -206,6 +293,19 @@ def _scope_of_payload(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _user_of_payload(payload: Dict[str, Any]) -> Optional[str]:
+    """User id from either the flat Mem0 payload or nested metadata."""
+    user_id = payload.get("user_id")
+    if isinstance(user_id, str) and user_id.strip():
+        return user_id.strip()
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        user_id = metadata.get("user_id")
+        if isinstance(user_id, str) and user_id.strip():
+            return user_id.strip()
+    return None
+
+
 def _event_text(row: Dict[str, Any]) -> Optional[str]:
     """Timeline text of one history row.
 
@@ -225,17 +325,19 @@ def _timeline_rows(
     uid: str,
     scope: str,
     resolved_project: Optional[str],
+    verified_only: bool,
 ) -> List[Dict[str, Any]]:
     """Apply the lifecycle, ownership and scope invariants to one page."""
     results: List[Dict[str, Any]] = []
     for row in rows:
         payload = payloads.get(str(row.get("memory_id")))
+        payload_user: Optional[str] = None
         if payload is not None:
             if not is_active_memory(payload):
                 # Lifecycle invariant: superseded facts never re-enter
                 # Agent recall, timelines included (#24).
                 continue
-            payload_user = payload.get("user_id")
+            payload_user = _user_of_payload(payload)
             if payload_user is not None and payload_user != uid:
                 # The journal file is per-user; a mismatch means a foreign
                 # record in shared storage — never surface it.
@@ -244,9 +346,24 @@ def _timeline_rows(
         else:
             row_scope = None
 
+        if verified_only and (
+            payload is None or payload_user != uid or row_scope is None
+        ):
+            # history.db itself carries no ownership field. Agent-facing
+            # recall therefore requires an extant payload that proves both
+            # user and scope; CLI/Engine audit callers can still inspect
+            # unresolved DELETE rows by leaving verified_only disabled.
+            continue
+
         if scope == "global" and row_scope != "global":
             continue
         if scope == "project" and row_scope != resolved_project:
+            continue
+        if (
+            scope == "all"
+            and row_scope is not None
+            and row_scope not in ("global", resolved_project)
+        ):
             continue
 
         event_time = parse_history_timestamp(
@@ -277,7 +394,9 @@ def fetch_recent_memories(
     project_id: Optional[str] = None,
     limit: int = DEFAULT_RECENT_LIMIT,
     since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
     user_id: Optional[str] = None,
+    verified_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """Pull memory events (ADD/UPDATE/DELETE) inside the time window.
 
@@ -288,7 +407,9 @@ def fetch_recent_memories(
         project_id: Explicit project name (defaults to git auto-detection).
         limit: Max events returned, hard-capped at MAX_RECENT_LIMIT.
         since: Explicit UTC window start; wins over ``hours``.
+        until: Optional exclusive window end.
         user_id: Optional user identifier override.
+        verified_only: Require an extant payload proving user and scope.
 
     Returns:
         Rows newest-first:
@@ -304,15 +425,21 @@ def fetch_recent_memories(
     effective_limit = min(limit, MAX_RECENT_LIMIT)
     uid = user_id or engine.config.user_id
     cutoff_utc = resolve_recent_cutoff(hours, since)
+    until_utc = resolve_recent_cutoff(hours, until) if until is not None else None
+    if until_utc is not None and until_utc <= cutoff_utc:
+        return []
     db_path = engine.config.history_db_path
     # Git auto-detection scans the filesystem — resolve once, not per row.
-    resolved_project = engine.router.resolve_project(project_id) if scope == "project" else None
+    resolved_project = (
+        engine.router.resolve_project(project_id) if scope in ("all", "project") else None
+    )
 
     def collect_page(page_size: int) -> tuple[int, List[Dict[str, Any]]]:
-        rows = query_recent_history(db_path, cutoff_utc, page_size)
+        rows = query_recent_history(db_path, cutoff_utc, page_size, until_utc)
         return len(rows), _timeline_rows(
             rows, _resolve_payloads_safely(engine, rows),
             uid=uid, scope=scope, resolved_project=resolved_project,
+            verified_only=verified_only,
         )
 
     page_rows, results = collect_page(effective_limit)
