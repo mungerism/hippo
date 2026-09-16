@@ -191,15 +191,17 @@ class MemoryConsolidator:
         self._classifier_llm = classifier_llm
         self.discovery = discovery or CandidateDiscovery(engine)
         self._classifier_degraded = False
+        engine_cfg = getattr(engine, "config", None)
         self.applier = applier or ConsolidationApplier(
             engine,
             journal=OperationJournal(
                 getattr(
-                    getattr(engine, "config", None),
+                    engine_cfg,
                     "consolidation_operations_dir",
                     None,
                 )
             ),
+            lock_timeout=getattr(engine_cfg, "consolidation_lock_timeout", None),
         )
         self._decider: Optional[ConsolidationDecider] = None
 

@@ -1,19 +1,162 @@
+import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+import threading
+from contextvars import ContextVar
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional
 
 from mem0 import Memory
-from hippo_memory.apply import consolidation_lock, resolve_lock_namespace
-from hippo_memory.lifecycle import add_lifecycle_exclusion, filter_active_memories
+from hippo_memory.apply import consolidation_lock, record_version, resolve_lock_namespace
+from hippo_memory.lifecycle import (
+    STATUS_ACTIVE,
+    STATUS_SUPERSEDED,
+    add_lifecycle_exclusion,
+    filter_active_memories,
+    status_of,
+)
 from hippo_memory.config import HippoConfig
 from hippo_memory.decision import resolve_identity
-from hippo_memory.exceptions import HippoValidationError
+from hippo_memory.exceptions import HippoLockTimeoutError, HippoValidationError
 from hippo_memory.recent import fetch_recent_memories
 from hippo_memory.router import ScopeRouter
 
 logger = logging.getLogger(__name__)
+
+_current_write_lock_holder: ContextVar[Optional["_LazyWriteLockHolder"]] = ContextVar(
+    "_current_write_lock_holder", default=None
+)
+
+
+class _LazyWriteLockHolder:
+    """Manages just-in-time acquisition of the per-identity write lock.
+
+    For infer=False (Hot Path), the lock is acquired eagerly in add() to guard direct store mutations.
+    For infer=True (Warm Path distillation), lock acquisition is deferred until the underlying
+    vector store or history store actually performs persistence, keeping slow remote LLM extraction
+    network calls entirely outside the lock critical section.
+    """
+
+    def __init__(
+        self,
+        engine: "HippoEngine",
+        user_id: str,
+        agent_id: str,
+        dedup_enabled: bool = False,
+        run_id: Optional[str] = None,
+    ):
+        self.engine = engine
+        self.user_id = str(user_id)
+        self.agent_id = str(agent_id)
+        self.dedup_enabled = dedup_enabled
+        self.run_id = run_id
+        self.start_iso: str = datetime.now(timezone.utc).isoformat()
+        self._lock_ctx: Optional[Iterator[None]] = None
+        self._lock = threading.Lock()
+        self.skipped_ids: set[str] = set()
+        self.observed_versions: dict[str, str] = {}
+        self._context_stale: Optional[bool] = None
+        self.context_aborted: bool = False
+        self.error: Optional[Exception] = None
+
+    def check_observed_context_stale(self, vector_store: Any) -> bool:
+        """Validate that all memories observed during Phase 1 retrieval remain unchanged under write lock.
+
+        Satisfies ADR-0003 check-then-act TOCTOU requirements: if any memory in observed_versions
+        was concurrently mutated, superseded, or deleted during remote LLM extraction, the entire
+        Warm Path extraction was predicated on stale context and must be aborted (#42).
+        """
+        if self._context_stale is not None:
+            return self._context_stale
+
+        if not self.observed_versions:
+            self._context_stale = False
+            return False
+
+        if not hasattr(vector_store, "get"):
+            self._context_stale = False
+            return False
+
+        for mem_id, observed_ver in self.observed_versions.items():
+            try:
+                curr = vector_store.get(vector_id=mem_id)
+            except Exception as e:
+                logger.warning(
+                    "vector_store.get failed for observed memory %s during context re-validation: %s; fail-closed",
+                    mem_id,
+                    e,
+                )
+                self._context_stale = True
+                self.context_aborted = True
+                return True
+
+            if curr is None:
+                logger.warning(
+                    "Observed memory %s was concurrently deleted during Warm Path LLM extraction; aborting",
+                    mem_id,
+                )
+                self._context_stale = True
+                self.context_aborted = True
+                return True
+
+            curr_payload = getattr(curr, "payload", None)
+            if not isinstance(curr_payload, Mapping):
+                curr_payload = curr if isinstance(curr, Mapping) else {}
+
+            if status_of(curr_payload) == STATUS_SUPERSEDED:
+                logger.warning(
+                    "Observed memory %s was concurrently superseded during Warm Path LLM extraction; aborting",
+                    mem_id,
+                )
+                self._context_stale = True
+                self.context_aborted = True
+                return True
+
+            curr_ver = record_version(curr_payload)
+            if curr_ver != observed_ver:
+                logger.warning(
+                    "Observed memory %s was concurrently modified (curr_ver=%s != observed_ver=%s) "
+                    "during Warm Path LLM extraction; aborting",
+                    mem_id,
+                    curr_ver,
+                    observed_ver,
+                )
+                self._context_stale = True
+                self.context_aborted = True
+                return True
+
+        self._context_stale = False
+        return False
+
+    def ensure_locked(self) -> None:
+        if self.error is not None:
+            raise self.error
+        if self._lock_ctx is None:
+            with self._lock:
+                if self.error is not None:
+                    raise self.error
+                if self._lock_ctx is None:
+                    try:
+                        ctx = self.engine._write_lock(self.user_id, self.agent_id)
+                        ctx.__enter__()
+                        self._lock_ctx = ctx
+                    except Exception as e:
+                        self.error = e
+                        raise
+
+    def release_if_locked(self) -> None:
+        if self._lock_ctx is not None:
+            with self._lock:
+                if self._lock_ctx is not None:
+                    ctx = self._lock_ctx
+                    self._lock_ctx = None
+                    try:
+                        ctx.__exit__(None, None, None)
+                    except Exception as e:
+                        if self.error is None:
+                            self.error = e
+
 
 
 def build_conversation(
@@ -60,6 +203,327 @@ def _unwrap_results(results: Any) -> List[Dict[str, Any]]:
     return results if isinstance(results, list) else results.get("results", [])
 
 
+def _is_payload_expired(payload: Optional[Dict[str, Any]]) -> bool:
+    """Check whether a payload is expired based on its expiration_date."""
+    if not payload:
+        return False
+    expiration_date = payload.get("expiration_date")
+    if not expiration_date:
+        return False
+    if isinstance(expiration_date, datetime):
+        return expiration_date.date() < datetime.now(timezone.utc).date()
+    if isinstance(expiration_date, date):
+        return expiration_date < datetime.now(timezone.utc).date()
+    try:
+        s = str(expiration_date).split("T")[0].strip()
+        return date.fromisoformat(s) < datetime.now(timezone.utc).date()
+    except (ValueError, TypeError):
+        return False
+
+
+def _dedup_before_insert(
+    vector_store: Any,
+    user_id: str,
+    agent_id: str,
+    vectors: Any,
+    ids: Any,
+    payloads: Any,
+    holder: Optional["_LazyWriteLockHolder"] = None,
+) -> tuple[Any, Any, Any]:
+    """Re-validate and deduplicate candidate records under the shared write lock.
+
+    Per ADR-0003 check-then-act atomicity, when remote LLM extraction occurs outside
+    the critical section, another writer may have persisted identical facts during the
+    unlocked observation window. This check performs a targeted, indexed re-validation
+    under the identity write lock to prevent duplicates and lost updates without scanning
+    the entire identity.
+    """
+    if not payloads or not hasattr(vector_store, "list"):
+        return vectors, ids, payloads
+
+    candidate_hashes: set[str] = set()
+    candidate_texts: set[str] = set()
+    for p in payloads:
+        if isinstance(p, dict):
+            h = p.get("hash")
+            data = p.get("data")
+            if not h and data and isinstance(data, str) and data.strip():
+                h = hashlib.md5(data.strip().encode()).hexdigest()
+            if h:
+                candidate_hashes.add(str(h))
+            if data and isinstance(data, str) and data.strip():
+                candidate_texts.add(data.strip())
+
+    if not candidate_hashes and not candidate_texts:
+        return vectors, ids, payloads
+
+    filters: dict[str, Any] = {"user_id": str(user_id), "agent_id": str(agent_id)}
+    if holder is not None and holder.run_id:
+        filters["run_id"] = holder.run_id
+
+    # Targeted query using OR to match either candidate hash OR candidate text (#42)
+    # This ensures records lacking hash (legacy/imported) are matched by text,
+    # avoiding false negatives in existing_texts comparison.
+    or_clauses: list[dict[str, Any]] = []
+    if candidate_hashes:
+        if len(candidate_hashes) == 1:
+            or_clauses.append({"hash": next(iter(candidate_hashes))})
+        else:
+            or_clauses.append({"hash": sorted(candidate_hashes)})
+    if candidate_texts:
+        if len(candidate_texts) == 1:
+            or_clauses.append({"data": next(iter(candidate_texts))})
+        else:
+            or_clauses.append({"data": sorted(candidate_texts)})
+
+    if or_clauses:
+        filters["OR"] = or_clauses
+
+    existing_hashes: set[str] = set()
+    existing_texts: set[str] = set()
+    page_size = 200
+    offset = None
+    max_dedup_pages = 5
+    page_count = 0
+
+    client_scroll = getattr(getattr(vector_store, "client", None), "scroll", None)
+    collection_name = getattr(vector_store, "collection_name", None)
+    create_filter = getattr(vector_store, "_create_filter", None)
+    is_qdrant = (
+        type(vector_store).__name__ == "Qdrant"
+        or getattr(vector_store, "_use_client_scroll", False) is True
+    )
+
+    try:
+        while page_count < max_dedup_pages:
+            page_count += 1
+            if is_qdrant and callable(client_scroll) and collection_name:
+                q_filter = create_filter(filters) if callable(create_filter) else None
+                scroll_res = client_scroll(
+                    collection_name=collection_name,
+                    scroll_filter=q_filter,
+                    limit=page_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if isinstance(scroll_res, tuple):
+                    existing_items = scroll_res[0]
+                    next_offset = scroll_res[1] if len(scroll_res) > 1 else None
+                else:
+                    existing_items = scroll_res
+                    next_offset = None
+            else:
+                list_kwargs: dict[str, Any] = {"filters": filters, "top_k": page_size}
+                if offset is not None:
+                    list_kwargs["offset"] = offset
+                try:
+                    raw_list = vector_store.list(**list_kwargs)
+                    if isinstance(raw_list, tuple):
+                        existing_items = raw_list[0]
+                        next_offset = raw_list[1] if len(raw_list) > 1 else None
+                    else:
+                        existing_items = raw_list
+                        next_offset = None
+                except (ValueError, TypeError):
+                    # Backend does not accept offset kwarg or complex OR filter
+                    list_kwargs.pop("offset", None)
+                    fallback_filters = dict(filters)
+                    fallback_filters.pop("OR", None)
+                    list_kwargs["filters"] = fallback_filters
+                    raw_list = vector_store.list(**list_kwargs)
+                    if isinstance(raw_list, tuple):
+                        existing_items = raw_list[0]
+                    else:
+                        existing_items = raw_list
+                    next_offset = None
+
+            if not existing_items:
+                break
+
+            for item in existing_items:
+                payload = getattr(item, "payload", None) or (item if isinstance(item, dict) else {})
+                if payload.get("status") == "superseded" or _is_payload_expired(payload):
+                    continue
+                h = payload.get("hash")
+                if h:
+                    existing_hashes.add(str(h))
+                data = payload.get("data")
+                if data and isinstance(data, str):
+                    existing_texts.add(data.strip())
+
+            # Early termination if all candidates are matched
+            if (candidate_hashes <= existing_hashes) and (candidate_texts <= existing_texts):
+                break
+
+            if next_offset is None or next_offset == offset:
+                break
+            offset = next_offset
+    except Exception as e:
+        logger.warning(
+            "Re-validation query failed during dedup under write lock: %s; fail-closed",
+            e,
+        )
+        if holder is not None:
+            holder.error = e
+        raise
+
+    filtered_vectors = []
+    filtered_ids = []
+    filtered_payloads = []
+
+    for i, p in enumerate(payloads):
+        curr_id = str(ids[i]) if ids is not None and i < len(ids) else None
+        if not isinstance(p, dict):
+            filtered_payloads.append(p)
+            if vectors is not None and i < len(vectors):
+                filtered_vectors.append(vectors[i])
+            if ids is not None and i < len(ids):
+                filtered_ids.append(ids[i])
+            continue
+
+        p_hash = p.get("hash")
+        p_text = (p.get("data") or "").strip() if isinstance(p.get("data"), str) else ""
+
+        if p_hash and str(p_hash) in existing_hashes:
+            logger.info("Re-validation skipped duplicate fact by hash: %s", p_hash)
+            if curr_id and holder is not None:
+                holder.skipped_ids.add(curr_id)
+            continue
+        if p_text and p_text in existing_texts:
+            logger.info("Re-validation skipped duplicate fact by text: %s", p_text[:40])
+            if curr_id and holder is not None:
+                holder.skipped_ids.add(curr_id)
+            continue
+
+        filtered_payloads.append(p)
+        if vectors is not None and i < len(vectors):
+            filtered_vectors.append(vectors[i])
+        if ids is not None and i < len(ids):
+            filtered_ids.append(ids[i])
+
+    res_vectors = filtered_vectors if vectors is not None else None
+    res_ids = filtered_ids if ids is not None else None
+    return res_vectors, res_ids, filtered_payloads
+
+
+def _is_stale_mutation(
+    vector_store: Any,
+    vector_id: str,
+    holder: _LazyWriteLockHolder,
+) -> bool:
+    """Check if the record was modified after the Warm Path observation phase began.
+
+    When infer=True runs remote LLM extraction outside the critical section, another
+    writer (such as a concurrent Hot Path add_explicit or consolidation) may have
+    mutated or superseded the target record. Under the write lock, we re-validate
+    the backing-store record timestamp against the Warm Path start time to prevent
+    lost updates and satisfy ADR-0003 TOCTOU requirements.
+    """
+    if not hasattr(vector_store, "get"):
+        return False
+    try:
+        curr = vector_store.get(vector_id=vector_id)
+    except Exception as e:
+        logger.warning(
+            "vector_store.get failed during stale mutation check for %s: %s; fail-closed",
+            vector_id,
+            e,
+        )
+        # Fail-closed (R5 P1): treat as stale to prevent concurrent writes from clobbering data
+        return True
+
+    if curr is None:
+        return True
+
+    curr_payload = getattr(curr, "payload", None)
+    if not isinstance(curr_payload, Mapping):
+        curr_payload = curr if isinstance(curr, Mapping) else {}
+
+    observed_version = holder.observed_versions.get(str(vector_id))
+    if observed_version is not None:
+        # ADR-0003: Compare against the actual version fingerprint observed during Phase 1 retrieval (#42)
+        curr_version = record_version(curr_payload)
+        if curr_version != observed_version:
+            logger.warning(
+                "Stale Warm Path mutation detected for memory %s (curr_version=%s != observed_version=%s); "
+                "skipping mutation to prevent lost update",
+                vector_id,
+                curr_version,
+                observed_version,
+            )
+            return True
+    else:
+        # Fallback if record was not observed in search: check lifecycle status and normalized timestamp
+        if status_of(curr_payload) == STATUS_SUPERSEDED:
+            logger.warning(
+                "Stale Warm Path mutation detected for memory %s (status=superseded); "
+                "skipping mutation to prevent lost update",
+                vector_id,
+            )
+            return True
+
+        curr_updated = curr_payload.get("updated_at") or curr_payload.get("created_at")
+        if curr_updated and isinstance(curr_updated, str):
+            try:
+                dt_curr = datetime.fromisoformat(curr_updated)
+                dt_start = datetime.fromisoformat(holder.start_iso)
+                if dt_curr > dt_start:
+                    logger.warning(
+                        "Stale Warm Path mutation detected for memory %s (curr_updated=%s > start_iso=%s); "
+                        "skipping mutation to prevent lost update",
+                        vector_id,
+                        curr_updated,
+                        holder.start_iso,
+                    )
+                    return True
+            except Exception:
+                if curr_updated > holder.start_iso:
+                    return True
+    return False
+
+
+def _extract_insert_args(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[Optional[list], Optional[list], Optional[list]]:
+    """Extract (vectors, payloads, ids) matching Mem0's official insert signature:
+    insert(vectors, payloads=None, ids=None)
+    """
+    vecs = kwargs.get("vectors") if "vectors" in kwargs else (args[0] if len(args) > 0 else None)
+    pays = kwargs.get("payloads") if "payloads" in kwargs else (args[1] if len(args) > 1 else None)
+    i_ids = kwargs.get("ids") if "ids" in kwargs else (args[2] if len(args) > 2 else None)
+    return vecs, pays, i_ids
+
+
+def _rebuild_insert_call(
+    orig_args: tuple[Any, ...],
+    orig_kwargs: dict[str, Any],
+    vecs: Any,
+    pays: Any,
+    ids: Any,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Rebuild (args, kwargs) preserving the caller's convention (positional vs keyword)."""
+    new_kwargs = dict(orig_kwargs)
+    new_args = list(orig_args)
+
+    if "vectors" in new_kwargs:
+        new_kwargs["vectors"] = vecs
+    elif len(new_args) > 0:
+        new_args[0] = vecs
+
+    if "payloads" in new_kwargs:
+        new_kwargs["payloads"] = pays
+    elif len(new_args) > 1:
+        new_args[1] = pays
+
+    if "ids" in new_kwargs:
+        new_kwargs["ids"] = ids
+    elif len(new_args) > 2:
+        new_args[2] = ids
+
+    return tuple(new_args), new_kwargs
+
+
 class HippoEngine:
     """Core memory engine wrapping Mem0 with multi-scope and multi-provider support."""
 
@@ -67,6 +531,311 @@ class HippoEngine:
         self.config = config or HippoConfig()
         self.router = ScopeRouter(default_user_id=self.config.user_id)
         self._memory: Optional[Memory] = None
+        self._wrapped_persistence_ids: set[int] = set()
+
+    def _hook_memory_persistence(self, mem: Any) -> None:
+        """Attach just-in-time write locking to memory persistence sinks.
+
+        Guards all mutation seams (insert, update, delete on vector_store,
+        batch_add_history, add_history on db, and update, insert on entity_store)
+        under the shared per-identity write lock to satisfy ADR-0002 and ADR-0003 invariants.
+        """
+        if mem is None:
+            return
+
+        wrapped = getattr(self, "_wrapped_persistence_ids", None)
+        if wrapped is None:
+            wrapped = set()
+            self._wrapped_persistence_ids = wrapped
+
+        vector_store = getattr(mem, "vector_store", None)
+        if vector_store is not None and id(vector_store) not in wrapped:
+            wrapped.add(id(vector_store))
+            orig_insert = getattr(vector_store, "insert", None)
+            if orig_insert is not None:
+                def _locked_insert(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        holder.ensure_locked()
+                        # Deduplication re-validation is strictly for Warm Path (infer=True).
+                        # Hot Path (infer=False) acquires lock eagerly and captures without deduplication
+                        # to preserve idempotence and avoid breaking explicit fact addition (#42).
+                        if holder.dedup_enabled:
+                            vecs, pays, i_ids = _extract_insert_args(args, kwargs)
+                            # ADR-0003 check-then-act TOCTOU: re-validate Phase 1 observed context under lock (#42)
+                            if holder.check_observed_context_stale(vector_store):
+                                logger.warning(
+                                    "Warm Path insert aborted for user=%s agent=%s: "
+                                    "observed retrieval context was mutated concurrently during LLM extraction",
+                                    holder.user_id,
+                                    holder.agent_id,
+                                )
+                                if i_ids:
+                                    for s_id in i_ids:
+                                        holder.skipped_ids.add(str(s_id))
+                                if not getattr(mem, "db", None):
+                                    holder.release_if_locked()
+                                return []
+
+                            if pays:
+                                v_new, id_new, p_new = _dedup_before_insert(
+                                    vector_store, holder.user_id, holder.agent_id, vecs, i_ids, pays, holder=holder
+                                )
+                                if not p_new:
+                                    if not getattr(mem, "db", None):
+                                        holder.release_if_locked()
+                                    return []
+                                args, kwargs = _rebuild_insert_call(args, kwargs, v_new, p_new, id_new)
+                    res = orig_insert(*args, **kwargs)
+                    if holder is not None and not getattr(mem, "db", None):
+                        holder.release_if_locked()
+                    return res
+
+                vector_store.insert = _locked_insert
+
+            orig_update = getattr(vector_store, "update", None)
+            if orig_update is not None:
+                def _locked_update(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        holder.ensure_locked()
+                        if holder.dedup_enabled:
+                            v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
+                            if (
+                                holder.check_observed_context_stale(vector_store)
+                                or (v_id and _is_stale_mutation(vector_store, str(v_id), holder))
+                            ):
+                                if v_id:
+                                    holder.skipped_ids.add(str(v_id))
+                                if not getattr(mem, "db", None):
+                                    holder.release_if_locked()
+                                return None
+                    res = orig_update(*args, **kwargs)
+                    if holder is not None and not getattr(mem, "db", None):
+                        holder.release_if_locked()
+                    return res
+
+                vector_store.update = _locked_update
+
+            orig_delete = getattr(vector_store, "delete", None)
+            if orig_delete is not None:
+                def _locked_delete(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        holder.ensure_locked()
+                        if holder.dedup_enabled:
+                            v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
+                            if (
+                                holder.check_observed_context_stale(vector_store)
+                                or (v_id and _is_stale_mutation(vector_store, str(v_id), holder))
+                            ):
+                                if v_id:
+                                    holder.skipped_ids.add(str(v_id))
+                                if not getattr(mem, "db", None):
+                                    holder.release_if_locked()
+                                return None
+                    res = orig_delete(*args, **kwargs)
+                    if holder is not None and not getattr(mem, "db", None):
+                        holder.release_if_locked()
+                    return res
+
+                vector_store.delete = _locked_delete
+
+            orig_search = getattr(vector_store, "search", None)
+            if orig_search is not None and getattr(orig_search, "_hippo_wrapped", False) is not True:
+                def _tracked_search(*args: Any, **kwargs: Any) -> Any:
+                    res = orig_search(*args, **kwargs)
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None and res:
+                        items = res if isinstance(res, list) else getattr(res, "results", [])
+                        for item in items:
+                            mid = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+                            payload = getattr(item, "payload", None)
+                            if not isinstance(payload, Mapping):
+                                payload = item if isinstance(item, Mapping) else {}
+                            if mid:
+                                holder.observed_versions[str(mid)] = record_version(payload)
+                    return res
+
+                _tracked_search._hippo_wrapped = True
+                vector_store.search = _tracked_search
+
+        db = getattr(mem, "db", None)
+        if db is not None and id(db) not in wrapped:
+            wrapped.add(id(db))
+            orig_batch_add = getattr(db, "batch_add_history", None)
+            if orig_batch_add is not None:
+                def _locked_batch_add(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        holder.ensure_locked()
+                        if holder.skipped_ids:
+                            records = kwargs.get("records") if "records" in kwargs else (args[0] if len(args) > 0 else None)
+                            if records and isinstance(records, list):
+                                filtered_records = [
+                                    rec for rec in records
+                                    if not (isinstance(rec, dict) and str(rec.get("memory_id")) in holder.skipped_ids)
+                                ]
+                                if not filtered_records:
+                                    holder.release_if_locked()
+                                    return None
+                                if "records" in kwargs:
+                                    kwargs["records"] = filtered_records
+                                elif len(args) > 0:
+                                    args = (filtered_records,) + args[1:]
+                    res = orig_batch_add(*args, **kwargs)
+                    if holder is not None:
+                        holder.release_if_locked()
+                    return res
+
+                db.batch_add_history = _locked_batch_add
+
+            orig_add_history = getattr(db, "add_history", None)
+            if orig_add_history is not None:
+                def _locked_add_history(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        holder.ensure_locked()
+                        m_id = kwargs.get("memory_id") if "memory_id" in kwargs else (args[0] if len(args) > 0 else None)
+                        if m_id and str(m_id) in holder.skipped_ids:
+                            holder.release_if_locked()
+                            return None
+                    res = orig_add_history(*args, **kwargs)
+                    if holder is not None:
+                        holder.release_if_locked()
+                    return res
+
+                db.add_history = _locked_add_history
+
+        def _hook_entity_store(es: Any) -> None:
+            if es is None or id(es) in wrapped:
+                return
+            wrapped.add(id(es))
+
+            orig_es_update = getattr(es, "update", None)
+            if orig_es_update is not None:
+                def _locked_es_update(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        if holder.error is not None:
+                            return None
+                        if holder.skipped_ids:
+                            payload = kwargs.get("payload") if "payload" in kwargs else (args[2] if len(args) > 2 else None)
+                            if isinstance(payload, dict) and "linked_memory_ids" in payload:
+                                payload["linked_memory_ids"] = [
+                                    mid for mid in payload["linked_memory_ids"]
+                                    if str(mid) not in holder.skipped_ids
+                                ]
+                    return orig_es_update(*args, **kwargs)
+
+                es.update = _locked_es_update
+
+            orig_es_insert = getattr(es, "insert", None)
+            if orig_es_insert is not None:
+                def _locked_es_insert(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        if holder.error is not None:
+                            return None
+                        if holder.skipped_ids:
+                            vecs, pays, ids_list = _extract_insert_args(args, kwargs)
+                            if isinstance(pays, list):
+                                filtered_pays = []
+                                filtered_vecs = []
+                                filtered_ids = []
+                                for i, p in enumerate(pays):
+                                    if isinstance(p, dict) and "linked_memory_ids" in p:
+                                        p["linked_memory_ids"] = [
+                                            mid for mid in p["linked_memory_ids"]
+                                            if str(mid) not in holder.skipped_ids
+                                        ]
+                                        if not p["linked_memory_ids"]:
+                                            continue
+                                    filtered_pays.append(p)
+                                    if vecs is not None and i < len(vecs):
+                                        filtered_vecs.append(vecs[i])
+                                    if ids_list is not None and i < len(ids_list):
+                                        filtered_ids.append(ids_list[i])
+
+                                if not filtered_pays:
+                                    return None
+
+                                args, kwargs = _rebuild_insert_call(
+                                    args,
+                                    kwargs,
+                                    filtered_vecs if vecs is not None else None,
+                                    filtered_pays,
+                                    filtered_ids if ids_list is not None else None,
+                                )
+                    return orig_es_insert(*args, **kwargs)
+
+                es.insert = _locked_es_insert
+
+            orig_es_delete = getattr(es, "delete", None)
+            if orig_es_delete is not None:
+                def _locked_es_delete(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None:
+                        if holder.error is not None:
+                            return None
+                        if holder.skipped_ids:
+                            v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
+                            if v_id and str(v_id) in holder.skipped_ids:
+                                return None
+                    return orig_es_delete(*args, **kwargs)
+
+                es.delete = _locked_es_delete
+
+        # Attach entity store hooks safely without eagerly triggering Mem0 lazy property
+        es_inst = getattr(mem, "_entity_store", None)
+        if es_inst is not None:
+            _hook_entity_store(es_inst)
+
+        mem_type = type(mem)
+        prop = getattr(mem_type, "entity_store", None)
+        if isinstance(prop, property):
+            if getattr(prop.fget, "_hippo_wrapped", False) is not True:
+                orig_fget = prop.fget
+
+                def _hooked_es_fget(instance_self: Any) -> Any:
+                    res_es = orig_fget(instance_self)
+                    if res_es is not None:
+                        _hook_entity_store(res_es)
+                    return res_es
+
+                _hooked_es_fget._hippo_wrapped = True
+                wrapped_prop = property(_hooked_es_fget, prop.fset, prop.fdel, prop.__doc__)
+                setattr(mem_type, "entity_store", wrapped_prop)
+        elif "entity_store" in mem.__dict__ and mem.__dict__["entity_store"] is not None:
+            _hook_entity_store(mem.__dict__["entity_store"])
+
+        orig_remove_es = getattr(mem, "_remove_memory_from_entity_store", None)
+        if orig_remove_es is not None and getattr(orig_remove_es, "_hippo_wrapped", False) is not True:
+            def _locked_remove_from_entity_store(memory_id: Any, *args: Any, **kwargs: Any) -> Any:
+                holder = _current_write_lock_holder.get()
+                if holder is not None:
+                    if holder.error is not None:
+                        return None
+                    if str(memory_id) in holder.skipped_ids:
+                        return None
+                return orig_remove_es(memory_id, *args, **kwargs)
+
+            _locked_remove_from_entity_store._hippo_wrapped = True
+            mem._remove_memory_from_entity_store = _locked_remove_from_entity_store
+
+        orig_link_es = getattr(mem, "_link_entities_for_memory", None)
+        if orig_link_es is not None and getattr(orig_link_es, "_hippo_wrapped", False) is not True:
+            def _locked_link_entities_for_memory(memory_id: Any, *args: Any, **kwargs: Any) -> Any:
+                holder = _current_write_lock_holder.get()
+                if holder is not None:
+                    if holder.error is not None:
+                        return None
+                    if str(memory_id) in holder.skipped_ids:
+                        return None
+                return orig_link_es(memory_id, *args, **kwargs)
+
+            _locked_link_entities_for_memory._hippo_wrapped = True
+            mem._link_entities_for_memory = _locked_link_entities_for_memory
 
     @property
     def memory(self) -> Memory:
@@ -83,6 +852,7 @@ class HippoEngine:
                         "Please set GOOGLE_API_KEY / OPENAI_API_KEY in ~/.hippo/.env or environment."
                     ) from e
                 raise
+        self._hook_memory_persistence(self._memory)
         return self._memory
 
     def add(
@@ -159,11 +929,24 @@ class HippoEngine:
                 params["metadata"]["image_path"] = str(img_p)
 
         conversation = build_conversation(text=full_content, content=None, messages=messages)
-        # Join the shared per-identity write protocol: Mem0's infer=True flow
-        # may update existing records, so Hot/Warm writes must hold the same
-        # lock the consolidation applier holds across its check-then-act
-        # window (see hippo_memory.apply.consolidation_lock).
-        with self._write_lock(params["user_id"], params["agent_id"]):
+        # Narrowed critical section: Hot Path (infer=False) acquires eagerly to guard
+        # direct backing store mutations. Warm Path (infer=True) defers acquisition until
+        # persistence (vector_store.insert), keeping slow remote LLM extraction network calls
+        # outside the critical section without breaking TOCTOU safety with ConsolidationApplier.
+        self._hook_memory_persistence(self.memory)
+        holder = _LazyWriteLockHolder(
+            self,
+            params["user_id"],
+            params["agent_id"],
+            dedup_enabled=infer,
+            run_id=run_id,
+        )
+        if not infer:
+            holder.ensure_locked()
+
+        token = _current_write_lock_holder.set(holder)
+        result = None
+        try:
             try:
                 result = self.memory.add(conversation, **params)
             except Exception as e:
@@ -185,6 +968,32 @@ class HippoEngine:
                         raise
                 else:
                     raise
+        finally:
+            _current_write_lock_holder.reset(token)
+            holder.release_if_locked()
+
+        # Re-raise lock timeout / error if Mem0 internal try-except swallowed it (#42)
+        if holder.error is not None:
+            raise holder.error
+
+        if holder.context_aborted and result is not None:
+            if isinstance(result, dict) and "results" in result:
+                result["results"] = []
+            elif isinstance(result, list):
+                result = []
+        elif holder.skipped_ids and result is not None:
+            if isinstance(result, dict) and isinstance(result.get("results"), list):
+                result["results"] = [
+                    r
+                    for r in result["results"]
+                    if not (isinstance(r, dict) and str(r.get("id")) in holder.skipped_ids)
+                ]
+            elif isinstance(result, list):
+                result = [
+                    r
+                    for r in result
+                    if not (isinstance(r, dict) and str(r.get("id")) in holder.skipped_ids)
+                ]
         return result
 
     def add_explicit(
