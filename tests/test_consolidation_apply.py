@@ -1181,8 +1181,9 @@ class TestWriterLockProtocol(unittest.TestCase):
         namespaces."""
         import hippo_memory.apply as apply_module
 
-        alias = self.lock_dir
-        canonical = alias.expanduser().resolve()
+        canonical = self.lock_dir.expanduser().resolve()
+        # 使用包含未规范化段的别名路径，确保在所有系统（包括 Linux）下 alias != canonical
+        alias = self.lock_dir / ".." / self.lock_dir.name
 
         with consolidation_lock(
             "u1", "hippo", base_dir=alias, timeout=None
