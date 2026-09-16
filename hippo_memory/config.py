@@ -1,3 +1,4 @@
+import math
 import os
 import re
 from pathlib import Path
@@ -134,12 +135,36 @@ class HippoConfig:
         user_id: Optional[str] = None,
         storage_dir: Optional[Path] = None,
         provider: Optional[str] = None,
+        consolidation_lock_timeout: Optional[float] = None,
     ):
         self.user_id = user_id or os.getenv("HIPPO_USER_ID", "munger")
         self.storage_dir = Path(
             storage_dir or os.getenv("HIPPO_STORAGE_DIR", str(DEFAULT_STORAGE_DIR))
         ).expanduser()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_lock_timeout = os.getenv("HIPPO_LOCK_TIMEOUT", "10.0")
+        try:
+            parsed_env = float(raw_lock_timeout)
+            default_lock_timeout = (
+                parsed_env if math.isfinite(parsed_env) and parsed_env >= 0.0 else 10.0
+            )
+        except (ValueError, TypeError):
+            default_lock_timeout = 10.0
+
+        if consolidation_lock_timeout is not None:
+            if (
+                not isinstance(consolidation_lock_timeout, (int, float))
+                or not math.isfinite(consolidation_lock_timeout)
+                or consolidation_lock_timeout < 0.0
+            ):
+                raise ValueError(
+                    f"Invalid consolidation_lock_timeout: {consolidation_lock_timeout!r} "
+                    "(must be a non-negative finite float)"
+                )
+            self.consolidation_lock_timeout = float(consolidation_lock_timeout)
+        else:
+            self.consolidation_lock_timeout = default_lock_timeout
 
         sanitize_google_application_credentials()
 

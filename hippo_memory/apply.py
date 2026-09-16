@@ -34,6 +34,7 @@ import time
 from typing import Any, Iterator, Mapping, Optional
 
 from hippo_memory.config import HIPPO_HOME
+from hippo_memory.exceptions import HippoLockTimeoutError
 from hippo_memory.decision import (
     RELATION_CONFLICT,
     RELATION_DISTINCT,
@@ -338,8 +339,14 @@ def consolidation_lock(
             entry = {"rlock": threading.RLock(), "depth": 0, "fd": None}
             _IDENTITY_LOCKS[key] = entry
     rlock = entry["rlock"]
+    lock_file = identity_lock_path(key[0], key[1], lock_dir)
     if not rlock.acquire(timeout=timeout if timeout is not None else -1):
-        raise TimeoutError(f"consolidation lock busy for identity={key[:2]!r}")
+        raise HippoLockTimeoutError(
+            f"consolidation lock busy for identity={key[:2]!r} (timeout={timeout}s, lock_file='{lock_file}')",
+            identity=key[:2],
+            lock_path=lock_file,
+            timeout=timeout,
+        )
     fd: Optional[int] = None
     flocked = False
     try:
@@ -348,7 +355,7 @@ def consolidation_lock(
             entry["depth"] += 1
         if outermost:
             lock_dir.mkdir(parents=True, exist_ok=True)
-            fd = os.open(identity_lock_path(key[0], key[1], lock_dir), os.O_CREAT | os.O_RDWR, 0o600)
+            fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
             deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 try:
@@ -359,8 +366,11 @@ def consolidation_lock(
                         # Raised straight into the unified finally below,
                         # which closes the un-flocked handle, rebalances the
                         # depth and releases the RLock exactly once.
-                        raise TimeoutError(
-                            f"consolidation lock busy for identity={key[:2]!r}"
+                        raise HippoLockTimeoutError(
+                            f"consolidation lock busy for identity={key[:2]!r} (timeout={timeout}s, lock_file='{lock_file}')",
+                            identity=key[:2],
+                            lock_path=lock_file,
+                            timeout=timeout,
                         ) from None
                     time.sleep(0.02)
             flocked = True
@@ -411,6 +421,9 @@ def _merged_sources_of(record: Optional[Mapping[str, Any]]) -> set[str]:
     return sources
 
 
+_DEFAULT_LOCK_TIMEOUT = object()
+
+
 class ConsolidationApplier:
     """Apply one ``OperationPlan`` under lock, journal and version guards."""
 
@@ -420,7 +433,7 @@ class ConsolidationApplier:
         *,
         journal: Optional[OperationJournal] = None,
         lock_dir: Optional[Path] = None,
-        lock_timeout: Optional[float] = None,
+        lock_timeout: Any = _DEFAULT_LOCK_TIMEOUT,
     ) -> None:
         self.engine = engine
         self.journal = journal or OperationJournal()
@@ -437,7 +450,14 @@ class ConsolidationApplier:
                 "exactly one lock namespace"
             )
         self.lock_dir = resolved
-        self.lock_timeout = lock_timeout
+        if lock_timeout is _DEFAULT_LOCK_TIMEOUT:
+            self.lock_timeout = getattr(
+                getattr(engine, "config", None),
+                "consolidation_lock_timeout",
+                None,
+            )
+        else:
+            self.lock_timeout = lock_timeout
 
     def _save(self, entry: dict[str, Any]) -> None:
         """Bump the entry timestamp and atomically persist it."""
