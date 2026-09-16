@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from hippo_memory.hooks.models import CapturedPayload, sanitize_text
 
