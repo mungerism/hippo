@@ -621,9 +621,9 @@ class ConsolidationApplier:
         winner_id = str(winner.get("id", "") or "")
         loser_id = str(loser.get("id", "") or "")
 
-        own_cache: Dict[str, int] = {}
-        members_cache: Dict[str, set[str]] = {}
-        freshness_cache: Dict[str, datetime] = {}
+        own_cache: dict[str, int] = {}
+        members_cache: dict[str, set[str]] = {}
+        freshness_cache: dict[str, datetime] = {}
 
         def _fetch(member_id: str) -> Optional[Mapping[str, Any]]:
             if member_id == winner_id:
@@ -632,13 +632,13 @@ class ConsolidationApplier:
                 return loser
             return self.engine.get(member_id)
 
-        def _snapshot_of(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, int]]:
+        def _snapshot_of(record: Optional[Mapping[str, Any]]) -> Optional[dict[str, int]]:
             if record is None:
                 return None
             raw = metadata_of(record).get("merged_contributions")
             if not isinstance(raw, Mapping) or not raw:
                 return None
-            snapshot: Dict[str, int] = {}
+            snapshot: dict[str, int] = {}
             for member, value in raw.items():
                 try:
                     # A zero own is meaningful (the member's count is fully
