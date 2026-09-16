@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from hippo_memory.hooks.adapters.base import BaseHostAdapter
 from hippo_memory.hooks.models import CapturedPayload, HookEvent, HostType, SHUTDOWN_COMMANDS, calculate_job_id
