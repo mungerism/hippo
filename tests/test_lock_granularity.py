@@ -1980,6 +1980,55 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.assertIn("transient storage network failure", str(ctx.exception))
         raw_del.assert_not_called()
 
+    def test_r5_p1_stale_mutation_error_survives_mem0_swallow(self):
+        """R5 P1: a stale-check read error must still escape HippoEngine.add even
+        when Mem0 catches the mutation exception internally and returns success."""
+        mock_vector_store = MagicMock()
+        raw_del = MagicMock()
+        mock_vector_store.delete = raw_del
+        store_error = RuntimeError("transient storage network failure")
+        mock_vector_store.get.side_effect = store_error
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+
+        def fake_add(*a, **kw):
+            try:
+                mock_vector_store.delete(vector_id="mem-fail-swallowed")
+            except RuntimeError:
+                # Mirrors Mem0 persistence seams that may log/catch an internal
+                # store exception and continue to construct a result.
+                pass
+            return {"results": [{"id": "mem-fail-swallowed", "event": "DELETE"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self.engine.add(text="x", project_id="p", infer=True)
+        self.assertIs(ctx.exception, store_error)
+        raw_del.assert_not_called()
+
+    def test_entity_phase_never_clears_preexisting_primary_error(self):
+        """A primary-phase error recorded before entity linking must propagate,
+        not be downgraded as a later entity lock acquisition failure."""
+        holder = _LazyWriteLockHolder(
+            self.engine,
+            self.engine.config.user_id,
+            "test_proj",
+            dedup_enabled=True,
+        )
+        holder.primary_completed = True
+        primary_error = RuntimeError("primary lock release failed")
+        holder.error = primary_error
+
+        with self.assertRaises(RuntimeError) as ctx:
+            holder.ensure_entity_locked(MagicMock())
+        self.assertIs(ctx.exception, primary_error)
+        self.assertIs(holder.error, primary_error)
+        self.assertFalse(holder.entity_linking_aborted)
+
     def test_r5_p2_stale_delete_aborts_entity_side_effects(self):
         """R5 P2: When stale check skips DELETE, all subsequent entity deletion/cleanup
         side effects must also be aborted to prevent data inconsistency."""
