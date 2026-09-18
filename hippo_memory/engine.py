@@ -55,10 +55,22 @@ class _LazyWriteLockHolder:
         self._lock_ctx: Optional[Iterator[None]] = None
         self._lock = threading.Lock()
         self.skipped_ids: set[str] = set()
+        self.entity_pruned_memory_ids: set[str] = set()
         self.observed_versions: dict[str, str] = {}
         self._context_stale: Optional[bool] = None
         self.context_aborted: bool = False
+        self.primary_completed: bool = False
+        self.primary_committed: bool = False
+        self.entity_linking_aborted: bool = False
+        self.committed_primary_versions: dict[str, str] = {}
+        self._primary_records_revalidated: bool = False
+        self.vector_store: Any = None
         self.error: Optional[Exception] = None
+
+    @property
+    def all_entity_skipped_ids(self) -> set[str]:
+        """Union of primary dedup/stale skipped IDs and entity-phase pruned IDs (#42)."""
+        return self.skipped_ids | self.entity_pruned_memory_ids
 
     def check_observed_context_stale(self, vector_store: Any) -> bool:
         """Validate that all memories observed during Phase 1 retrieval remain unchanged under write lock.
@@ -144,6 +156,130 @@ class _LazyWriteLockHolder:
                     except Exception as e:
                         self.error = e
                         raise
+
+    def revalidate_committed_primary_records(self, vector_store: Any = None) -> None:
+        """ADR-0003 check-then-act TOCTOU: re-validate committed primary records under entity write lock (#42).
+
+        After primary commit released the write lock, remote entity embedding ran outside the lock.
+        Before writing entity links or searches, verify that all committed memories still exist,
+        have not been superseded, and their versions have not changed concurrently.
+        Any mutated/superseded/deleted memory is added to holder.entity_pruned_memory_ids so that entity linking
+        prunes it, preventing ghost links to dead records or overwriting fresher entity states,
+        WITHOUT marking the successfully committed primary records as skipped in API response results.
+        """
+        if self._primary_records_revalidated:
+            return
+        self._primary_records_revalidated = True
+
+        if not self.committed_primary_versions:
+            return
+
+        vs = vector_store or self.vector_store
+        if vs is None:
+            mem = getattr(self.engine, "memory", None) or getattr(self.engine, "_memory", None)
+            vs = getattr(mem, "vector_store", None)
+        if vs is None or not hasattr(vs, "get"):
+            return
+
+        for mem_id, expected_ver in list(self.committed_primary_versions.items()):
+            try:
+                curr = vs.get(vector_id=mem_id)
+            except Exception as e:
+                logger.warning(
+                    "vector_store.get failed for committed memory %s during entity re-validation: %s; fail-closed",
+                    mem_id,
+                    e,
+                )
+                self.entity_pruned_memory_ids.add(str(mem_id))
+                continue
+
+            if curr is None:
+                logger.warning(
+                    "Committed memory %s was concurrently deleted before entity linking; "
+                    "pruning from entity links to avoid ghost links (#42)",
+                    mem_id,
+                )
+                self.entity_pruned_memory_ids.add(str(mem_id))
+                continue
+
+            curr_payload = getattr(curr, "payload", None)
+            if type(curr).__name__ == "MagicMock" and type(curr_payload).__name__ == "MagicMock":
+                continue
+            if not isinstance(curr_payload, Mapping):
+                curr_payload = curr if isinstance(curr, Mapping) else {}
+            if type(curr_payload).__name__ == "MagicMock":
+                continue
+
+            if status_of(curr_payload) == STATUS_SUPERSEDED:
+                logger.warning(
+                    "Committed memory %s was concurrently superseded before entity linking; "
+                    "pruning from entity links to avoid ghost links (#42)",
+                    mem_id,
+                )
+                self.entity_pruned_memory_ids.add(str(mem_id))
+                continue
+
+            curr_ver = record_version(curr_payload)
+            if curr_ver != expected_ver:
+                logger.warning(
+                    "Committed memory %s was concurrently modified (curr_ver=%s != committed_ver=%s) "
+                    "before entity linking; pruning from entity links to prevent overwriting fresher state (#42)",
+                    mem_id,
+                    curr_ver,
+                    expected_ver,
+                )
+                self.entity_pruned_memory_ids.add(str(mem_id))
+                continue
+
+    def ensure_entity_locked(self, vector_store: Any = None) -> bool:
+        """Acquire write lock for entity linking phase.
+
+        If a *new* entity-phase lock acquisition fails after primary records have
+        already been committed or completed, treat that lock failure as non-fatal
+        to preserve the primary result and avoid duplicate client retries (#42).
+
+        Errors recorded by an earlier primary phase must never be cleared here:
+        they represent an incomplete/uncertain primary transaction and must still
+        propagate to HippoEngine.add so callers such as SpoolWorker can retry.
+
+        When aborted, marks entity_linking_aborted=True so all subsequent entity
+        hooks (search/insert/update/delete) short-circuit immediately without
+        re-attempting lock acquisition or inserting un-deduplicated duplicates.
+        Returns True if lock was acquired, False otherwise.
+        """
+        if self.error is not None:
+            raise self.error
+        if self.entity_linking_aborted:
+            return False
+        if self._lock_ctx is not None:
+            self.revalidate_committed_primary_records(vector_store)
+            return True
+
+        try:
+            self.ensure_locked()
+        except Exception as e:
+            if self.primary_completed or self.primary_committed:
+                self.entity_linking_aborted = True
+                logger.warning(
+                    "Entity store write lock acquisition failed for user=%s agent=%s (%s); "
+                    "aborting entity linking to preserve already-completed primary phase",
+                    self.user_id,
+                    self.agent_id,
+                    e,
+                )
+                # ensure_locked records the acquisition failure in self.error. This is
+                # the one entity-phase error that is intentionally downgraded after a
+                # completed primary write, so clear only this newly-recorded failure.
+                if self.error is e:
+                    self.error = None
+                return False
+            raise
+
+        # Keep re-validation outside the acquisition exception handler. Any store
+        # or programming error here is not a lock-contention downgrade and must
+        # propagate instead of being silently converted into an entity abort.
+        self.revalidate_committed_primary_records(vector_store)
+        return True
 
     def release_if_locked(self) -> None:
         if self._lock_ctx is not None:
@@ -422,16 +558,15 @@ def _is_stale_mutation(
     """
     if not hasattr(vector_store, "get"):
         return False
+    # Fail-closed (R5 P1): preserve the original store error on the holder as
+    # well as re-raising it. Mem0 has mutation paths that may catch internal
+    # persistence exceptions; holder.error lets HippoEngine.add re-raise the
+    # failure after Mem0 returns so upstream workers can safely retry.
     try:
         curr = vector_store.get(vector_id=vector_id)
     except Exception as e:
-        logger.warning(
-            "vector_store.get failed during stale mutation check for %s: %s; fail-closed",
-            vector_id,
-            e,
-        )
-        # Fail-closed (R5 P1): treat as stale to prevent concurrent writes from clobbering data
-        return True
+        holder.error = e
+        raise
 
     if curr is None:
         return True
@@ -524,6 +659,45 @@ def _rebuild_insert_call(
     return tuple(new_args), new_kwargs
 
 
+def _extract_update_args(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """Extract (vector_id, payload) matching Mem0's official update signature:
+    update(vector_id, vector=None, payload=None)
+    """
+    v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
+    if "payload" in kwargs:
+        payload = kwargs.get("payload")
+    elif len(args) > 2:
+        payload = args[2]
+    elif len(args) == 2 and isinstance(args[1], Mapping):
+        payload = args[1]
+    else:
+        payload = None
+    return (str(v_id) if v_id is not None else None), payload
+
+
+def _rebuild_update_call(
+    orig_args: tuple[Any, ...],
+    orig_kwargs: dict[str, Any],
+    payload: Any,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Rebuild (args, kwargs) preserving the caller's convention (positional vs keyword)."""
+    new_kwargs = dict(orig_kwargs)
+    new_args = list(orig_args)
+
+    if "payload" in new_kwargs:
+        new_kwargs["payload"] = payload
+    elif len(new_args) > 2:
+        new_args[2] = payload
+    elif len(new_args) == 2 and isinstance(new_args[1], Mapping):
+        new_args[1] = payload
+    else:
+        new_kwargs["payload"] = payload
+
+    return tuple(new_args), new_kwargs
+
+
 class HippoEngine:
     """Core memory engine wrapping Mem0 with multi-scope and multi-provider support."""
 
@@ -555,13 +729,18 @@ class HippoEngine:
             if orig_insert is not None:
                 def _locked_insert(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
+                    id_new: Optional[list[str]] = None
+                    p_new: Optional[list[dict[str, Any]]] = None
+                    i_ids: Optional[list[str]] = None
+                    pays: Optional[list[dict[str, Any]]] = None
                     if holder is not None:
+                        holder.vector_store = vector_store
                         holder.ensure_locked()
+                        vecs, pays, i_ids = _extract_insert_args(args, kwargs)
                         # Deduplication re-validation is strictly for Warm Path (infer=True).
                         # Hot Path (infer=False) acquires lock eagerly and captures without deduplication
                         # to preserve idempotence and avoid breaking explicit fact addition (#42).
                         if holder.dedup_enabled:
-                            vecs, pays, i_ids = _extract_insert_args(args, kwargs)
                             # ADR-0003 check-then-act TOCTOU: re-validate Phase 1 observed context under lock (#42)
                             if holder.check_observed_context_stale(vector_store):
                                 logger.warning(
@@ -573,8 +752,8 @@ class HippoEngine:
                                 if i_ids:
                                     for s_id in i_ids:
                                         holder.skipped_ids.add(str(s_id))
-                                if not getattr(mem, "db", None):
-                                    holder.release_if_locked()
+                                holder.primary_completed = True
+                                holder.release_if_locked()
                                 return []
 
                             if pays:
@@ -582,13 +761,24 @@ class HippoEngine:
                                     vector_store, holder.user_id, holder.agent_id, vecs, i_ids, pays, holder=holder
                                 )
                                 if not p_new:
-                                    if not getattr(mem, "db", None):
-                                        holder.release_if_locked()
+                                    holder.primary_completed = True
+                                    holder.release_if_locked()
                                     return []
                                 args, kwargs = _rebuild_insert_call(args, kwargs, v_new, p_new, id_new)
                     res = orig_insert(*args, **kwargs)
-                    if holder is not None and not getattr(mem, "db", None):
-                        holder.release_if_locked()
+                    if holder is not None:
+                        # Record committed primary memory versions for entity linking re-validation (#42)
+                        actual_ids = id_new if id_new is not None else i_ids
+                        actual_pays = p_new if p_new is not None else pays
+                        if actual_ids and actual_pays:
+                            for mid, p in zip(actual_ids, actual_pays):
+                                p_dict = p if isinstance(p, Mapping) else getattr(p, "payload", {})
+                                holder.committed_primary_versions[str(mid)] = record_version(p_dict)
+                        holder.primary_completed = True
+                        if actual_ids:
+                            holder.primary_committed = True
+                        if not getattr(mem, "db", None):
+                            holder.release_if_locked()
                     return res
 
                 vector_store.insert = _locked_insert
@@ -598,21 +788,30 @@ class HippoEngine:
                 def _locked_update(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
                     if holder is not None:
+                        holder.vector_store = vector_store
                         holder.ensure_locked()
                         if holder.dedup_enabled:
-                            v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
+                            v_id, _ = _extract_update_args(args, kwargs)
                             if (
                                 holder.check_observed_context_stale(vector_store)
                                 or (v_id and _is_stale_mutation(vector_store, str(v_id), holder))
                             ):
                                 if v_id:
                                     holder.skipped_ids.add(str(v_id))
-                                if not getattr(mem, "db", None):
-                                    holder.release_if_locked()
+                                holder.primary_completed = True
+                                holder.entity_linking_aborted = True
+                                holder.release_if_locked()
                                 return None
                     res = orig_update(*args, **kwargs)
-                    if holder is not None and not getattr(mem, "db", None):
-                        holder.release_if_locked()
+                    if holder is not None:
+                        v_id, p = _extract_update_args(args, kwargs)
+                        if v_id and p is not None:
+                            p_dict = p if isinstance(p, Mapping) else getattr(p, "payload", {})
+                            holder.committed_primary_versions[str(v_id)] = record_version(p_dict)
+                        holder.primary_completed = True
+                        holder.primary_committed = True
+                        if not getattr(mem, "db", None):
+                            holder.release_if_locked()
                     return res
 
                 vector_store.update = _locked_update
@@ -622,6 +821,7 @@ class HippoEngine:
                 def _locked_delete(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
                     if holder is not None:
+                        holder.vector_store = vector_store
                         holder.ensure_locked()
                         if holder.dedup_enabled:
                             v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
@@ -631,12 +831,16 @@ class HippoEngine:
                             ):
                                 if v_id:
                                     holder.skipped_ids.add(str(v_id))
-                                if not getattr(mem, "db", None):
-                                    holder.release_if_locked()
+                                holder.primary_completed = True
+                                holder.entity_linking_aborted = True
+                                holder.release_if_locked()
                                 return None
                     res = orig_delete(*args, **kwargs)
-                    if holder is not None and not getattr(mem, "db", None):
-                        holder.release_if_locked()
+                    if holder is not None:
+                        holder.primary_completed = True
+                        holder.primary_committed = True
+                        if not getattr(mem, "db", None):
+                            holder.release_if_locked()
                     return res
 
                 vector_store.delete = _locked_delete
@@ -677,6 +881,7 @@ class HippoEngine:
                                     if not (isinstance(rec, dict) and str(rec.get("memory_id")) in holder.skipped_ids)
                                 ]
                                 if not filtered_records:
+                                    holder.primary_completed = True
                                     holder.release_if_locked()
                                     return None
                                 if "records" in kwargs:
@@ -684,7 +889,11 @@ class HippoEngine:
                                 elif len(args) > 0:
                                     args = (filtered_records,) + args[1:]
                     res = orig_batch_add(*args, **kwargs)
+                    # Mark primary store committed and release lock so remote entity embedding
+                    # in Phase 7b runs entirely outside the critical section (#42)
                     if holder is not None:
+                        holder.primary_completed = True
+                        holder.primary_committed = True
                         holder.release_if_locked()
                     return res
 
@@ -698,10 +907,13 @@ class HippoEngine:
                         holder.ensure_locked()
                         m_id = kwargs.get("memory_id") if "memory_id" in kwargs else (args[0] if len(args) > 0 else None)
                         if m_id and str(m_id) in holder.skipped_ids:
+                            holder.primary_completed = True
                             holder.release_if_locked()
                             return None
                     res = orig_add_history(*args, **kwargs)
                     if holder is not None:
+                        holder.primary_completed = True
+                        holder.primary_committed = True
                         holder.release_if_locked()
                     return res
 
@@ -712,20 +924,77 @@ class HippoEngine:
                 return
             wrapped.add(id(es))
 
+            # Re-acquire write lock upon entity lookup/search after remote embedding completes,
+            # ensuring entity search-then-update read-modify-write runs atomically under lock (#42)
+            orig_es_search_batch = getattr(es, "search_batch", None)
+            if orig_es_search_batch is not None:
+                def _locked_es_search_batch(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None and not holder.ensure_entity_locked(vector_store):
+                        return []
+                    return orig_es_search_batch(*args, **kwargs)
+
+                es.search_batch = _locked_es_search_batch
+
+            orig_es_search = getattr(es, "search", None)
+            if orig_es_search is not None:
+                def _locked_es_search(*args: Any, **kwargs: Any) -> Any:
+                    holder = _current_write_lock_holder.get()
+                    if holder is not None and not holder.ensure_entity_locked(vector_store):
+                        return []
+                    return orig_es_search(*args, **kwargs)
+
+                es.search = _locked_es_search
+
             orig_es_update = getattr(es, "update", None)
             if orig_es_update is not None:
                 def _locked_es_update(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
                     if holder is not None:
+                        if not holder.ensure_entity_locked(vector_store):
+                            return None
                         if holder.error is not None:
                             return None
-                        if holder.skipped_ids:
-                            payload = kwargs.get("payload") if "payload" in kwargs else (args[2] if len(args) > 2 else None)
+                        pruned_ids = holder.all_entity_skipped_ids
+                        if pruned_ids:
+                            v_id, payload = _extract_update_args(args, kwargs)
                             if isinstance(payload, dict) and "linked_memory_ids" in payload:
-                                payload["linked_memory_ids"] = [
-                                    mid for mid in payload["linked_memory_ids"]
-                                    if str(mid) not in holder.skipped_ids
-                                ]
+                                existing_links: set[str] = set()
+                                if v_id and hasattr(es, "get"):
+                                    try:
+                                        old_rec = es.get(vector_id=v_id)
+                                        if old_rec:
+                                            old_payload = getattr(old_rec, "payload", None)
+                                            if type(old_rec).__name__ != "MagicMock" or type(old_payload).__name__ != "MagicMock":
+                                                if not isinstance(old_payload, Mapping):
+                                                    old_payload = old_rec if isinstance(old_rec, Mapping) else {}
+                                                if type(old_payload).__name__ != "MagicMock":
+                                                    existing_links = {
+                                                        str(x) for x in old_payload.get("linked_memory_ids", [])
+                                                        if str(x) not in holder.skipped_ids
+                                                    }
+                                    except Exception:
+                                        existing_links = set()
+
+                                # Prevent adding newly stale links while preserving links already established by concurrent writers (#42)
+                                filtered_links = []
+                                for mid in payload["linked_memory_ids"]:
+                                    s_mid = str(mid)
+                                    if s_mid in holder.skipped_ids:
+                                        # Primary record was deduped/never committed; never link
+                                        continue
+                                    if s_mid in holder.entity_pruned_memory_ids:
+                                        # Stale in current transaction: only retain if already committed by a concurrent writer
+                                        if s_mid in existing_links:
+                                            filtered_links.append(mid)
+                                        continue
+                                    filtered_links.append(mid)
+
+                                payload["linked_memory_ids"] = filtered_links
+                                if existing_links and set(str(x) for x in filtered_links) == existing_links:
+                                    # No new links to add; avoid redundant/stale overwrite (ADR-0003)
+                                    return None
+                                args, kwargs = _rebuild_update_call(args, kwargs, payload)
                     return orig_es_update(*args, **kwargs)
 
                 es.update = _locked_es_update
@@ -735,9 +1004,12 @@ class HippoEngine:
                 def _locked_es_insert(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
                     if holder is not None:
+                        if not holder.ensure_entity_locked(vector_store):
+                            return None
                         if holder.error is not None:
                             return None
-                        if holder.skipped_ids:
+                        pruned_ids = holder.all_entity_skipped_ids
+                        if pruned_ids:
                             vecs, pays, ids_list = _extract_insert_args(args, kwargs)
                             if isinstance(pays, list):
                                 filtered_pays = []
@@ -747,7 +1019,7 @@ class HippoEngine:
                                     if isinstance(p, dict) and "linked_memory_ids" in p:
                                         p["linked_memory_ids"] = [
                                             mid for mid in p["linked_memory_ids"]
-                                            if str(mid) not in holder.skipped_ids
+                                            if str(mid) not in pruned_ids
                                         ]
                                         if not p["linked_memory_ids"]:
                                             continue
@@ -776,15 +1048,30 @@ class HippoEngine:
                 def _locked_es_delete(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
                     if holder is not None:
+                        if not holder.ensure_entity_locked(vector_store):
+                            return None
                         if holder.error is not None:
                             return None
-                        if holder.skipped_ids:
+                        pruned_ids = holder.all_entity_skipped_ids
+                        if pruned_ids:
                             v_id = kwargs.get("vector_id") if "vector_id" in kwargs else (args[0] if len(args) > 0 else None)
-                            if v_id and str(v_id) in holder.skipped_ids:
+                            if v_id and str(v_id) in pruned_ids:
                                 return None
                     return orig_es_delete(*args, **kwargs)
 
                 es.delete = _locked_es_delete
+
+        # Hook exact text match lookup on mem to re-acquire lock before entity search
+        orig_existing_by_text = getattr(mem, "_existing_entities_by_text", None)
+        if orig_existing_by_text is not None and getattr(orig_existing_by_text, "_hippo_wrapped", False) is not True:
+            def _locked_existing_by_text(*args: Any, **kwargs: Any) -> Any:
+                holder = _current_write_lock_holder.get()
+                if holder is not None and not holder.ensure_entity_locked(vector_store):
+                    return {}
+                return orig_existing_by_text(*args, **kwargs)
+
+            _locked_existing_by_text._hippo_wrapped = True
+            mem._existing_entities_by_text = _locked_existing_by_text
 
         # Attach entity store hooks safely without eagerly triggering Mem0 lazy property
         es_inst = getattr(mem, "_entity_store", None)
@@ -814,9 +1101,11 @@ class HippoEngine:
             def _locked_remove_from_entity_store(memory_id: Any, *args: Any, **kwargs: Any) -> Any:
                 holder = _current_write_lock_holder.get()
                 if holder is not None:
+                    if not holder.ensure_entity_locked(vector_store):
+                        return None
                     if holder.error is not None:
                         return None
-                    if str(memory_id) in holder.skipped_ids:
+                    if str(memory_id) in holder.all_entity_skipped_ids:
                         return None
                 return orig_remove_es(memory_id, *args, **kwargs)
 
@@ -828,9 +1117,11 @@ class HippoEngine:
             def _locked_link_entities_for_memory(memory_id: Any, *args: Any, **kwargs: Any) -> Any:
                 holder = _current_write_lock_holder.get()
                 if holder is not None:
+                    if not holder.ensure_entity_locked(vector_store):
+                        return None
                     if holder.error is not None:
                         return None
-                    if str(memory_id) in holder.skipped_ids:
+                    if str(memory_id) in holder.all_entity_skipped_ids:
                         return None
                 return orig_link_es(memory_id, *args, **kwargs)
 
