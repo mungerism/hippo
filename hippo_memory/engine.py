@@ -234,24 +234,29 @@ class _LazyWriteLockHolder:
     def ensure_entity_locked(self, vector_store: Any = None) -> bool:
         """Acquire write lock for entity linking phase.
 
-        If lock acquisition fails or times out after primary records have already
-        been committed or completed, treat as non-fatal to preserve primary result
-        and avoid raising false failures that induce duplicate client retries (#42).
+        If a *new* entity-phase lock acquisition fails after primary records have
+        already been committed or completed, treat that lock failure as non-fatal
+        to preserve the primary result and avoid duplicate client retries (#42).
+
+        Errors recorded by an earlier primary phase must never be cleared here:
+        they represent an incomplete/uncertain primary transaction and must still
+        propagate to HippoEngine.add so callers such as SpoolWorker can retry.
 
         When aborted, marks entity_linking_aborted=True so all subsequent entity
         hooks (search/insert/update/delete) short-circuit immediately without
         re-attempting lock acquisition or inserting un-deduplicated duplicates.
         Returns True if lock was acquired, False otherwise.
         """
+        if self.error is not None:
+            raise self.error
         if self.entity_linking_aborted:
             return False
         if self._lock_ctx is not None:
             self.revalidate_committed_primary_records(vector_store)
             return True
+
         try:
             self.ensure_locked()
-            self.revalidate_committed_primary_records(vector_store)
-            return True
         except Exception as e:
             if self.primary_completed or self.primary_committed:
                 self.entity_linking_aborted = True
@@ -262,10 +267,19 @@ class _LazyWriteLockHolder:
                     self.agent_id,
                     e,
                 )
-                # Clear holder.error so it does not cause HippoEngine.add to raise a false failure
-                self.error = None
+                # ensure_locked records the acquisition failure in self.error. This is
+                # the one entity-phase error that is intentionally downgraded after a
+                # completed primary write, so clear only this newly-recorded failure.
+                if self.error is e:
+                    self.error = None
                 return False
             raise
+
+        # Keep re-validation outside the acquisition exception handler. Any store
+        # or programming error here is not a lock-contention downgrade and must
+        # propagate instead of being silently converted into an entity abort.
+        self.revalidate_committed_primary_records(vector_store)
+        return True
 
     def release_if_locked(self) -> None:
         if self._lock_ctx is not None:
@@ -544,8 +558,15 @@ def _is_stale_mutation(
     """
     if not hasattr(vector_store, "get"):
         return False
-    # Fail-closed (R5 P1): propagate read errors so transient store failures abort destructive writes and trigger caller retry
-    curr = vector_store.get(vector_id=vector_id)
+    # Fail-closed (R5 P1): preserve the original store error on the holder as
+    # well as re-raising it. Mem0 has mutation paths that may catch internal
+    # persistence exceptions; holder.error lets HippoEngine.add re-raise the
+    # failure after Mem0 returns so upstream workers can safely retry.
+    try:
+        curr = vector_store.get(vector_id=vector_id)
+    except Exception as e:
+        holder.error = e
+        raise
 
     if curr is None:
         return True
