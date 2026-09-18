@@ -516,14 +516,14 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "update"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with self.assertRaises(RuntimeError):
+            self.engine.add(
+                messages=[{"role": "user", "content": "update"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
         raw_update.assert_not_called()
-        self.assertEqual(res["results"], [])
 
     def test_stale_delete_blocks_entity_store_cleanup(self):
         """When a stale delete is skipped, entity_store.delete must also be skipped."""
@@ -672,18 +672,26 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.assertIsNotNone(es)
         self.assertTrue(hasattr(es, "insert"))
 
-    def test_write_lock_released_before_entity_linking(self):
-        """Write lock must be released after primary vector_store/db insert, before entity linking."""
+    def test_write_lock_held_through_entity_linking(self):
+        """Write lock must be released after primary db persistence so remote entity embedding
+        runs outside the lock, and re-acquired upon entity search to guard read-modify-write."""
         mock_vector_store = MagicMock()
         mock_db = MagicMock()
         mock_entity_store = MagicMock()
 
         lock_held_during_vector_insert = []
+        lock_held_during_remote_embed = []
+        lock_held_during_entity_search = []
         lock_held_during_entity_insert = []
 
         def fake_vs_insert(*args, **kwargs):
             holder = _current_write_lock_holder.get()
             lock_held_during_vector_insert.append(holder._lock_ctx is not None if holder else False)
+
+        def fake_es_search_batch(*args, **kwargs):
+            holder = _current_write_lock_holder.get()
+            lock_held_during_entity_search.append(holder._lock_ctx is not None if holder else False)
+            return []
 
         def fake_es_insert(*args, **kwargs):
             holder = _current_write_lock_holder.get()
@@ -691,6 +699,7 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
 
         mock_vector_store.insert = fake_vs_insert
         mock_vector_store.list.return_value = ([], None)
+        mock_entity_store.search_batch = fake_es_search_batch
         mock_entity_store.insert = fake_es_insert
 
         mock_mem0 = MagicMock()
@@ -699,11 +708,16 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         mock_mem0.__dict__["entity_store"] = mock_entity_store
 
         def fake_add(conversation, **params):
-            # Phase 4: vector store insert (lock held)
+            # Phase 6: primary store persistence under lock
             mock_vector_store.insert(vectors=[[0.1]], ids=["mem-1"], payloads=[{"data": "fact"}])
-            # Phase 5: db history
             mock_db.batch_add_history(records=[{"memory_id": "mem-1"}])
-            # Phase 7: entity linking (lock should already be released!)
+
+            # Phase 7b: remote entity embedding (runs OUTSIDE the lock to prevent blocking Hot Path)
+            holder = _current_write_lock_holder.get()
+            lock_held_during_remote_embed.append(holder._lock_ctx is not None if holder else False)
+
+            # Phase 7c-7e: entity search-then-update (re-acquires write lock to prevent lost updates)
+            mock_entity_store.search_batch(queries=["ent-1"])
             mock_entity_store.insert(vectors=[[0.2]], ids=["ent-1"], payloads=[{"linked_memory_ids": ["mem-1"]}])
             return {"results": [{"id": "mem-1"}]}
 
@@ -711,16 +725,436 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "fact"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with patch.object(self.engine, "_write_lock", wraps=self.engine._write_lock) as spy_lock:
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+            # 1. Primary persistence was locked
+            self.assertEqual(lock_held_during_vector_insert, [True])
+            # 2. Remote entity embedding was UNLOCKED (0-lock, does not block Hot Path)
+            self.assertEqual(lock_held_during_remote_embed, [False])
+            # 3. Entity search & insert were LOCKED together (atomic read-modify-write)
+            self.assertEqual(lock_held_during_entity_search, [True])
+            self.assertEqual(lock_held_during_entity_insert, [True])
+            # Exactly 2 lock acquisitions: 1 for primary store, 1 for entity store RMW
+            self.assertEqual(spy_lock.call_count, 2)
 
-        self.assertEqual(lock_held_during_vector_insert, [True])
-        # Entity insert ran outside the lock!
-        self.assertEqual(lock_held_during_entity_insert, [False])
+    def test_hot_path_not_blocked_during_entity_embedding(self):
+        """Hot Path add_explicit must not be blocked when Warm Path runs remote entity embedding."""
+        import time
+
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        warm_embed_started = threading.Event()
+        hot_path_finished = threading.Event()
+
+        def fake_warm_add(conversation, **params):
+            if not params.get("infer", True):
+                mock_vector_store.insert(vectors=[[0.1]], ids=["mem-hot"], payloads=[{"data": "hot"}])
+                return {"results": [{"id": "mem-hot"}]}
+
+            # Phase 6: primary store persistence
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-warm"], payloads=[{"data": "warm"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-warm"}])
+
+            # Phase 7b: simulate slow remote entity embedding (1 second)
+            warm_embed_started.set()
+            # Wait until hot path completes or timeout
+            hot_path_finished.wait(timeout=2.0)
+
+            # Phase 7c-7e: entity lookup and insert
+            mock_entity_store.search_batch(queries=["ent-1"])
+            mock_entity_store.insert(vectors=[[0.2]], ids=["ent-1"], payloads=[{"linked_memory_ids": ["mem-warm"]}])
+            return {"results": [{"id": "mem-warm"}]}
+
+        mock_mem0.add.side_effect = fake_warm_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        warm_res = []
+        hot_res = []
+
+        def run_warm():
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "warm"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+            warm_res.append(res)
+
+        def run_hot():
+            warm_embed_started.wait(timeout=2.0)
+            t0 = time.monotonic()
+            # Hot Path should acquire write lock immediately because primary store lock was released!
+            res = self.engine.add_explicit(
+                text="hot explicit fact",
+                scope="project",
+                project_id="test_proj",
+            )
+            duration = time.monotonic() - t0
+            hot_res.append((res, duration))
+            hot_path_finished.set()
+
+        t_warm = threading.Thread(target=run_warm)
+        t_hot = threading.Thread(target=run_hot)
+
+        t_warm.start()
+        t_hot.start()
+
+        t_hot.join(timeout=3.0)
+        t_warm.join(timeout=3.0)
+
+        self.assertEqual(len(hot_res), 1)
+        res_hot, hot_duration = hot_res[0]
+        # Hot path completed in under 0.5s without being blocked by the 2s wait in entity embedding
+        self.assertLess(hot_duration, 0.5)
+        self.assertEqual(len(warm_res), 1)
+
+    def test_entity_lock_timeout_after_primary_commit_is_non_fatal(self):
+        """Lock timeout during entity linking after primary commit must be non-fatal."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_search = MagicMock(return_value=[])
+        raw_es_insert = MagicMock()
+        mock_entity_store.search_batch = raw_es_search
+        mock_entity_store.insert = raw_es_insert
+
+        def fake_add(conversation, **params):
+            # Phase 6: primary store persistence succeeds
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-1"], payloads=[{"data": "fact"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-1"}])
+
+            # Phase 7c: entity search triggers ensure_entity_locked (times out)
+            mock_entity_store.search_batch(queries=["ent-1"])
+            # Subsequent entity insert hook must short-circuit without re-acquiring lock (#42)
+            mock_entity_store.insert(vectors=[[0.2]], ids=["ent-1"], payloads=[{"linked_memory_ids": ["mem-1"]}])
+            return {"results": [{"id": "mem-1"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        # First write_lock succeeds (for primary store), second write_lock raises HippoLockTimeoutError
+        real_write_lock = self.engine._write_lock
+        call_count = 0
+
+        def fake_write_lock(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                from hippo_memory.exceptions import HippoLockTimeoutError
+                raise HippoLockTimeoutError("Simulated entity lock timeout", identity="test", lock_path="/tmp/lock")
+            return real_write_lock(*args, **kwargs)
+
+        with patch.object(self.engine, "_write_lock", side_effect=fake_write_lock):
+            with self.assertLogs("hippo_memory.engine", level="WARNING") as log_cm:
+                res = self.engine.add(
+                    messages=[{"role": "user", "content": "fact"}],
+                    scope="project",
+                    project_id="test_proj",
+                    infer=True,
+                )
+
+        # 1. Operation succeeded and returned primary commit results
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("results"), [{"id": "mem-1"}])
+        # 2. Warning was logged about entity store write lock failure
+        self.assertTrue(any("Entity store write lock acquisition failed" in msg for msg in log_cm.output))
+        # 3. Lock was only attempted twice (primary store + first entity lookup); no repeated lock attempts
+        self.assertEqual(call_count, 2)
+        # 4. Subsequent entity insert was short-circuited to prevent duplicate entity insertion
+        raw_es_insert.assert_not_called()
+
+    def test_lock_timeout_before_primary_commit_is_fatal(self):
+        """Lock timeout before primary commit must raise HippoLockTimeoutError."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+
+        def fake_add(conversation, **params):
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-1"], payloads=[{"data": "fact"}])
+            return {"results": [{"id": "mem-1"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        from hippo_memory.exceptions import HippoLockTimeoutError
+
+        with patch.object(self.engine, "_write_lock", side_effect=HippoLockTimeoutError("Timeout", identity="test", lock_path="/tmp/lock")):
+            with self.assertRaises(HippoLockTimeoutError):
+                self.engine.add(
+                    messages=[{"role": "user", "content": "fact"}],
+                    scope="project",
+                    project_id="test_proj",
+                    infer=True,
+                )
+
+    def test_entity_lock_timeout_after_primary_dedup_no_op_is_non_fatal(self):
+        """When primary phase skips all candidates via dedup (no-op), entity lock timeout must still be non-fatal."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+
+        # Vector store list returns existing record with matching hash so dedup prunes all candidates
+        existing_rec = MagicMock()
+        existing_rec.payload = {"hash": "existing-hash", "data": "existing fact"}
+        mock_vector_store.list.return_value = ([existing_rec], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_search = MagicMock(return_value=[])
+        raw_es_insert = MagicMock()
+        mock_entity_store.search_batch = raw_es_search
+        mock_entity_store.insert = raw_es_insert
+
+        def fake_add(conversation, **params):
+            # Phase 6: vector_store insert called, but dedup prunes it -> returns []
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-dup"], payloads=[{"hash": "existing-hash", "data": "existing fact"}])
+            # Phase 7: entity search triggers ensure_entity_locked (times out)
+            mock_entity_store.search_batch(queries=["ent-1"])
+            return {"results": []}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        real_write_lock = self.engine._write_lock
+        call_count = 0
+
+        def fake_write_lock(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                from hippo_memory.exceptions import HippoLockTimeoutError
+                raise HippoLockTimeoutError("Simulated entity lock timeout", identity="test", lock_path="/tmp/lock")
+            return real_write_lock(*args, **kwargs)
+
+        with patch.object(self.engine, "_write_lock", side_effect=fake_write_lock):
+            with self.assertLogs("hippo_memory.engine", level="WARNING") as log_cm:
+                res = self.engine.add(
+                    messages=[{"role": "user", "content": "existing fact"}],
+                    scope="project",
+                    project_id="test_proj",
+                    infer=True,
+                )
+
+        # Must succeed and return empty results instead of raising HippoLockTimeoutError
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("results"), [])
+        self.assertTrue(any("Entity store write lock acquisition failed" in msg for msg in log_cm.output))
+        raw_es_insert.assert_not_called()
+
+    def test_entity_linking_revalidates_primary_records_and_prunes_concurrently_deleted(self):
+        """Primary records concurrently deleted during zero-lock window must be pruned before entity linking."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_insert = MagicMock()
+        mock_entity_store.insert = raw_es_insert
+        mock_entity_store.search_batch = MagicMock(return_value=[])
+
+        # State tracking: memory exists during Phase 6, but deleted before Phase 7
+        is_deleted = False
+
+        def fake_vs_get(vector_id):
+            if is_deleted and vector_id == "mem-deleted":
+                return None
+            return MagicMock(payload={"data": "fact", "hash": "h1"})
+
+        mock_vector_store.get.side_effect = fake_vs_get
+
+        def fake_add(conversation, **params):
+            nonlocal is_deleted
+            # Phase 6: primary store persistence succeeds
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-deleted"], payloads=[{"data": "fact", "hash": "h1"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-deleted"}])
+
+            # Phase 7b: concurrent delete happens during zero-lock window!
+            is_deleted = True
+
+            # Phase 7c: entity linking executes under re-acquired write lock
+            mock_entity_store.insert(
+                vectors=[[0.2]],
+                ids=["ent-1"],
+                payloads=[{"linked_memory_ids": ["mem-deleted"]}],
+            )
+            return {"results": [{"id": "mem-deleted"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertLogs("hippo_memory.engine", level="WARNING") as log_cm:
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+
+        # Entity insert must be pruned because linked_memory_ids became empty!
+        raw_es_insert.assert_not_called()
+        self.assertTrue(any("was concurrently deleted before entity linking" in msg for msg in log_cm.output))
+        # Committed primary records must NOT be marked skipped in API results (#42)
+        self.assertEqual(res["results"], [{"id": "mem-deleted"}])
+
+    def test_entity_linking_revalidates_primary_records_and_prunes_concurrently_mutated(self):
+        """Primary records concurrently mutated or superseded during zero-lock window must be pruned from new links."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_update = MagicMock()
+        mock_entity_store.update = raw_es_update
+        mock_entity_store.search_batch = MagicMock(return_value=[])
+
+        # Existing entity ent-1 only contains existing-1
+        existing_ent = MagicMock(payload={"linked_memory_ids": ["existing-1"]})
+        mock_entity_store.get = MagicMock(return_value=existing_ent)
+
+        # State tracking: memory version mutated before Phase 7
+        is_mutated = False
+
+        def fake_vs_get(vector_id):
+            if is_mutated:
+                return MagicMock(payload={"data": "mutated fact", "hash": "mutated-hash", "updated_at": "2099-01-01T00:00:00Z"})
+            return MagicMock(payload={"data": "fact", "hash": "orig-hash"})
+
+        mock_vector_store.get.side_effect = fake_vs_get
+
+        def fake_add(conversation, **params):
+            nonlocal is_mutated
+            # Phase 6: primary store persistence succeeds
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-mutated"], payloads=[{"data": "fact", "hash": "orig-hash"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-mutated"}])
+
+            # Phase 7b: concurrent update happens during zero-lock window!
+            is_mutated = True
+
+            # Phase 7c: entity linking attempts to update entity with new existing-2 and stale mem-mutated
+            payload = {"linked_memory_ids": ["existing-1", "existing-2", "mem-mutated"]}
+            mock_entity_store.update(vector_id="ent-1", payload=payload)
+            return {"results": [{"id": "mem-mutated"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertLogs("hippo_memory.engine", level="WARNING") as log_cm:
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+
+        # Entity update must prune stale mem-mutated while adding valid new existing-2!
+        raw_es_update.assert_called_once()
+        call_kwargs = raw_es_update.call_args[1]
+        self.assertEqual(call_kwargs["payload"]["linked_memory_ids"], ["existing-1", "existing-2"])
+        self.assertTrue(any("was concurrently modified" in msg for msg in log_cm.output))
+        # Committed primary records must NOT be marked skipped in API results (#42)
+        self.assertEqual(res["results"], [{"id": "mem-mutated"}])
+
+    def test_entity_linking_preserves_concurrently_updated_links_on_existing_entity(self):
+        """When concurrent writer has already linked memory to entity, re-locking phase must not strip that link."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_update = MagicMock()
+        mock_entity_store.update = raw_es_update
+        mock_entity_store.search_batch = MagicMock(return_value=[])
+
+        # Concurrent writer already updated ent-1 in entity store with mem-concurrent!
+        existing_ent = MagicMock(payload={"linked_memory_ids": ["existing-1", "mem-concurrent"]})
+        mock_entity_store.get = MagicMock(return_value=existing_ent)
+
+        is_mutated = False
+
+        def fake_vs_get(vector_id):
+            if is_mutated:
+                return MagicMock(payload={"data": "mutated fact", "hash": "mutated-hash", "updated_at": "2099-01-01T00:00:00Z"})
+            return MagicMock(payload={"data": "fact", "hash": "orig-hash"})
+
+        mock_vector_store.get.side_effect = fake_vs_get
+
+        def fake_add(conversation, **params):
+            nonlocal is_mutated
+            # Phase 6: primary store persistence succeeds
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-concurrent"], payloads=[{"data": "fact", "hash": "orig-hash"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-concurrent"}])
+
+            # Phase 7b: concurrent update happens during zero-lock window and updates entity_store
+            is_mutated = True
+
+            # Phase 7c: current transaction reads latest match from entity_store
+            payload = {"linked_memory_ids": ["existing-1", "mem-concurrent"]}
+            mock_entity_store.update(vector_id="ent-1", payload=payload)
+            return {"results": [{"id": "mem-concurrent"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertLogs("hippo_memory.engine", level="WARNING") as log_cm:
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+
+        # Because existing_ent already contains mem-concurrent and no new links exist,
+        # update must short-circuit without overwriting or stripping the link!
+        raw_es_update.assert_not_called()
+        self.assertTrue(any("was concurrently modified" in msg for msg in log_cm.output))
+        self.assertEqual(res["results"], [{"id": "mem-concurrent"}])
 
     def test_dedup_paginated_lookup_finds_match_beyond_first_page(self):
         """Dedup re-validation must paginate through backing store to find duplicates on later pages."""
@@ -1343,6 +1777,276 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         raw_insert.assert_called_once()
         self.assertEqual(len(res["results"]), 1)
         self.assertEqual(res["results"][0]["id"], "mem-derived")
+
+    def test_vector_store_update_positional_arguments_recorded_accurately(self):
+        """Official 3-arg positional vector_store.update(id, vector, payload) records version accurately."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_update = MagicMock()
+        mock_entity_store.update = raw_es_update
+        mock_entity_store.search_batch = MagicMock(return_value=[])
+
+        existing_ent = MagicMock(payload={"linked_memory_ids": ["existing-1"]})
+        mock_entity_store.get = MagicMock(return_value=existing_ent)
+
+        primary_payload = {"data": "updated fact", "hash": "updated-hash-1"}
+        mock_vector_store.get.return_value = MagicMock(payload=primary_payload)
+
+        def fake_add(conversation, **params):
+            # Phase 6: primary store update called with official 3-argument positional signature:
+            # update(vector_id, vector, payload)
+            mock_vector_store.update("mem-upd", [0.1, 0.2, 0.3], primary_payload)
+            mock_db.batch_add_history(records=[{"memory_id": "mem-upd"}])
+
+            # Phase 7: entity linking links the updated memory
+            mock_entity_store.update(
+                vector_id="ent-1",
+                payload={"linked_memory_ids": ["existing-1", "mem-upd"]},
+            )
+            return {"results": [{"id": "mem-upd", "event": "UPDATE"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        res = self.engine.add(
+            messages=[{"role": "user", "content": "update"}],
+            scope="project",
+            project_id="test_proj",
+            infer=True,
+        )
+
+        # Re-validation must find committed_primary_versions["mem-upd"] matching vector_store.get
+        # so mem-upd is NOT falsely pruned!
+        raw_es_update.assert_called_once()
+        call_kwargs = raw_es_update.call_args[1]
+        self.assertEqual(call_kwargs["payload"]["linked_memory_ids"], ["existing-1", "mem-upd"])
+        self.assertEqual(res["results"], [{"id": "mem-upd", "event": "UPDATE"}])
+
+    def test_entity_store_update_positional_arguments_rebuilds_cleanly(self):
+        """Official 3-arg positional entity_store.update(id, vector, payload) rebuilds pruned payload in args[2]."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_update = MagicMock()
+        mock_entity_store.update = raw_es_update
+        mock_entity_store.search_batch = MagicMock(return_value=[])
+
+        existing_ent = MagicMock(payload={"linked_memory_ids": ["existing-1"]})
+        mock_entity_store.get = MagicMock(return_value=existing_ent)
+
+        is_mutated = False
+
+        def fake_vs_get(vector_id):
+            if is_mutated:
+                return MagicMock(payload={"data": "mutated", "hash": "mutated-hash"})
+            return MagicMock(payload={"data": "fact", "hash": "orig-hash"})
+
+        mock_vector_store.get.side_effect = fake_vs_get
+
+        def fake_add(conversation, **params):
+            nonlocal is_mutated
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-pos"], payloads=[{"data": "fact", "hash": "orig-hash"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-pos"}])
+
+            # Concurrent mutation during zero-lock window
+            is_mutated = True
+
+            # Phase 7: entity store called with 3 positional arguments: (vector_id, vector, payload)
+            mock_entity_store.update(
+                "ent-1",
+                [0.5, 0.6],
+                {"linked_memory_ids": ["existing-1", "valid-ext", "mem-pos"]},
+            )
+            return {"results": [{"id": "mem-pos"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertLogs("hippo_memory.engine", level="WARNING"):
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+
+        # args[2] must be rebuilt with mem-pos pruned and valid-ext retained
+        raw_es_update.assert_called_once()
+        passed_args = raw_es_update.call_args[0]
+        self.assertEqual(passed_args[0], "ent-1")
+        self.assertEqual(passed_args[1], [0.5, 0.6])
+        self.assertEqual(passed_args[2]["linked_memory_ids"], ["existing-1", "valid-ext"])
+        self.assertEqual(res["results"], [{"id": "mem-pos"}])
+
+    def test_entity_store_update_two_arg_positional_dict_rebuilds_cleanly(self):
+        """Two-arg positional entity_store.update(id, payload_dict) rebuilds pruned payload in args[1]."""
+        mock_vector_store = MagicMock()
+        mock_db = MagicMock()
+        mock_entity_store = MagicMock()
+        mock_vector_store.list.return_value = ([], None)
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.db = mock_db
+        mock_mem0.__dict__["entity_store"] = mock_entity_store
+
+        raw_es_update = MagicMock()
+        mock_entity_store.update = raw_es_update
+        mock_entity_store.search_batch = MagicMock(return_value=[])
+
+        existing_ent = MagicMock(payload={"linked_memory_ids": ["existing-1"]})
+        mock_entity_store.get = MagicMock(return_value=existing_ent)
+
+        is_mutated = False
+
+        def fake_vs_get(vector_id):
+            if is_mutated:
+                return MagicMock(payload={"data": "mutated", "hash": "mutated-hash"})
+            return MagicMock(payload={"data": "fact", "hash": "orig-hash"})
+
+        mock_vector_store.get.side_effect = fake_vs_get
+
+        def fake_add(conversation, **params):
+            nonlocal is_mutated
+            mock_vector_store.insert(vectors=[[0.1]], ids=["mem-pos2"], payloads=[{"data": "fact", "hash": "orig-hash"}])
+            mock_db.batch_add_history(records=[{"memory_id": "mem-pos2"}])
+
+            is_mutated = True
+
+            # Phase 7: entity store called with 2 positional arguments: (vector_id, payload)
+            mock_entity_store.update(
+                "ent-1",
+                {"linked_memory_ids": ["existing-1", "valid-ext", "mem-pos2"]},
+            )
+            return {"results": [{"id": "mem-pos2"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertLogs("hippo_memory.engine", level="WARNING"):
+            res = self.engine.add(
+                messages=[{"role": "user", "content": "fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
+
+        # args[1] must be rebuilt with mem-pos2 pruned and valid-ext retained
+        raw_es_update.assert_called_once()
+        passed_args = raw_es_update.call_args[0]
+        self.assertEqual(passed_args[0], "ent-1")
+        self.assertEqual(passed_args[1]["linked_memory_ids"], ["existing-1", "valid-ext"])
+        self.assertEqual(res["results"], [{"id": "mem-pos2"}])
+
+    def test_r5_p1_stale_mutation_check_propagates_read_error(self):
+        """R5 P1: When vector_store.get fails during stale mutation check, error must be propagated
+        to fail closed and trigger caller retry, never silently allowing destructive writes."""
+        mock_vector_store = MagicMock()
+        raw_del = MagicMock()
+        mock_vector_store.delete = raw_del
+        mock_vector_store.get.side_effect = RuntimeError("transient storage network failure")
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+
+        def fake_add(*a, **kw):
+            mock_vector_store.delete(vector_id="mem-fail")
+            return {"results": [{"id": "mem-fail", "event": "DELETE"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self.engine.add(text="x", project_id="p", infer=True)
+        self.assertIn("transient storage network failure", str(ctx.exception))
+        raw_del.assert_not_called()
+
+    def test_r5_p2_stale_delete_aborts_entity_side_effects(self):
+        """R5 P2: When stale check skips DELETE, all subsequent entity deletion/cleanup
+        side effects must also be aborted to prevent data inconsistency."""
+        mock_vector_store = MagicMock()
+        raw_del = MagicMock()
+        mock_vector_store.delete = raw_del
+        rec = MagicMock(payload={"updated_at": "2099-01-01T00:00:00+00:00"})
+        mock_vector_store.get.return_value = rec
+
+        mock_entity_store = MagicMock()
+        raw_ed = MagicMock()
+        mock_entity_store.delete = raw_ed
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.entity_store = mock_entity_store
+
+        def fake_add(*a, **kw):
+            mock_mem0.vector_store.delete(vector_id="mem-stale")
+            mock_mem0.entity_store.delete(vector_id="entity-to-remove")
+            return {"results": [{"id": "mem-stale", "event": "DELETE"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        res = self.engine.add(text="x", project_id="p", infer=True)
+        self.assertEqual(res.get("results"), [])
+        self.assertFalse(raw_del.called, "Primary memory should NOT be deleted!")
+        self.assertFalse(raw_ed.called, "Entity should NOT be deleted when primary delete was stale!")
+
+    def test_r5_p2_all_pruned_entities_skip_insert(self):
+        """R5 P2: When all linked memories for an entity are pruned, entity_store.insert
+        must be skipped entirely instead of persisting orphan entities with empty links."""
+        mock_vector_store = MagicMock()
+        dup_item = MagicMock(payload={"hash": "dup-hash", "data": "dup fact"})
+        mock_vector_store.list.return_value = ([dup_item], None)
+
+        mock_entity_store = MagicMock()
+        raw_es_insert = MagicMock()
+        mock_entity_store.insert = raw_es_insert
+
+        mock_mem0 = MagicMock()
+        mock_mem0.vector_store = mock_vector_store
+        mock_mem0.entity_store = mock_entity_store
+
+        def fake_add(*a, **kw):
+            mock_vector_store.insert(
+                vectors=[[0.1]],
+                ids=["mem-dup"],
+                payloads=[{"hash": "dup-hash", "data": "dup fact"}],
+            )
+            mock_entity_store.insert(
+                vectors=[[0.2]],
+                ids=["ent-1"],
+                payloads=[{"data": "ent", "linked_memory_ids": ["mem-dup"]}],
+            )
+            return {"results": [{"id": "mem-dup"}]}
+
+        mock_mem0.add.side_effect = fake_add
+        self.engine._memory = mock_mem0
+        self.engine._hook_memory_persistence(mock_mem0)
+
+        res = self.engine.add(text="dup fact", project_id="p", infer=True)
+        self.assertEqual(res.get("results"), [])
+        self.assertFalse(raw_es_insert.called, "raw_es_insert must NOT be called for orphan entities!")
+
 
 
 
