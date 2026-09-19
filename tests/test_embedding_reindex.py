@@ -237,7 +237,10 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
 
         mock_target_store = MagicMock()
         mock_embedder = MagicMock()
-        mock_embedder.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+        mock_embedder.embed_batch.side_effect = [
+            [[0.1] * 768, [0.2] * 768],
+            [[0.3] * 768],
+        ]
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
              patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
@@ -376,7 +379,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_target_store.insert.assert_not_called()
 
     def test_generated_vector_dimension_mismatch_fails_fast(self):
-        self.mock_client.collection_exists.return_value = True
+        self.mock_client.collection_exists.side_effect = (
+            lambda name: name in ("hippo_memories", "target_col")
+        )
         source_records = [
             Record(id="mem-1", payload={"data": "test text"}),
         ]
@@ -406,7 +411,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
 
     def test_source_collection_untouched(self):
         # Verify source collection is never mutated (no delete/clear/upsert on source)
-        self.mock_client.collection_exists.return_value = True
+        self.mock_client.collection_exists.side_effect = (
+            lambda name: name in ("hippo_memories", "target_col")
+        )
         source_records = [
             Record(id="mem-1", payload={"data": "sample"}),
         ]
