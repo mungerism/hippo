@@ -18,6 +18,43 @@
 - **零外部服务依赖**：基于嵌入式 Qdrant 本地文件存储（`~/.hippo/storage/qdrant`），无需 Docker 或单独数据库守护进程。
 - **多模型灵活适配**：支持 Google Gemini Developer API、Google Vertex AI（ADC）或 OpenAI；Vertex AI 可使用 `gemini-embedding-2`。
 - **终端快捷 CLI**：提供 `hippo` 命令行工具，随时手工查阅、新增、删除与诊断。
+- **Docs as Code 文档中心**：采用 VitePress 打造体系化私有文档站（系统架构、ADR 决策、RFC 提案、实施计划、运维手册与调研知识库），支持 Tailscale 私网秒级查阅。
+
+---
+
+## 📚 文档中心 (Docs as Code)
+
+Hippo 遵循统一的 Docs as Code 规范，所有架构设计、决策记录与运维手册均沉淀在 [`docs/`](docs/) 目录中，并通过 VitePress 构建为静态文档站（`base: '/hippo/'`）：
+
+- **系统架构**：[`docs/architecture/`](docs/architecture/)（分层数据流与多宿主契约矩阵）
+- **架构决策 (ADR)**：[`docs/adr/`](docs/adr/)（捕获 0001~0004 核心技术选型与边界）
+- **技术提案 (RFC)**：[`docs/rfcs/`](docs/rfcs/)（中大型需求与方案设计）
+- **实施计划 (Plans)**：[`docs/plans/`](docs/plans/)（开发任务拆解与进度管理）
+- **运维与排障手册**：[`docs/runbooks/`](docs/runbooks/)（Qdrant 部署运维、Doctor 巡检与记忆迁移手册）
+- **领域知识库**：[`docs/knowledge/`](docs/knowledge/)（Codex / Mem0 / 会话蒸馏深度技术调研）
+- **Agent 协同契约**：[`docs/agents/`](docs/agents/)（AI Agent 协同行为准则与记忆约定）
+
+### 本地开发与预览
+```bash
+# 安装文档依赖
+pnpm --dir docs install
+
+# 本地热重载预览
+pnpm --dir docs run dev
+
+# 静态构建检查
+pnpm --dir docs run build
+```
+
+### 私有 VPS 一键部署 (Tailscale 局域网访问)
+```bash
+# 一键构建并同步至 VPS (dedirock:/opt/docs/hippo/)
+./scripts/deploy-docs-to-vps.sh
+```
+部署后通过 Tailscale 私网秒级直达（零公网暴露）：
+- **Hippo 文档站**：`http://100.81.230.23/hippo/` 或 `http://dmit-lax-as3.perch-rainbow.ts.net/hippo/`
+- **统一文档大厅**：`http://100.81.230.23/`
+
 
 ---
 

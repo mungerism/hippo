@@ -83,3 +83,29 @@ jobs:
         run: |
           ls -lh dist/
           tar -ztvf dist/*.tar.gz | grep "integrations/pi/hippo-memory.ts"
+
+  docs:
+    name: Docs as Code (VitePress Build & Link Gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+          cache-dependency-path: "docs/pnpm-lock.yaml"
+
+      - name: Install documentation dependencies
+        run: pnpm --dir docs install
+
+      - name: Build VitePress documentation site
+        run: pnpm --dir docs run build
+

@@ -48,3 +48,9 @@ qdrant_storage/
 *.swo
 .qdrant-initialized
 *.ses
+
+# Node & VitePress
+node_modules/
+.vitepress/dist/
+.vitepress/cache/
+
