@@ -107,6 +107,7 @@ export default defineConfig({
             { text: '知识库概览', link: '/knowledge/' },
             { text: 'Codex 记忆机制深度调研', link: '/knowledge/codex-memory-research' },
             { text: '会话记忆蒸馏工程调研', link: '/knowledge/session-distill-research' },
+            { text: 'Cold Path 记忆固化与索引设计', link: '/knowledge/cold-path-consolidation-design' },
             { text: 'Mem0 内部机制与边界剖析', link: '/knowledge/mem0-deep-dive' },
           ],
         },
