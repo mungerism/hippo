@@ -492,6 +492,138 @@ def migrate_zcode():
 
     migrate_zcode_all()
 
+
+@app.command()
+def reindex(
+    source: Optional[str] = typer.Option(None, "--source", "-s", help="源 Qdrant Collection 名称（缺省时自动推导历史源集合）"),
+    target: Optional[str] = typer.Option(None, "--target", "-t", help="目标 Qdrant Collection 名称（缺省时按目标 Profile 自动命名）"),
+    provider: Optional[str] = typer.Option(None, "--target-provider", "-p", help="目标 Provider: vertexai | gemini | openai"),
+    model: Optional[str] = typer.Option(None, "--target-model", "-m", help="目标 Embedding 模型名称"),
+    dims: Optional[int] = typer.Option(None, "--target-dims", "-d", help="目标向量维度 (如 768, 1536)"),
+    batch_size: int = typer.Option(32, "--batch-size", "-b", help="每批处理并写入的记录数"),
+    recompute_existing: bool = typer.Option(False, "--recompute-existing", help="对目标端已存在且 payload 一致的记录强制重新生成向量"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="预览迁移规模与目标配置，不执行向量生成与写入"),
+):
+    """跨向量模型与 Provider 迁移历史记忆（Embedding Reindex / Migration）。
+
+    安全将源 Collection 中的记忆文本重新计算目标模型的向量并导入目标 Collection。
+    源 Collection 保持只读且绝不就地修改；支持伴生实体集合同构迁移、断点续传与冲突阻断。
+    注意：执行实际迁移时，请确保源端与目标端写入处于静止状态（quiescent）。
+    """
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    from hippo_memory.reindex import EmbeddingMigrator
+
+    migrator = EmbeddingMigrator()
+    try:
+        plan = migrator.plan(
+            source_collection=source,
+            target_collection=target,
+            target_provider=provider,
+            target_model=model,
+            target_dims=dims,
+            batch_size=batch_size,
+        )
+    except Exception as e:
+        console.print(f"[bold red]✗ 计划生成失败:[/bold red] {e}")
+        raise typer.Exit(1)
+
+    mode_label = "[bold yellow]DRY-RUN 预览模式[/bold yellow]" if dry_run else "[bold green]执行迁移[/bold green]"
+    console.print(f"[bold cyan]🦛 Hippo 向量重建与迁移 (Reindex) | {mode_label}[/bold cyan]")
+
+    plan_table = Table(title="迁移配置与统计预检", show_header=False)
+    plan_table.add_column("属性", style="cyan")
+    plan_table.add_column("值", justify="right")
+    plan_table.add_row("源集合 (Source)", plan.source_collection)
+    plan_table.add_row("目标集合 (Target)", plan.target_collection)
+    plan_table.add_row(
+        "目标 Profile",
+        f"{plan.target_profile.provider} / {plan.target_profile.model} / {plan.target_profile.dimensions}d",
+    )
+    plan_table.add_row("源主记录数", str(plan.source_points_count))
+    if plan.source_entities_collection:
+        plan_table.add_row("源伴生实体集合", plan.source_entities_collection)
+        plan_table.add_row("源伴生实体数", str(plan.source_entities_count))
+    plan_table.add_row("目标端已存主记录数", str(plan.target_existing_points_count))
+    if plan.target_entities_collection:
+        plan_table.add_row("目标端已存实体数", str(plan.target_existing_entities_count))
+    plan_table.add_row("处理批大小 (batch-size)", str(plan.batch_size))
+    console.print(plan_table)
+
+    if dry_run:
+        console.print("[bold yellow]✓ DRY-RUN 预览结束：未产生任何 Embedder 调用与写入。[/bold yellow]")
+        return
+
+    if plan.total_source_records == 0:
+        console.print("[yellow]⚠ 源集合为空，无需迁移。[/yellow]")
+        return
+
+    result = None
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task_bar = progress.add_task("[green]迁移中...", total=plan.total_source_records)
+
+        def _cb(count: int):
+            progress.advance(task_bar, count)
+
+        try:
+            result = migrator.migrate(
+                source_collection=source,
+                target_collection=target,
+                target_provider=provider,
+                target_model=model,
+                target_dims=dims,
+                batch_size=batch_size,
+                recompute_existing=recompute_existing,
+                dry_run=False,
+                progress_callback=_cb,
+            )
+        except Exception as e:
+            console.print(f"[bold red]✗ 迁移异常中断:[/bold red] {e}")
+            raise typer.Exit(1)
+
+    result_table = Table(title="迁移结果统计", show_header=False)
+    result_table.add_column("指标", style="cyan")
+    result_table.add_column("数量", justify="right")
+    labels = {
+        "scanned": "scanned（总扫描记录数）",
+        "migrated": "migrated（成功写入数）",
+        "skipped": "skipped（断点续传跳过数）",
+        "conflicted": "conflicted（Payload 冲突数）",
+        "failed": "failed（失败记录数）",
+    }
+    for k, v in result.stats().items():
+        color = "red" if k in ("conflicted", "failed") and v > 0 else "green" if k == "migrated" and v > 0 else "dim"
+        result_table.add_row(labels.get(k, k), f"[{color}]{v}[/{color}]")
+    console.print(result_table)
+
+    if result.conflicted > 0:
+        console.print("[bold red]⚠ 发现 Payload 冲突记录（已阻断覆写，源目标不一致）:[/bold red]")
+        for detail in result.details[:10]:
+            if detail.get("status") == "conflicted":
+                console.print(
+                    f"  • ID: [bold]{detail['id']}[/bold] | "
+                    f"{detail.get('reason', 'payload conflict')}"
+                )
+        if len(result.conflict_ids) > 10:
+            console.print(f"  ... 另有 {len(result.conflict_ids) - 10} 条冲突记录未展开")
+
+    if result.errors:
+        console.print("[bold red]✗ 迁移校验/处理错误:[/bold red]")
+        for err in result.errors[:5]:
+            console.print(f"  • {err}")
+
+    if not result.success:
+        console.print("[bold red]✗ 迁移未完全成功（存在冲突或失败项，退出码 1）。[/bold red]")
+        raise typer.Exit(1)
+
+    console.print("[bold green]✓ 向量重建与迁移全部完成！源集合完整保留，随时可作为回滚基准。[/bold green]")
+
 hook_app = typer.Typer(
     name="hook",
     help="🪝 宿主生命周期 Hook 与异步 Spool 蒸馏流水线。",
