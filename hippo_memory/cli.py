@@ -604,14 +604,17 @@ def reindex(
 
     if result.conflicted > 0:
         console.print("[bold red]⚠ 发现 Payload 冲突记录（已阻断覆写，源目标不一致）:[/bold red]")
-        for c in result.details[:10]:
-            if c.get("status") == "conflicted":
-                console.print(f"  • ID: [bold]{c['id']}[/bold] | src: {c.get('source_data', '')} | dst: {c.get('target_data', '')}")
+        for detail in result.details[:10]:
+            if detail.get("status") == "conflicted":
+                console.print(
+                    f"  • ID: [bold]{detail['id']}[/bold] | "
+                    f"{detail.get('reason', 'payload conflict')}"
+                )
         if len(result.conflict_ids) > 10:
             console.print(f"  ... 另有 {len(result.conflict_ids) - 10} 条冲突记录未展开")
 
-    if result.failed > 0:
-        console.print("[bold red]✗ 迁移中出现不可恢复错误:[/bold red]")
+    if result.errors:
+        console.print("[bold red]✗ 迁移校验/处理错误:[/bold red]")
         for err in result.errors[:5]:
             console.print(f"  • {err}")
 
