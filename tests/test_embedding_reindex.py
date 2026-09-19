@@ -21,6 +21,7 @@ from hippo_memory.reindex import (
     is_transient_error,
     payloads_match,
     retry_with_backoff,
+    validate_embedding_batch,
 )
 
 
@@ -75,6 +76,30 @@ class TestPayloadMatchingAndHelpers(unittest.TestCase):
         # Different user
         p4 = {"data": "test memory", "hash": "h1", "user_id": "u2", "agent_id": "a1"}
         self.assertFalse(payloads_match(p1, p4))
+
+        # Any metadata/linkage divergence is a conflict, including entity links.
+        entity_a = {
+            "data": "Python",
+            "entity_type": "tech",
+            "linked_memory_ids": ["mem-1"],
+            "updated_at": "2026-09-19T00:00:00Z",
+        }
+        entity_b = {
+            **entity_a,
+            "linked_memory_ids": ["mem-1", "mem-2"],
+        }
+        self.assertFalse(payloads_match(entity_a, entity_b))
+
+    def test_validate_embedding_batch_checks_count_and_every_dimension(self):
+        with self.assertRaisesRegex(HippoValidationError, "1 vectors for 2"):
+            validate_embedding_batch([[0.1] * 768], expected_count=2, expected_dims=768)
+
+        with self.assertRaisesRegex(HippoValidationError, "index 1"):
+            validate_embedding_batch(
+                [[0.1] * 768, [0.2] * 256],
+                expected_count=2,
+                expected_dims=768,
+            )
 
     def test_is_transient_error(self):
         self.assertTrue(is_transient_error(Exception("429 Resource Exhausted")))
@@ -215,7 +240,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_embedder.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
-             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder):
+             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
+             patch.object(self.migrator, "get_collection_points_count", side_effect=[2, 1]), \
+             patch.object(self.migrator, "_verify_collection_after_migration", return_value=None):
 
             result = self.migrator.migrate(
                 source_collection="hippo_memories",
@@ -258,7 +285,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_embedder.embed_batch.return_value = [[0.2] * 768]
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
-             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder):
+             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
+             patch.object(self.migrator, "get_collection_points_count", side_effect=[2]), \
+             patch.object(self.migrator, "_verify_collection_after_migration", return_value=None):
 
             result = self.migrator.migrate(
                 source_collection="hippo_memories",
@@ -293,7 +322,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_embedder.embed_batch.return_value = [[0.5] * 768]
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
-             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder):
+             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
+             patch.object(self.migrator, "get_collection_points_count", side_effect=[1]), \
+             patch.object(self.migrator, "_verify_collection_after_migration", return_value=None):
 
             result = self.migrator.migrate(
                 source_collection="hippo_memories",
@@ -325,7 +356,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_embedder = MagicMock()
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
-             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder):
+             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
+             patch.object(self.migrator, "get_collection_points_count", side_effect=[1]), \
+             patch.object(self.migrator, "_verify_collection_after_migration", return_value=None):
 
             result = self.migrator.migrate(
                 source_collection="hippo_memories",
@@ -356,15 +389,20 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_embedder.embed_batch.return_value = [[0.1] * 256]
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
-             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder):
+             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
+             patch.object(self.migrator, "get_collection_points_count", side_effect=[1]), \
+             patch.object(self.migrator, "_verify_collection_after_migration", return_value=None):
 
-            with self.assertRaises(HippoValidationError):
-                self.migrator.migrate(
-                    source_collection="hippo_memories",
-                    target_collection="target_col",
-                    target_provider="vertexai",
-                    target_dims=768,
-                )
+            result = self.migrator.migrate(
+                source_collection="hippo_memories",
+                target_collection="target_col",
+                target_provider="vertexai",
+                target_dims=768,
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failed, 1)
+        mock_target_store.insert.assert_not_called()
 
     def test_source_collection_untouched(self):
         # Verify source collection is never mutated (no delete/clear/upsert on source)
@@ -380,7 +418,9 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
         mock_embedder.embed_batch.return_value = [[0.1] * 768]
 
         with patch.object(self.migrator, "build_target_vector_store", return_value=mock_target_store), \
-             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder):
+             patch.object(self.migrator, "build_target_embedder", return_value=mock_embedder), \
+             patch.object(self.migrator, "get_collection_points_count", side_effect=[1]), \
+             patch.object(self.migrator, "_verify_collection_after_migration", return_value=None):
 
             self.migrator.migrate(
                 source_collection="hippo_memories",
@@ -395,6 +435,200 @@ class TestEmbeddingMigratorWorkflow(unittest.TestCase):
             if name in ("upsert", "delete", "clear_payload", "overwrite_payload"):
                 collection = kwargs.get("collection_name") or (args[0] if args else None)
                 self.assertNotEqual(collection, "hippo_memories")
+
+
+    def test_target_retrieve_failure_fails_closed_before_write(self):
+        self.mock_client.collection_exists.side_effect = (
+            lambda name: name in ("hippo_memories", "target_col")
+        )
+        self.mock_client.scroll.return_value = (
+            [Record(id="mem-1", payload={"data": "memory one"})],
+            None,
+        )
+        self.mock_client.retrieve.side_effect = Exception("503 Service Unavailable")
+
+        mock_target_store = MagicMock()
+        mock_embedder = MagicMock()
+        with patch.object(
+            self.migrator, "build_target_vector_store", return_value=mock_target_store
+        ), patch.object(
+            self.migrator, "build_target_embedder", return_value=mock_embedder
+        ), patch.object(
+            self.migrator, "get_collection_points_count", side_effect=[1]
+        ), patch.object(
+            self.migrator, "_verify_collection_after_migration", return_value=None
+        ), patch("time.sleep", return_value=None):
+            with self.assertRaisesRegex(HippoValidationError, "Cannot verify existing target"):
+                self.migrator.migrate(
+                    source_collection="hippo_memories",
+                    target_collection="target_col",
+                    target_provider="vertexai",
+                    target_dims=768,
+                )
+
+        mock_target_store.insert.assert_not_called()
+
+    def test_batch_embedding_count_mismatch_falls_back_per_record(self):
+        self.mock_client.collection_exists.side_effect = lambda name: name == "hippo_memories"
+        self.mock_client.scroll.return_value = (
+            [
+                Record(id="mem-1", payload={"data": "one"}),
+                Record(id="mem-2", payload={"data": "two"}),
+            ],
+            None,
+        )
+        mock_target_store = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.embed_batch.return_value = [[0.1] * 768]
+        mock_embedder.embed.side_effect = [[0.2] * 768, [0.3] * 768]
+
+        with patch.object(
+            self.migrator, "build_target_vector_store", return_value=mock_target_store
+        ), patch.object(
+            self.migrator, "build_target_embedder", return_value=mock_embedder
+        ), patch.object(
+            self.migrator, "get_collection_points_count", side_effect=[2]
+        ), patch.object(
+            self.migrator, "_verify_collection_after_migration", return_value=None
+        ):
+            result = self.migrator.migrate(
+                source_collection="hippo_memories",
+                target_provider="vertexai",
+                target_dims=768,
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.migrated, 2)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(mock_embedder.embed.call_count, 2)
+        self.assertEqual(mock_target_store.insert.call_args.kwargs["ids"], ["mem-1", "mem-2"])
+
+    def test_source_count_change_fails_post_migration_verification(self):
+        self.mock_client.collection_exists.side_effect = lambda name: name == "hippo_memories"
+        self.mock_client.scroll.return_value = (
+            [Record(id="mem-1", payload={"data": "one"})],
+            None,
+        )
+        mock_target_store = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.embed_batch.return_value = [[0.1] * 768]
+
+        with patch.object(
+            self.migrator, "build_target_vector_store", return_value=mock_target_store
+        ), patch.object(
+            self.migrator, "build_target_embedder", return_value=mock_embedder
+        ), patch.object(
+            self.migrator,
+            "get_collection_points_count",
+            side_effect=[1, 2, 1],
+        ):
+            result = self.migrator.migrate(
+                source_collection="hippo_memories",
+                target_provider="vertexai",
+                target_dims=768,
+            )
+
+        self.assertFalse(result.success)
+        self.assertTrue(any("changed during migration" in err for err in result.errors))
+
+    def test_existing_target_requires_cosine_and_bm25(self):
+        self.mock_client.collection_exists.return_value = True
+
+        bad_distance = SimpleNamespace(
+            points_count=1,
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors=SimpleNamespace(size=768, distance="Dot"),
+                    sparse_vectors={"bm25": object()},
+                )
+            ),
+        )
+        self.mock_client.get_collection.return_value = bad_distance
+        with self.assertRaisesRegex(HippoValidationError, "COSINE"):
+            self.migrator.validate_target_schema("target_col", 768)
+
+        missing_bm25 = SimpleNamespace(
+            points_count=1,
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors=SimpleNamespace(size=768, distance="Cosine"),
+                    sparse_vectors={},
+                )
+            ),
+        )
+        self.mock_client.get_collection.return_value = missing_bm25
+        with self.assertRaisesRegex(HippoValidationError, "bm25"):
+            self.migrator.validate_target_schema("target_col", 768)
+
+    def test_plan_rejects_missing_source_instead_of_reporting_empty(self):
+        self.mock_client.collection_exists.return_value = False
+        with self.assertRaisesRegex(HippoValidationError, "does not exist"):
+            self.migrator.plan(
+                source_collection="missing_source",
+                target_provider="vertexai",
+                target_dims=768,
+            )
+
+    def test_runtime_config_uses_same_openai_dimensions_as_profile_resolver(self):
+        with patch("hippo_memory.config.ensure_qdrant_server", return_value=None), patch.dict(
+            os.environ,
+            {
+                "OPENAI_EMBEDDING_MODEL": "text-embedding-3-small",
+                "OPENAI_EMBEDDING_DIMS": "1024",
+                "OPENAI_API_KEY": "test-key",
+            },
+            clear=False,
+        ):
+            os.environ.pop("HIPPO_COLLECTION_NAME", None)
+            cfg = HippoConfig(provider="openai")
+            mem0_cfg = cfg.get_mem0_config()
+
+        self.assertEqual(mem0_cfg["embedder"]["config"]["embedding_dims"], 1024)
+        self.assertEqual(mem0_cfg["vector_store"]["config"]["embedding_model_dims"], 1024)
+        self.assertEqual(
+            mem0_cfg["vector_store"]["config"]["collection_name"],
+            "hippo_memories_openai_text_embedding_3_small_1024",
+        )
+
+    def test_repeat_execution_skips_matching_record(self):
+        self.mock_client.collection_exists.side_effect = (
+            lambda name: name in ("hippo_memories", "target_col")
+        )
+        source_record = Record(id="mem-1", payload={"data": "one", "hash": "h1"})
+        self.mock_client.scroll.return_value = ([source_record], None)
+        self.mock_client.retrieve.side_effect = [
+            [],
+            [Record(id="mem-1", payload={"data": "one", "hash": "h1"})],
+        ]
+        mock_target_store = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.embed_batch.return_value = [[0.1] * 768]
+
+        with patch.object(
+            self.migrator, "build_target_vector_store", return_value=mock_target_store
+        ), patch.object(
+            self.migrator, "build_target_embedder", return_value=mock_embedder
+        ), patch.object(
+            self.migrator, "get_collection_points_count", side_effect=[1, 1]
+        ), patch.object(
+            self.migrator, "_verify_collection_after_migration", return_value=None
+        ):
+            first = self.migrator.migrate(
+                source_collection="hippo_memories",
+                target_collection="target_col",
+                target_provider="vertexai",
+                target_dims=768,
+            )
+            second = self.migrator.migrate(
+                source_collection="hippo_memories",
+                target_collection="target_col",
+                target_provider="vertexai",
+                target_dims=768,
+            )
+
+        self.assertEqual(first.migrated, 1)
+        self.assertEqual(second.skipped, 1)
+        self.assertEqual(second.migrated, 0)
 
 
 if __name__ == "__main__":
