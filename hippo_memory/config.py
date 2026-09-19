@@ -79,35 +79,93 @@ DEFAULT_CUSTOM_INSTRUCTIONS = (
 )
 
 
+from dataclasses import dataclass
+
+LEGACY_COLLECTION_NAME = "hippo_memories"
+
+
+@dataclass(frozen=True)
+class EmbeddingProfile:
+    """Explicit embedding profile defining vector space identity."""
+
+    provider: str
+    model: str
+    dimensions: int
+
+    @property
+    def model_slug(self) -> str:
+        cleaned_model = self.model.split("/")[-1] if "/" in self.model else self.model
+        return re.sub(r"[^a-zA-Z0-9]+", "_", cleaned_model).strip("_").lower()
+
+    @property
+    def collection_name(self) -> str:
+        return f"hippo_memories_{self.provider.lower()}_{self.model_slug}_{self.dimensions}"
+
+    @property
+    def entity_collection_name(self) -> str:
+        return f"{self.collection_name}_entities"
+
+
 def resolve_collection_name(
     provider: str,
     embedding_model: Optional[str] = None,
     dims: Optional[int] = None,
 ) -> str:
-    """Resolve the Qdrant collection without mixing incompatible vector spaces.
+    """Resolve the Qdrant collection deterministically for each embedding profile.
 
-    Existing Gemini/OpenAI users retain the historical ``hippo_memories``
-    collection for backward compatibility. Vertex AI defaults to an isolated
-    collection because its embeddings must not be mixed with vectors created by
-    the Gemini Developer API or another embedding model.
+    An embedding profile is (provider, model, dimensions).
+    Every profile maps to a dedicated, isolated collection to avoid mixing
+    incompatible vector spaces. The historical 'hippo_memories' collection
+    is reserved as a legacy migration source.
+    Operators may supply an explicit override via HIPPO_COLLECTION_NAME.
     """
     override = os.getenv("HIPPO_COLLECTION_NAME", "").strip()
     if override:
         return override
 
-    if provider != "vertexai":
-        return "hippo_memories"
+    norm_provider = (provider or "").strip().lower()
 
-    model = embedding_model or os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-2")
-    raw_dims = os.getenv("VERTEX_EMBEDDING_DIMS", "768")
-    try:
-        dimensions = dims if dims is not None else int(raw_dims)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"Invalid VERTEX_EMBEDDING_DIMS: '{raw_dims}' (must be an integer)"
-        )
-    model_slug = re.sub(r"[^a-zA-Z0-9]+", "_", model).strip("_").lower()
-    return f"hippo_memories_vertexai_{model_slug}_{dimensions}"
+    if norm_provider == "vertexai":
+        model = embedding_model or os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-2")
+        raw_dims = os.getenv("VERTEX_EMBEDDING_DIMS", "768")
+        try:
+            dimensions = dims if dims is not None else int(raw_dims)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid VERTEX_EMBEDDING_DIMS: '{raw_dims}' (must be an integer)"
+            )
+        profile = EmbeddingProfile(provider="vertexai", model=model, dimensions=dimensions)
+        return profile.collection_name
+
+    elif norm_provider == "gemini":
+        model = embedding_model or os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-2")
+        raw_dims = os.getenv("GEMINI_EMBEDDING_DIMS", "768")
+        try:
+            dimensions = dims if dims is not None else int(raw_dims)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid GEMINI_EMBEDDING_DIMS: '{raw_dims}' (must be an integer)"
+            )
+        profile = EmbeddingProfile(provider="gemini", model=model, dimensions=dimensions)
+        return profile.collection_name
+
+    elif norm_provider == "openai":
+        model = embedding_model or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+        raw_dims = os.getenv("OPENAI_EMBEDDING_DIMS", "1536")
+        try:
+            dimensions = dims if dims is not None else int(raw_dims)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid OPENAI_EMBEDDING_DIMS: '{raw_dims}' (must be an integer)"
+            )
+        profile = EmbeddingProfile(provider="openai", model=model, dimensions=dimensions)
+        return profile.collection_name
+
+    else:
+        model = embedding_model or "default"
+        dimensions = dims or 768
+        profile = EmbeddingProfile(provider=norm_provider, model=model, dimensions=dimensions)
+        return profile.collection_name
 
 
 def _register_vertex_genai_embedder() -> None:
