@@ -116,7 +116,7 @@ def _parse_embedding_dimensions(
         dimensions = int(raw_value)
     except (TypeError, ValueError):
         raise ValueError(
-            f"Invalid {env_name}: '{raw_value}' (must be a positive integer)"
+            f"Invalid {env_name}: '{raw_value}' (must be an integer)"
         )
     if dimensions <= 0:
         raise ValueError(
