@@ -14,7 +14,7 @@ Hippo 架构可自顶向下划分为五大层次：
 
 ```mermaid
 flowchart TD
-    subgraph HOSTS ["多宿主适配层 (Host Integration Layer)"]
+    subgraph HOSTS ["多宿主适配层 (Host Integration)"]
         H1["Codex CLI"]
         H2["Pi Agent"]
         H3["ZCode"]
@@ -22,23 +22,23 @@ flowchart TD
     end
 
     subgraph INTERFACE ["协议与接口层 (Interface Layer)"]
-        I1["MCP Server (add_memory, search_memories)"]
-        I2["Terminal CLI (hippo add/search/reindex/consolidate)"]
-        I3["Lifecycle Hooks (hippo hook capture)"]
+        I1["MCP Server (add / search)"]
+        I2["Terminal CLI (hippo-cli)"]
+        I3["Lifecycle Hooks"]
     end
 
-    subgraph GATEWAY ["网关与策略治理层 (Gateway & Governance Layer)"]
-        G1["Hot Path 直写网关 (infer=False / <200ms)"]
-        G2["Warm Path 异步蒸馏 (Spool Worker / infer=True)"]
-        G3["Cold Path 离线合并 (Memory Consolidator)"]
-        G4["检索安全门禁 (Untrusted Envelope / Relevance Gate)"]
-        G5["向量 Profile 隔离解析 (EmbeddingProfile)"]
+    subgraph GATEWAY ["网关与治理层 (Gateway & Governance)"]
+        G1["Hot Path 直写网关 (亚秒级)"]
+        G2["Warm Path 异步蒸馏 (Spool)"]
+        G3["Cold Path 离线合并治理"]
+        G4["检索安全门禁 (Context Envelopes)"]
+        G5["向量 Profile 隔离解析"]
     end
 
-    subgraph CORE ["核心引擎层 (Core Engine Layer)"]
-        C1["HippoEngine (多作用域路由 / 并发写锁)"]
-        C2["EmbeddingMigrator (跨模型/维度断点续传迁移)"]
-        C3["Mem0 Memory 核心封装"]
+    subgraph CORE ["核心引擎层 (Core Engine)"]
+        C1["HippoEngine (多作用域路由 / 并发锁)"]
+        C2["EmbeddingMigrator (向量断点迁移)"]
+        C3["Mem0 记忆核心封装"]
     end
 
     subgraph STORAGE ["物理存储层 (Storage Layer)"]
