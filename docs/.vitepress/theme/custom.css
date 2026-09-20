@@ -1,11 +1,16 @@
 /* 修复 Mermaid 流程图节点文字因全局样式继承导致的折行与截断问题 */
-.mermaid .nodeLabel p,
-.mermaid .label p,
-.flowchart .nodeLabel p,
-.flowchart .label p {
+.mermaid .nodeLabel,
+.mermaid .nodeLabel *,
+.mermaid .label,
+.mermaid .label *,
+.flowchart .nodeLabel,
+.flowchart .nodeLabel *,
+.flowchart .label,
+.flowchart .label * {
   margin: 0 !important;
   line-height: 1.3 !important;
   font-size: 13px !important;
+  box-sizing: border-box !important;
 }
 
 /* Mermaid 容器响应式与居中 */
@@ -17,9 +22,8 @@
   display: block !important;
 }
 
-/* 首页标题样式优化：居中且预留顶部导航安全距离 */
-.VPHome h2#core-architecture,
-.VPHome h2 {
+/* 首页架构图标题优化：居中且预留顶部导航安全距离，精准收敛避免污染其他 h2 */
+.VPHome #core-architecture {
   text-align: center;
   margin-top: 4.5rem;
   margin-bottom: 2rem;
