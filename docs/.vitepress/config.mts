@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitepress';
+import { withMermaid } from 'vitepress-plugin-mermaid';
 
-export default defineConfig({
+export default withMermaid(
+  defineConfig({
   title: 'Hippo 文档中心',
   description: '🦛 Hippo 统一跨 IDE 记忆中枢与工程架构文档',
   base: '/hippo/',
@@ -136,4 +138,4 @@ export default defineConfig({
       next: '下一篇',
     },
   },
-});
+}));
