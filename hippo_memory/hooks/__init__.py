@@ -11,7 +11,7 @@ from hippo_memory.hooks.models import (
     sanitize_text,
 )
 from hippo_memory.hooks.adapters import get_adapter
-from hippo_memory.hooks.spool import SpoolStorage, SpoolWorker
+from hippo_memory.hooks.spool import SpoolStorage, SpoolWorker, TERMINAL_STATES
 
 __all__ = [
     "CapturedPayload",
