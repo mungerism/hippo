@@ -12,11 +12,15 @@ Hippo 提供了内置的 `hippo doctor` 命令行诊断工具，用于自动化�
 hippo doctor
 ```
 
-巡检器将依次检查以下四大维度：
+巡检器将依次检查以下五大维度：
 1. **环境与配置**：`~/.hippo/.env` 存在性、Google/OpenAI API 密钥格式、ADC 凭据合法性；
 2. **Qdrant 服务**：端口 `127.0.0.1:6333` 监听状态、LaunchAgent 托管状态、Collection 连通性；
-3. **宿主集成**：Codex、Pi、ZCode 与 Antigravity 的 Hook 与 MCP 配置状态；
-4. **Spool 队列**：异步蒸馏队列积压量与最近作业健康度。
+3. **Worker 服务**：`dev.hippo.worker` LaunchAgent 运行状态，区分三态健康语义：
+   - ✅ 未安装：正常（按需消费模式）
+   - ✅ 已安装且 running：正常（常驻保活）
+   - ❌ 已安装但未运行 / crash loop：故障
+4. **宿主集成**：Codex、Pi、ZCode 与 Antigravity 的 Hook 与 MCP 配置状态；
+5. **Spool 队列**：异步蒸馏队列积压量、死信作业数量与最近作业健康度。
 
 ---
 
@@ -42,3 +46,68 @@ hippo doctor
   1. Hippo 针对多进程设计了细粒度锁等待机制，默认超时为 10 秒；
   2. 可通过设置环境变量 `HIPPO_LOCK_TIMEOUT=30.0` 增加超时上限；
   3. 检查是否有长事务或挂起的进程锁定了存储目录。
+
+### 故障 4：Spool 队列死信作业积压
+- **现象**：`hippo doctor` 报告存在 dead 状态的死信作业。
+- **排查与修复**：
+  1. 查看当前队列状态：
+     ```bash
+     hippo hook status
+     ```
+  2. 预览待重试的死信作业：
+     ```bash
+     hippo hook retry --all-dead --dry-run
+     ```
+  3. 批量重试所有死信作业：
+     ```bash
+     hippo hook retry --all-dead
+     ```
+  4. 若需清理历史废弃作业（如已确认无法恢复的损坏数据）：
+     ```bash
+     # 预览 30 天前的死信作业
+     hippo hook prune --state dead --days 30 --dry-run
+     # 确认执行删除
+     hippo hook prune --state dead --days 30 --force
+     ```
+  5. 清理完成后验证：
+     ```bash
+     hippo doctor
+     ```
+
+### 故障 5：Worker 常驻服务异常
+- **现象**：`hippo doctor` 报告 `dev.hippo.worker` 已安装但未运行。
+- **排查**：
+  1. 查看 Worker 日志：
+     ```bash
+     tail -50 ~/.hippo/logs/worker.log
+     ```
+  2. 查看 LaunchAgent 状态详情：
+     ```bash
+     launchctl print gui/$(id -u)/dev.hippo.worker
+     ```
+  3. 重启 Worker 服务：
+     ```bash
+     hippo service restart worker
+     ```
+  4. 若问题持续，尝试卸载后重装：
+     ```bash
+     hippo service uninstall worker
+     hippo service install worker
+     hippo service status
+     ```
+
+---
+
+## 3. Spool 队列运维速查
+
+| 命令 | 用途 |
+|------|------|
+| `hippo hook status` | 查看队列统计与最近作业详情 |
+| `hippo hook retry <job_id>` | 重试单个失败/跳过的作业 |
+| `hippo hook retry --all-dead` | 批量重试所有死信作业 |
+| `hippo hook retry --all-dead --dry-run` | 预览待重试的死信作业 |
+| `hippo hook prune --state dead --days 7 --dry-run` | 预览 7 天前的死信作业 |
+| `hippo hook prune --state all --days 30 --force` | 清理所有 30 天前的终态作业 |
+| `hippo hook worker --drain` | 手动触发前台消费 |
+| `hippo service install worker` | 安装 Worker 常驻守护 |
+| `hippo service status` | 查看双服务运行状态 |

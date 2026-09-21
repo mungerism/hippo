@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import List
 
 from hippo_memory.config import DEFAULT_ENV_FILE, HIPPO_HOME, resolve_collection_name
-from hippo_memory.service import is_listening, service_status
+from hippo_memory.service import (
+    is_listening,
+    is_worker_running,
+    service_status,
+    worker_service_status,
+)
 
 
 def _client_config_checks() -> List[tuple]:
@@ -194,6 +199,32 @@ def collect_checks() -> List[dict]:
     except Exception as e:
         add("服务", "dev.hippo.qdrant", False, f"状态查询失败: {e}")
 
+    # --- Worker 常驻服务巡检 ---
+    try:
+        w_st = worker_service_status()
+        if not w_st["plist_exists"]:
+            # 未安装 = healthy fallback (按需消费模式)
+            add(
+                "服务",
+                "dev.hippo.worker",
+                True,
+                "按需消费模式（未安装常驻 Worker）；可执行 hippo service install worker",
+            )
+        elif w_st["running"]:
+            pid_str = f"PID={w_st['pid']}" if w_st["pid"] else ""
+            add("服务", "dev.hippo.worker", True, f"LaunchAgent 常驻运行中 {pid_str}")
+        else:
+            exit_info = f"（退出码: {w_st['last_exit_code']}）" if w_st.get("last_exit_code") else ""
+            add(
+                "服务",
+                "dev.hippo.worker",
+                False,
+                f"已安装但未运行{exit_info}；查看 ~/.hippo/logs/worker.log，"
+                "可执行 hippo service restart worker",
+            )
+    except Exception as e:
+        add("服务", "dev.hippo.worker", False, f"状态查询失败: {e}")
+
     # --- 客户端接入 ---
     for name, path, needle in _client_config_checks():
         try:
@@ -251,21 +282,33 @@ def collect_checks() -> List[dict]:
             else 0
         )
 
-        pending_ok = len(pending_jobs) < 10
-        add(
-            "Spool 队列",
-            "待消费积压",
-            pending_ok,
-            f"当前 pending: {len(pending_jobs)} 个"
-            + (" (正常)" if pending_ok else " (较多，可执行 hippo hook worker --drain)"),
-        )
-        dead_ok = len(dead_jobs) == 0
+        worker_running = is_worker_running()
+        pending_count = len(pending_jobs)
+        pending_ok = pending_count < 10
+        if pending_ok:
+            pending_detail = f"当前 pending: {pending_count} 个 (正常)"
+        elif worker_running:
+            pending_detail = f"当前 pending: {pending_count} 个（常驻 Worker 正在后台消费）"
+        else:
+            pending_detail = (
+                f"当前 pending: {pending_count} 个（较多，可执行 hippo hook worker --drain 或 "
+                "hippo service install worker 安装常驻消费服务）"
+            )
+        add("Spool 队列", "待消费积压", pending_ok, pending_detail)
+
+        dead_count = len(dead_jobs)
+        dead_ok = dead_count == 0
         add(
             "Spool 队列",
             "死信作业 (dead)",
             dead_ok,
-            f"当前 dead: {len(dead_jobs)} 个"
-            + ("" if dead_ok else "；可执行 hippo hook retry <job_id> 重新入队"),
+            f"当前 dead: {dead_count} 个"
+            + (
+                ""
+                if dead_ok
+                else "；可执行 hippo hook retry --all-dead --dry-run 预览，"
+                "hippo hook retry --all-dead 批量重试"
+            ),
         )
         add("Spool 队列", "累计蒸馏收据", True, f"已沉淀 {receipt_count} 个会话状态")
     except Exception as e:
