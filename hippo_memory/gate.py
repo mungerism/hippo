@@ -234,7 +234,7 @@ def filter_search_results(
     config: Optional[SearchGateConfig] = None,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Filter raw hybrid retrieval candidates through signal-aware safety gate.
+    """Filter raw hybrid retrieval candidates through signal-aware safety gate (zero-overhead production path).
 
     Args:
         results: Sequence of candidate dictionaries returned by Mem0.
@@ -244,5 +244,86 @@ def filter_search_results(
     Returns:
         New list of accepted candidate dictionaries, preserving original ranking.
     """
-    accepted, _ = filter_search_results_with_details(results, config=config, limit=limit)
+    if limit <= 0 or not results:
+        return []
+
+    cfg = config if config is not None else SearchGateConfig()
+    if not cfg.enabled:
+        return [dict(item) for item in results[:limit]]
+
+    # Step 1: Structure validation and absolute pass gate
+    passed_absolute: List[tuple[Mapping[str, Any], float]] = []
+
+    for item in results:
+        if not isinstance(item, Mapping):
+            continue
+
+        score = item.get("score")
+        details = item.get("score_details")
+
+        if not isinstance(details, Mapping) or not _is_valid_numeric(score):
+            logger.debug("Rejecting candidate %s: missing or invalid score/score_details", item.get("id"))
+            continue
+
+        required_fields = ("final_score", "semantic_score", "bm25_score", "entity_boost")
+        if any(field not in details for field in required_fields):
+            logger.debug("Rejecting candidate %s: missing required fields in score_details", item.get("id"))
+            continue
+
+        raw_final_score = details["final_score"]
+        raw_semantic_score = details["semantic_score"]
+        raw_bm25_score = details["bm25_score"]
+        raw_entity_boost = details["entity_boost"]
+
+        if (
+            not _is_valid_numeric(raw_final_score)
+            or not _is_valid_numeric(raw_semantic_score)
+            or not _is_valid_numeric(raw_bm25_score)
+            or not _is_valid_numeric(raw_entity_boost)
+        ):
+            logger.debug("Rejecting candidate %s: non-numeric score fields in details", item.get("id"))
+            continue
+
+        if abs(float(score) - float(raw_final_score)) > 1e-4:
+            logger.debug(
+                "Rejecting candidate %s: top-level score (%s) != final_score (%s)",
+                item.get("id"),
+                score,
+                raw_final_score,
+            )
+            continue
+
+        final_score = float(raw_final_score)
+        semantic_score = float(raw_semantic_score)
+        bm25_score = float(raw_bm25_score)
+        entity_boost = float(raw_entity_boost)
+
+        has_support = (bm25_score > 0.0) or (entity_boost > 0.0)
+
+        if has_support:
+            absolute_pass = final_score >= cfg.final_threshold
+        else:
+            absolute_pass = (semantic_score >= cfg.dense_only_threshold) and (final_score >= cfg.final_threshold)
+
+        if absolute_pass:
+            passed_absolute.append((item, final_score))
+
+    if not passed_absolute:
+        return []
+
+    # Step 2: Relative pass gate
+    best_final_score = max(sc for _, sc in passed_absolute)
+    relative_floor = (
+        cfg.relative_threshold_ratio * best_final_score
+        if best_final_score > 0.0
+        else 0.0
+    )
+
+    accepted: List[Dict[str, Any]] = []
+    for item, final_score in passed_absolute:
+        if final_score >= relative_floor:
+            accepted.append(dict(item))
+            if len(accepted) >= limit:
+                break
+
     return accepted

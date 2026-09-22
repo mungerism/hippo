@@ -58,13 +58,12 @@ def filter_active_memories_with_details(
 
 
 def filter_active_memories(items: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
-    """Drop superseded memories while preserving the original ordering.
+    """Drop superseded memories while preserving the original ordering (zero-overhead production path).
 
     Pure filter: no re-ranking, no mutation of the surviving records —
     ranking and hybrid-search behavior are explicitly out of scope.
     """
-    active, _ = filter_active_memories_with_details(items)
-    return active
+    return [item for item in items if is_active_memory(item)]
 
 
 def superseded_exclusion() -> Dict[str, Any]:

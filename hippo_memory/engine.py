@@ -1543,9 +1543,11 @@ class HippoEngine:
         candidate_pool_size = _candidate_pool_size(limit)
 
         # Stage 1: Candidate retrieval
+        # In search_with_trace, query without lifecycle pushdown exclusion so Stage 2
+        # can explicitly observe, record, and verify defensive lifecycle filtering.
         results = self.memory.search(
             query=query,
-            filters=add_lifecycle_exclusion(computed_filters),
+            filters=computed_filters,
             top_k=candidate_pool_size,
             threshold=effective_threshold,
             explain=True,
@@ -1598,6 +1600,9 @@ class HippoEngine:
                 continue
             if scope == "project" and item_sc == "global":
                 rejected_lifecycle.append({"id": cid, "reason": "scope_mismatch"})
+                continue
+            if scope == "project" and resolved_proj and item_proj and item_proj != resolved_proj:
+                rejected_lifecycle.append({"id": cid, "reason": "cross_project"})
                 continue
 
             passed_lifecycle_items.append(dict(item))

@@ -328,6 +328,7 @@ class RunManifest:
     k_values: List[int]
     seed: Optional[int]
     duration_seconds: float
+    schema_version: str = "1.0.0"
     host_info: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -349,6 +350,7 @@ class RunManifest:
             k_values=[int(k) for k in data.get("k_values", [1, 3, 5, 10])],
             seed=data.get("seed"),
             duration_seconds=float(data.get("duration_seconds", 0.0)),
+            schema_version=str(data.get("schema_version", "1.0.0")),
             host_info=dict(data.get("host_info") or {}),
         )
 

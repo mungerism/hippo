@@ -156,7 +156,9 @@ def ndcg_at_k(retrieved: Sequence[str], qrels: Mapping[str, int], k: int) -> flo
     # Calculate IDCG
     positive_grades = sorted([g for g in qrels.values() if g > 0], reverse=True)
     if not positive_grades:
-        return 1.0 if dcg == 0.0 else 0.0
+        # If no positive relevance judgements exist, return 1.0 strictly when
+        # retrieval correctly returns nothing, and 0.0 if any noise was recalled.
+        return 1.0 if len(top_k) == 0 else 0.0
 
     idcg = sum(
         (math.pow(2.0, grade) - 1.0) / math.log2(i + 1)

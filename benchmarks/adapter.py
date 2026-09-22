@@ -73,6 +73,11 @@ class BenchmarkAdapter(abc.ABC):
         """Tear down temporary storage, collections, and resources."""
         pass
 
+    @abc.abstractmethod
+    def get_embedding_profile(self) -> Dict[str, Any]:
+        """Return the effective embedding profile used by this adapter."""
+        pass
+
 
 class ReplayFixtureAdapter(BenchmarkAdapter):
     """Deterministic replay adapter executing gate and lifecycle logic offline.
@@ -85,6 +90,7 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
         self,
         candidates_by_query: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
         gate_config: Optional[SearchGateConfig] = None,
+        embedding_profile: Optional[Dict[str, Any]] = None,
     ):
         self._corpus_by_id: Dict[str, CorpusItem] = {}
         self._candidates_by_query: Dict[str, List[Dict[str, Any]]] = (
@@ -93,6 +99,16 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             else {}
         )
         self.gate_config = gate_config or SearchGateConfig()
+        self._embedding_profile = embedding_profile or {
+            "provider": "replay",
+            "model": "fixture",
+            "dims": 0,
+            "collection": "replay_memory",
+        }
+
+    def get_embedding_profile(self) -> Dict[str, Any]:
+        """Return embedding profile for replay."""
+        return dict(self._embedding_profile)
 
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Store corpus items in memory for fixture replay."""
@@ -292,9 +308,7 @@ class HippoEngineAdapter(BenchmarkAdapter):
 
         # Security invariant: Never touch the default production collection!
         prod_coll = getattr(cfg, "collection_name", "hippo_memories")
-        if isolated_coll == prod_coll or not (
-            isolated_coll.startswith("eval_") or "test" in isolated_coll
-        ):
+        if isolated_coll == prod_coll or not isolated_coll.startswith("eval_"):
             raise ValueError(
                 f"Security violation: evaluation collection {isolated_coll!r} must start with 'eval_' "
                 f"and cannot match production collection {prod_coll!r}."
@@ -305,6 +319,19 @@ class HippoEngineAdapter(BenchmarkAdapter):
         self.collection_name = isolated_coll
         self.config = cfg
         self.engine = HippoEngine(config=cfg)
+
+    def get_embedding_profile(self) -> Dict[str, Any]:
+        """Extract effective embedding profile from engine configuration."""
+        emb_cfg = getattr(self.config, "embedding", None)
+        provider = getattr(emb_cfg, "provider", "ollama") if emb_cfg else "ollama"
+        model = getattr(emb_cfg, "model", "bge-m3") if emb_cfg else "bge-m3"
+        dims = getattr(emb_cfg, "dims", 1024) if emb_cfg else 1024
+        return {
+            "provider": provider,
+            "model": model,
+            "dims": dims,
+            "collection": self.collection_name,
+        }
 
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Ingest corpus items into the isolated benchmark collection."""

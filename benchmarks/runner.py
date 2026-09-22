@@ -268,6 +268,17 @@ class BenchmarkRunner:
         }
 
         run_id = f"eval_{dataset.name}_{int(time.time())}"
+        embedding_profile = (
+            self.adapter.get_embedding_profile()
+            if hasattr(self.adapter, "get_embedding_profile")
+            else {
+                "provider": "unknown",
+                "model": "unknown",
+                "dims": 0,
+                "collection": getattr(self.adapter, "collection_name", "replay_memory"),
+            }
+        )
+
         manifest = RunManifest(
             run_id=run_id,
             timestamp=timestamp,
@@ -276,12 +287,7 @@ class BenchmarkRunner:
             dataset_hash=dataset.compute_hash(),
             mem0_version=get_mem0_version(),
             hippo_version=get_hippo_version(),
-            embedding_profile={
-                "provider": "ollama",
-                "model": "bge-m3",
-                "dims": 1024,
-                "collection": getattr(self.adapter, "collection_name", "replay_memory"),
-            },
+            embedding_profile=embedding_profile,
             gate_thresholds=gate_thresholds,
             max_injected=self.max_injected,
             k_values=self.k_values,

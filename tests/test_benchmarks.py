@@ -219,6 +219,7 @@ class TestBenchmarkMetrics(unittest.TestCase):
 
         # Empty qrels edge case:
         self.assertEqual(ndcg_at_k([], {}, k=3), 1.0)
+        self.assertEqual(ndcg_at_k(["doc1"], {}, k=3), 0.0)  # Noise recalled must be 0.0
         self.assertEqual(ndcg_at_k(["doc1"], {}, k=0), 0.0)
 
     def test_forbidden_leakage_and_empty_accuracy(self):
@@ -338,6 +339,16 @@ class TestBenchmarkAdapters(unittest.TestCase):
             HippoEngineAdapter(collection_name="some_production_db", config=mock_cfg)
         self.assertIn("must start with 'eval_'", str(ctx.exception))
 
+        # Attempting to use a name containing 'test' without 'eval_' prefix must also fail
+        with self.assertRaises(ValueError) as ctx:
+            HippoEngineAdapter(collection_name="test_production_collection", config=mock_cfg)
+        self.assertIn("must start with 'eval_'", str(ctx.exception))
+
+        # Replay adapter embedding profile
+        replay_adapter = ReplayFixtureAdapter()
+        prof = replay_adapter.get_embedding_profile()
+        self.assertEqual(prof["provider"], "replay")
+
 
 class TestBenchmarkRunnerAndDiff(unittest.TestCase):
     """Test runner execution, JSON & Markdown parity, and baseline regression detection."""
@@ -350,6 +361,7 @@ class TestBenchmarkRunnerAndDiff(unittest.TestCase):
 
         # Verify manifest
         self.assertEqual(report.manifest.dataset_name, "hippo_smoke_fixture")
+        self.assertEqual(report.manifest.schema_version, "1.0.0")
         self.assertEqual(report.manifest.max_injected, 3)
         self.assertGreater(len(report.query_results), 0)
 
