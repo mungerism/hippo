@@ -60,4 +60,5 @@ flowchart TD
     - `DISTINCT`（独立事实）：保留两者。
   - **胜者仲裁 (Winner Arbitration)**：分类为等价或冲突后，才按确认时间、来源权威和稳定性规则确定赢家；模型证据不能直接指定赢家。
   - **Jev 试验适配器（#61）**：`hippo_memory.jev.JevClient` 是显式构造、可注入 HTTP 客户端的独立适配器，固定 `jev-1.13.0` 与 `memory-relation-v1` 三分类问题。它验证完整概率分布、所选类别、独立的供应商 `confidence`、响应大小及模型版本；限时重试或任何协议错误都会留下不含原始事实的弃权代码。`JevRelationshipClassifier` 目前仅把原始判别写入审计证据，向治理层一律返回 `DISTINCT`，因此不会触发胜者仲裁或生成治理操作。默认路径不创建 Jev 客户端、不要求密钥、不出网；影子路由与自动启用分别留给后续议题。
+  - **离线关系评测（#62）**：独立的[成对样本评测](/knowledge/jev-evaluation)只读取本地样本与录制判别，按事实簇隔离校准/测试集，输出关系和语言切片指标；它不连接 Qdrant，也不把基线 LLM 或 Jev 判别当作真值。
   - **幂等 Apply**：基于行版本号（Record Version）与并发锁原子执行，支持 `--dry-run` 预览。

@@ -12,3 +12,4 @@
 | [会话记忆蒸馏工程调研](/knowledge/session-distill-research) | Warm Path 会话反思 | 对比前台实时提取与后台异步蒸馏的延迟、成本与质量权衡 |
 | [Mem0 内部机制与边界剖析](/knowledge/mem0-deep-dive) | Mem0 源码机制 | 深入剖析 Mem0 的 Graph/VectorStore 架构与开源版工程短板 |
 | [Cold Path 记忆合并与生命周期设计](/knowledge/cold-path-consolidation-design) | 离线记忆治理 | 详细推导基于 ANN 相似度、LLM 分类与行版本号的合并算法 |
+| [Jev 成对关系离线评测](/knowledge/jev-evaluation) | Cold Path 模型评测 | 独立样本格式、录制判别、校准/测试隔离与切片报告 |
