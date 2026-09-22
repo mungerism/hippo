@@ -340,12 +340,18 @@ class TestClassifierFailClosed(unittest.TestCase):
 
 class TestReplaceableClassifier(unittest.TestCase):
     def test_structured_evidence_keeps_class_probability_separate_from_provider_confidence(self):
+        test_case = self
+
         class _Classifier:
             def __init__(self):
                 self.calls = 0
 
             def classify(self, first, second):
                 self.calls += 1
+                test_case.assertEqual(set(first), {"id", "memory"})
+                test_case.assertEqual(set(second), {"id", "memory"})
+                with test_case.assertRaises(TypeError):
+                    first["metadata"] = {"last_confirmed_at": "2099-01-01"}
                 return ClassificationResult(
                     RELATION_CONFLICT,
                     "semantic_relation",
@@ -371,6 +377,23 @@ class TestReplaceableClassifier(unittest.TestCase):
             decision.evidence["classification"]["details"],
             {"confidence_kind": "choice_probability", "provider_confidence": 0.72},
         )
+
+    def test_custom_low_confidence_abstains_before_winner_arbitration(self):
+        class _Classifier:
+            def classify(self, first, second):
+                return ClassificationResult(RELATION_EQUIVALENT, "uncertain", 0.01)
+
+        first = _memory("mem-a", "fact a")
+        second = _memory("mem-b", "fact b")
+        default = ConsolidationDecider(classifier=_Classifier()).decide(first, second)
+        calibrated = ConsolidationDecider(
+            classifier=_Classifier(), min_confidence=0.005
+        ).decide(first, second)
+
+        self.assertEqual(default.relation, RELATION_DISTINCT)
+        self.assertEqual(default.reason, "low_confidence")
+        self.assertIsNone(default.winner_id)
+        self.assertEqual(calibrated.relation, RELATION_EQUIVALENT)
 
     def test_preclassification_rejects_unsafe_pairs_without_calling_backend(self):
         class _NoCallClassifier:

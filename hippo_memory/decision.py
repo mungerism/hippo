@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import math
+from types import MappingProxyType
 from typing import Any, Mapping, Optional, Protocol
 
 from hippo_memory.lifecycle import is_active_memory
@@ -82,7 +83,7 @@ class ClassificationResult:
 
 
 class RelationshipClassificationBackend(Protocol):
-    """Semantic relation seam; callers must first check identity and lifecycle."""
+    """Semantic relation seam, given read-only ID/text projections only."""
 
     def classify(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
@@ -319,9 +320,27 @@ class ConsolidationDecider:
         *,
         classifier: Optional[RelationshipClassificationBackend] = None,
         arbiter: Optional[WinnerArbiter] = None,
+        min_confidence: Optional[float] = None,
     ) -> None:
         self.classifier = classifier or RelationshipClassifier()
         self.arbiter = arbiter or WinnerArbiter()
+        # Keep an explicitly configured LLM threshold compatible. Other
+        # backends get a conservative default until their own calibrated
+        # threshold is supplied by the Cold Path configuration.
+        if min_confidence is None:
+            min_confidence = (
+                self.classifier.low_confidence_threshold
+                if isinstance(self.classifier, RelationshipClassifier)
+                else 0.6
+            )
+        if (
+            not isinstance(min_confidence, (int, float))
+            or isinstance(min_confidence, bool)
+            or not math.isfinite(min_confidence)
+            or not 0.0 <= min_confidence <= 1.0
+        ):
+            raise ValueError("min_confidence must be a finite number in [0.0, 1.0]")
+        self.min_confidence = float(min_confidence)
 
     def decide(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
@@ -358,10 +377,20 @@ class ConsolidationDecider:
         preliminary = _preclassify(memory_a, memory_b)
 
         try:
+            # The classifier cannot inspect or alter arbitration metadata.
+            # Fresh copies also keep a buggy adapter away from store records.
+            classifier_a = MappingProxyType({
+                "id": str(memory_a["id"]),
+                "memory": str(memory_a.get("memory", "") or ""),
+            })
+            classifier_b = MappingProxyType({
+                "id": str(memory_b["id"]),
+                "memory": str(memory_b.get("memory", "") or ""),
+            })
             classification = (
                 preliminary
                 if preliminary is not None
-                else self.classifier.classify(memory_a, memory_b)
+                else self.classifier.classify(classifier_a, classifier_b)
             )
         except Exception:
             classification = ClassificationResult(
@@ -387,6 +416,12 @@ class ConsolidationDecider:
             )
         ):
             return fail_closed("malformed_classifier_output")
+
+        if (
+            classification.relation != RELATION_DISTINCT
+            and classification.confidence < self.min_confidence
+        ):
+            return fail_closed("low_confidence", classification.confidence)
 
         classification_evidence = {
             "reason": classification.reason,
