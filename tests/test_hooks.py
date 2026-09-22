@@ -513,12 +513,22 @@ class TestHookSpool(unittest.TestCase):
 
         runner = CliRunner()
         with patch("hippo_memory.hooks.SpoolStorage", return_value=self.storage):
-            with patch("hippo_memory.hooks.SpoolWorker.drain", return_value=1) as mock_drain:
-                res = runner.invoke(app, ["hook", "retry", j.job_id])
-                self.assertEqual(res.exit_code, 0)
-                mock_drain.assert_called_once_with(wait_for_retries=False)
-                st = self.storage.load_state(j.job_id)
-                self.assertEqual(st.get("state"), JobState.PENDING.value)
+            with patch("hippo_memory.service.is_worker_running", return_value=False):
+                with patch("hippo_memory.hooks.SpoolWorker.drain", return_value=1) as mock_drain:
+                    res = runner.invoke(app, ["hook", "retry", j.job_id])
+                    self.assertEqual(res.exit_code, 0)
+                    mock_drain.assert_called_once_with(wait_for_retries=False)
+                    st = self.storage.load_state(j.job_id)
+                    self.assertEqual(st.get("state"), JobState.PENDING.value)
+
+            # 验证常驻 Worker 运行时不触发前台 drain
+            self.storage.update_state(j.job_id, JobState.DEAD)
+            with patch("hippo_memory.service.is_worker_running", return_value=True):
+                with patch("hippo_memory.hooks.SpoolWorker.drain") as mock_drain:
+                    res = runner.invoke(app, ["hook", "retry", j.job_id])
+                    self.assertEqual(res.exit_code, 0)
+                    mock_drain.assert_not_called()
+                    self.assertIn("常驻 Worker", res.output)
 
     def test_spool_worker_engine_dynamic_import_runtime(self):
         """验证未显式注入 engine 时，SpoolWorker.engine 属性可动态加载 HippoEngine 而不报 NameError。"""

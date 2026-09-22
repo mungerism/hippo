@@ -95,6 +95,20 @@ class TestRetryAllDead(unittest.TestCase):
         retried = self.storage.retry_all_dead()
         self.assertEqual(retried, [])
 
+    def test_retry_job_refuses_non_retryable_states(self):
+        """retry_job should refuse to reset jobs in processing, completed, or coalesced states."""
+        for state in (JobState.PROCESSING, JobState.COMPLETED, JobState.COALESCED):
+            job_id = f"job-{state.value}"
+            payload = CapturedPayload(
+                job_id=job_id, host="antigravity", event="Stop",
+                session_id="sess-1", project_dir="/tmp/test",
+            )
+            self.storage.enqueue(payload)
+            self.storage.update_state(job_id, state)
+            self.assertFalse(self.storage.retry_job(job_id))
+            st = self.storage.load_state(job_id)
+            self.assertEqual(st["state"], state.value)
+
 
 class TestPruneJobs(unittest.TestCase):
     """Tests for prune_jobs: state filtering, tombstones, safety guards."""
@@ -117,6 +131,12 @@ class TestPruneJobs(unittest.TestCase):
         if updated_at is not None:
             kwargs["updated_at"] = updated_at
         self.storage.update_state(job_id, state, **kwargs)
+
+    def test_prune_refuses_negative_time(self):
+        """prune_jobs must raise ValueError for negative older_than_seconds."""
+        with self.assertRaises(ValueError) as ctx:
+            self.storage.prune_jobs(older_than_seconds=-10.0)
+        self.assertIn("non-negative", str(ctx.exception))
 
     def test_prune_dead_jobs(self):
         self._create_job("dead-1", JobState.DEAD)
@@ -347,6 +367,15 @@ class TestWorkerDaemonSignals(unittest.TestCase):
         worker2 = SpoolWorker(storage=self.storage)
         self.assertTrue(worker2.acquire_lock())
         worker2.release_lock()
+
+    def test_is_worker_active_detection(self):
+        """is_worker_active should accurately detect whether lock is held without blocking."""
+        self.assertFalse(self.storage.is_worker_active())
+        worker = SpoolWorker(storage=self.storage)
+        self.assertTrue(worker.acquire_lock())
+        self.assertTrue(self.storage.is_worker_active())
+        worker.release_lock()
+        self.assertFalse(self.storage.is_worker_active())
 
 
 class TestWorkerServicePlist(unittest.TestCase):
