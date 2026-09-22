@@ -593,6 +593,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastembed" },
     { name = "google-genai" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "mem0ai" },
     { name = "pydantic" },
@@ -606,6 +607,7 @@ dependencies = [
 requires-dist = [
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "google-genai", specifier = ">=2.22.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mem0ai", specifier = ">=2.0.20" },
     { name = "pydantic", specifier = ">=2.0" },
