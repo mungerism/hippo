@@ -232,7 +232,8 @@ class _ScriptedLLM:
 
 
 class _Harness:
-    def __init__(self, records, *, semantic_scores=None, scripted="EQUIVALENT", classifier=None):
+    def __init__(self, records, *, semantic_scores=None, scripted="EQUIVALENT", classifier=None,
+                 shadow_backend=None, shadow_policy=None):
         self.tmp = tempfile.TemporaryDirectory()
         self.lock_dir = Path(self.tmp.name) / "locks"
         self.operations_dir = Path(self.tmp.name) / "operations"
@@ -252,6 +253,8 @@ class _Harness:
             classifier=classifier,
             discovery=CandidateDiscovery(self.engine, semantic_threshold=0.0),
             classifier_llm=self.classifier_llm,
+            shadow_backend=shadow_backend,
+            shadow_policy=shadow_policy,
             applier=ConsolidationApplier(
                 self.engine,
                 journal=OperationJournal(self.operations_dir),
