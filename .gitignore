@@ -54,3 +54,7 @@ node_modules/
 .vitepress/dist/
 .vitepress/cache/
 
+# Benchmarks
+benchmarks/reports/
+
+

@@ -38,13 +38,33 @@ def is_active_memory(item: Mapping[str, Any]) -> bool:
     return status_of(item) != STATUS_SUPERSEDED
 
 
+def filter_active_memories_with_details(
+    items: Sequence[Mapping[str, Any]],
+) -> tuple[list[Dict[str, Any]], list[dict[str, str]]]:
+    """Drop superseded memories while preserving original ordering and returning drop details.
+
+    Returns:
+        Tuple of (active_items, list_of_dropped_reasons).
+    """
+    active: list[Dict[str, Any]] = []
+    dropped: list[dict[str, str]] = []
+    for item in items:
+        item_id = str(item.get("id", ""))
+        if is_active_memory(item):
+            active.append(dict(item))
+        else:
+            dropped.append({"id": item_id, "reason": "superseded"})
+    return active, dropped
+
+
 def filter_active_memories(items: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
     """Drop superseded memories while preserving the original ordering.
 
     Pure filter: no re-ranking, no mutation of the surviving records —
     ranking and hybrid-search behavior are explicitly out of scope.
     """
-    return [item for item in items if is_active_memory(item)]
+    active, _ = filter_active_memories_with_details(items)
+    return active
 
 
 def superseded_exclusion() -> Dict[str, Any]:
