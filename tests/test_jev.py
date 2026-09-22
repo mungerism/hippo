@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -33,6 +34,16 @@ def response(
 
 
 class JevClientTests(unittest.TestCase):
+    def test_default_decider_does_not_construct_http_client(self):
+        with patch(
+            "httpx.Client", side_effect=AssertionError("unexpected HTTP client")
+        ):
+            decision = ConsolidationDecider().decide(
+                {"id": "a", "memory": "fact A", "user_id": "u1", "agent_id": "hippo"},
+                {"id": "b", "memory": "fact B", "user_id": "u1", "agent_id": "hippo"},
+            )
+        self.assertEqual(decision.relation, RELATION_DISTINCT)
+
     def test_success_is_observation_only_and_separates_scores(self):
         requests = []
 
@@ -145,6 +156,23 @@ class JevClientTests(unittest.TestCase):
         )
         self.assertEqual(client.classify_pair("A", "B").choice, "EQUIVALENT")
         self.assertEqual(len(calls), 2)
+
+    def test_service_error_stops_at_retry_budget(self):
+        calls = []
+
+        def handler(_):
+            calls.append(1)
+            return httpx.Response(503, text="private provider error")
+
+        client = JevClient(
+            "secret", client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
+        result = JevRelationshipClassifier(client).classify(
+            {"id": "a", "memory": "A"}, {"id": "b", "memory": "B"}
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.evidence["failure_code"], "http_503")
+        self.assertNotIn("private", repr(result))
 
     def test_timeout_and_size_limits(self):
         def timeout(_):

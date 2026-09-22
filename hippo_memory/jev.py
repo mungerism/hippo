@@ -200,6 +200,20 @@ class JevRelationshipClassifier:
     def __init__(self, client: JevClient) -> None:
         self.client = client
 
+    @staticmethod
+    def _abstain(failure_code: str) -> ClassificationResult:
+        return ClassificationResult(
+            RELATION_DISTINCT,
+            "jev_abstained",
+            None,
+            {
+                "provider": "jev",
+                "model": JEV_MODEL,
+                "rubric_version": JEV_RUBRIC_VERSION,
+                "failure_code": failure_code,
+            },
+        )
+
     def classify(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
     ) -> ClassificationResult:
@@ -213,29 +227,9 @@ class JevRelationshipClassifier:
         try:
             verdict = self.client.classify_pair(first[1], second[1])
         except JevFailure as exc:
-            return ClassificationResult(
-                RELATION_DISTINCT,
-                "jev_abstained",
-                None,
-                {
-                    "provider": "jev",
-                    "model": JEV_MODEL,
-                    "rubric_version": JEV_RUBRIC_VERSION,
-                    "failure_code": str(exc),
-                },
-            )
+            return self._abstain(str(exc))
         except Exception:  # noqa: BLE001 - third-party transport must fail closed
-            return ClassificationResult(
-                RELATION_DISTINCT,
-                "jev_abstained",
-                None,
-                {
-                    "provider": "jev",
-                    "model": JEV_MODEL,
-                    "rubric_version": JEV_RUBRIC_VERSION,
-                    "failure_code": "unexpected_client_failure",
-                },
-            )
+            return self._abstain("unexpected_client_failure")
         return ClassificationResult(
             RELATION_DISTINCT,
             "jev_uncalibrated",
