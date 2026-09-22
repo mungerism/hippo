@@ -165,15 +165,18 @@ def install_qdrant(
             + "。请先放置单二进制到 ~/.hippo/bin/qdrant 并准备 ~/.hippo/config/qdrant.yaml。"
         )
 
-    target = target_plist or plist_path(QDRANT_SERVICE_LABEL)
+def _bootstrap_service(
+    label: str, target: Path, content: str, load: bool = True
+) -> str:
+    """写入 plist 并通过 launchctl bootstrap 加载服务。"""
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(build_qdrant_plist_content(home), encoding="utf-8")
+    target.write_text(content, encoding="utf-8")
 
     if load:
-        if is_loaded(QDRANT_SERVICE_LABEL):
-            _launchctl("bootout", f"gui/{_uid()}/{QDRANT_SERVICE_LABEL}")
+        if is_loaded(label):
+            _launchctl("bootout", f"gui/{_uid()}/{label}")
             for _ in range(10):
-                if not is_loaded(QDRANT_SERVICE_LABEL):
+                if not is_loaded(label):
                     break
                 time.sleep(0.1)
         proc = None
@@ -186,7 +189,38 @@ def install_qdrant(
             raise RuntimeError(
                 f"launchctl bootstrap 失败: {proc.stderr.strip() or proc.stdout.strip()}"
             )
-    return f"已安装并加载 {QDRANT_SERVICE_LABEL}（plist: {target}）"
+    return f"已安装并加载 {label}（plist: {target}）"
+
+
+def _uninstall_one(label: str) -> str:
+    """卸载指定 Label 的 LaunchAgent 服务。"""
+    target = plist_path(label)
+    if is_loaded(label):
+        _launchctl("bootout", f"gui/{_uid()}/{label}")
+    if target.exists():
+        target.unlink()
+        return f"已卸载 {label}"
+    return f"{label} 未安装，无需卸载"
+
+
+def install_qdrant(
+    home: Path = HIPPO_HOME, load: bool = True, target_plist: Optional[Path] = None
+) -> str:
+    """安装（或重装）Qdrant LaunchAgent 并加载。"""
+    qdrant_bin = home / "bin" / "qdrant"
+    qdrant_cfg = home / "config" / "qdrant.yaml"
+    missing = [p for p in (qdrant_bin, qdrant_cfg) if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "缺少 Qdrant 运行文件: "
+            + ", ".join(str(m) for m in missing)
+            + "。请先放置单二进制到 ~/.hippo/bin/qdrant 并准备 ~/.hippo/config/qdrant.yaml。"
+        )
+
+    target = target_plist or plist_path(QDRANT_SERVICE_LABEL)
+    return _bootstrap_service(
+        QDRANT_SERVICE_LABEL, target, build_qdrant_plist_content(home), load=load
+    )
 
 
 def install_worker(
@@ -195,27 +229,9 @@ def install_worker(
     """安装（或重装）Worker LaunchAgent 并加载。"""
     (home / "logs").mkdir(parents=True, exist_ok=True)
     target = target_plist or plist_path(WORKER_SERVICE_LABEL)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(build_worker_plist_content(home), encoding="utf-8")
-
-    if load:
-        if is_loaded(WORKER_SERVICE_LABEL):
-            _launchctl("bootout", f"gui/{_uid()}/{WORKER_SERVICE_LABEL}")
-            for _ in range(10):
-                if not is_loaded(WORKER_SERVICE_LABEL):
-                    break
-                time.sleep(0.1)
-        proc = None
-        for attempt in range(5):
-            proc = _launchctl("bootstrap", f"gui/{_uid()}", str(target))
-            if proc.returncode == 0:
-                break
-            time.sleep(0.2)
-        if proc and proc.returncode != 0:
-            raise RuntimeError(
-                f"launchctl bootstrap 失败: {proc.stderr.strip() or proc.stdout.strip()}"
-            )
-    return f"已安装并加载 {WORKER_SERVICE_LABEL}（plist: {target}）"
+    return _bootstrap_service(
+        WORKER_SERVICE_LABEL, target, build_worker_plist_content(home), load=load
+    )
 
 
 def install_service(
@@ -225,50 +241,34 @@ def install_service(
     target_plist: Optional[Path] = None,
 ) -> str:
     """安装（或重装）指定 LaunchAgent 服务并加载。默认只操作 qdrant 保持向后兼容。"""
-    if target == "qdrant":
-        return install_qdrant(home=home, load=load, target_plist=target_plist)
-    elif target == "worker":
-        return install_worker(home=home, load=load, target_plist=target_plist)
-    elif target == "all":
-        r1 = install_qdrant(home=home, load=load)
-        r2 = install_worker(home=home, load=load)
-        return f"{r1}\n{r2}"
-    else:
+    actions = {
+        "qdrant": lambda: install_qdrant(home=home, load=load, target_plist=target_plist),
+        "worker": lambda: install_worker(home=home, load=load, target_plist=target_plist),
+        "all": lambda: f"{install_qdrant(home=home, load=load)}\n{install_worker(home=home, load=load)}",
+    }
+    if target not in actions:
         raise ValueError(f"未知服务目标: {target}（可选 qdrant | worker | all）")
+    return actions[target]()
 
 
 def uninstall_qdrant() -> str:
-    target = plist_path(QDRANT_SERVICE_LABEL)
-    if is_loaded(QDRANT_SERVICE_LABEL):
-        _launchctl("bootout", f"gui/{_uid()}/{QDRANT_SERVICE_LABEL}")
-    if target.exists():
-        target.unlink()
-        return f"已卸载 {QDRANT_SERVICE_LABEL}"
-    return f"{QDRANT_SERVICE_LABEL} 未安装，无需卸载"
+    return _uninstall_one(QDRANT_SERVICE_LABEL)
 
 
 def uninstall_worker() -> str:
-    target = plist_path(WORKER_SERVICE_LABEL)
-    if is_loaded(WORKER_SERVICE_LABEL):
-        _launchctl("bootout", f"gui/{_uid()}/{WORKER_SERVICE_LABEL}")
-    if target.exists():
-        target.unlink()
-        return f"已卸载 {WORKER_SERVICE_LABEL}"
-    return f"{WORKER_SERVICE_LABEL} 未安装，无需卸载"
+    return _uninstall_one(WORKER_SERVICE_LABEL)
 
 
 def uninstall_service(target: str = "qdrant") -> str:
     """卸载指定 LaunchAgent 服务并删除 plist。默认只操作 qdrant 保持向后兼容。"""
-    if target == "qdrant":
-        return uninstall_qdrant()
-    elif target == "worker":
-        return uninstall_worker()
-    elif target == "all":
-        r1 = uninstall_qdrant()
-        r2 = uninstall_worker()
-        return f"{r1}\n{r2}"
-    else:
+    actions = {
+        "qdrant": uninstall_qdrant,
+        "worker": uninstall_worker,
+        "all": lambda: f"{uninstall_qdrant()}\n{uninstall_worker()}",
+    }
+    if target not in actions:
         raise ValueError(f"未知服务目标: {target}（可选 qdrant | worker | all）")
+    return actions[target]()
 
 
 def restart_one(label: str, home: Path = HIPPO_HOME) -> str:
@@ -290,20 +290,20 @@ def restart_one(label: str, home: Path = HIPPO_HOME) -> str:
 
 def restart_service(target: str = "all", home: Path = HIPPO_HOME) -> str:
     """重启指定服务（qdrant | worker | all）。"""
-    if target == "qdrant":
-        return restart_one(QDRANT_SERVICE_LABEL, home=home)
-    elif target == "worker":
-        return restart_one(WORKER_SERVICE_LABEL, home=home)
-    elif target == "all":
-        results = []
-        for lbl in (QDRANT_SERVICE_LABEL, WORKER_SERVICE_LABEL):
-            if plist_path(lbl).exists() or is_loaded(lbl):
-                results.append(restart_one(lbl, home=home))
-        if not results:
-            return "未安装任何常驻服务，无需重启"
-        return "\n".join(results)
-    else:
+    actions = {
+        "qdrant": lambda: restart_one(QDRANT_SERVICE_LABEL, home=home),
+        "worker": lambda: restart_one(WORKER_SERVICE_LABEL, home=home),
+        "all": lambda: (
+            "\n".join(
+                restart_one(lbl, home=home)
+                for lbl in (QDRANT_SERVICE_LABEL, WORKER_SERVICE_LABEL)
+                if plist_path(lbl).exists() or is_loaded(lbl)
+            ) or "未安装任何常驻服务，无需重启"
+        ),
+    }
+    if target not in actions:
         raise ValueError(f"未知服务目标: {target}（可选 qdrant | worker | all）")
+    return actions[target]()
 
 
 def service_status() -> Dict[str, bool]:

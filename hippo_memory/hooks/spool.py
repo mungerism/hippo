@@ -381,16 +381,7 @@ class SpoolStorage:
         for job in dead_jobs:
             retried.append(job.job_id)
             if not dry_run:
-                self.update_state(
-                    job.job_id,
-                    JobState.PENDING,
-                    attempt=0,
-                    not_before=0.0,
-                    error=None,
-                    worker_pid=None,
-                    claimed_at=None,
-                    skip_reason=None,
-                )
+                self.retry_job(job.job_id)
         return retried
 
     def prune_jobs(
@@ -463,6 +454,7 @@ class SpoolStorage:
                     os.replace(tmp_tombstone, final_tombstone)
                 except Exception as e:
                     logger.error(f"Failed to write tombstone for {job_id}: {e}")
+                    continue
 
                 try:
                     shutil.rmtree(entry)
