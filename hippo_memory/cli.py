@@ -693,12 +693,10 @@ def hook_capture(
             worker = SpoolWorker(storage=storage)
             worker.process_one_job(payload)
         else:
-            # Check if dev.hippo.worker is currently running as LaunchAgent
-            from hippo_memory.service import is_worker_running
-            if not is_worker_running():
-                # Spawn background detached worker to process queue without blocking host.
-                # Attempting to drain regardless of is_new enables self-healing of any stranded jobs
-                # left by crashed workers (protected by mutual-exclusion kernel flock).
+            # Hot-path fast check (<0.1ms): if a worker is already active (holding worker.lock),
+            # avoid spawning a redundant detached drain process.
+            # If no worker is active, spawn background detached worker with self-healing fallback.
+            if not storage.is_worker_active():
                 try:
                     subprocess.Popen(
                         [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
@@ -831,11 +829,19 @@ def hook_retry(
         if not payload:
             console.print(f"[bold red]✗ 未找到作业: {job_id}[/bold red]")
             raise typer.Exit(1)
+        st = storage.load_state(job_id)
+        current_state = st.get("state")
+        if current_state not in ("dead", "skipped"):
+            console.print(
+                f"[bold red]✗ 作业 {job_id} 当前状态为 '{current_state}'，仅支持重试 dead 或 skipped 状态的作业。[/bold red]"
+            )
+            raise typer.Exit(1)
         if dry_run:
-            st = storage.load_state(job_id)
-            console.print(f"[yellow](DRY-RUN) 作业 {job_id} 当前状态: {st.get('state')}，将被重置为 pending。[/yellow]")
+            console.print(f"[yellow](DRY-RUN) 作业 {job_id} 当前状态: {current_state}，将被重置为 pending。[/yellow]")
             return
-        storage.retry_job(job_id)
+        if not storage.retry_job(job_id):
+            console.print(f"[bold red]✗ 重试作业 {job_id} 失败。[/bold red]")
+            raise typer.Exit(1)
         console.print(f"[bold green]✓ 作业 {job_id} 已重置为 pending 状态。[/bold green]")
 
     if drain:
@@ -872,6 +878,10 @@ def hook_prune(
     valid_states = {"dead", "skipped", "completed", "coalesced", "all"}
     if state not in valid_states:
         console.print(f"[bold red]✗ 无效的 --state:[/bold red] {state}（仅支持 {', '.join(sorted(valid_states))}）")
+        raise typer.Exit(1)
+
+    if (days is not None and days < 0) or (hours is not None and hours < 0):
+        console.print("[bold red]✗ 时间参数 --days 与 --hours 不能为负数。[/bold red]")
         raise typer.Exit(1)
 
     if not dry_run and not force:
