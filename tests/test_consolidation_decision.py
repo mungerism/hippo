@@ -14,6 +14,7 @@ from hippo_memory.decision import (
     RELATION_CONFLICT,
     RELATION_DISTINCT,
     RELATION_EQUIVALENT,
+    ClassificationResult,
     ConsolidationDecider,
     RelationshipClassifier,
     WinnerArbiter,
@@ -335,6 +336,89 @@ class TestClassifierFailClosed(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 RelationshipClassifier(**kwargs)
+
+
+class TestReplaceableClassifier(unittest.TestCase):
+    def test_structured_evidence_keeps_class_probability_separate_from_provider_confidence(self):
+        class _Classifier:
+            def __init__(self):
+                self.calls = 0
+
+            def classify(self, first, second):
+                self.calls += 1
+                return ClassificationResult(
+                    RELATION_CONFLICT,
+                    "semantic_relation",
+                    0.91,
+                    evidence={
+                        "confidence_kind": "choice_probability",
+                        "provider_confidence": 0.72,
+                    },
+                )
+
+        classifier = _Classifier()
+        decision = ConsolidationDecider(classifier=classifier).decide(
+            _memory("mem-a", "项目使用 PostgreSQL", confirmed_at="2026-09-01T00:00:00+00:00"),
+            _memory("mem-b", "项目迁移至 MySQL", confirmed_at="2026-09-05T00:00:00+00:00"),
+        )
+
+        self.assertEqual(classifier.calls, 1)
+        self.assertEqual(decision.relation, RELATION_CONFLICT)
+        self.assertEqual(decision.winner_id, "mem-b")
+        self.assertEqual(decision.reason, "recency")
+        self.assertEqual(decision.confidence, 0.91)
+        self.assertEqual(
+            decision.evidence["classification"]["details"],
+            {"confidence_kind": "choice_probability", "provider_confidence": 0.72},
+        )
+
+    def test_preclassification_rejects_unsafe_pairs_without_calling_backend(self):
+        class _NoCallClassifier:
+            def classify(self, first, second):
+                raise AssertionError("unsafe pair reached backend")
+
+        decider = ConsolidationDecider(classifier=_NoCallClassifier())
+        active = _memory("mem-a", "fact a")
+        inactive = _memory("mem-b", "fact b")
+        inactive["metadata"]["status"] = "superseded"
+
+        cases = (
+            (active, _memory("mem-a", "fact a"), "self_pair_cannot_be_consolidated"),
+            (active, _memory("mem-b", "  FACT   A "), "exact_normalized_text_match"),
+            (active, _memory("mem-b", " "), "empty_memory_text"),
+            (active, _memory("mem-b", "fact b", user_id="another"), "identity_boundary_mismatch"),
+            (active, inactive, "inactive_memory"),
+        )
+        for first, second, reason in cases:
+            with self.subTest(reason=reason):
+                decision = decider.decide(first, second)
+                self.assertEqual(
+                    decision.evidence["classification"]["reason"], reason
+                )
+        self.assertEqual(decider.decide(active, cases[1][1]).relation, RELATION_EQUIVALENT)
+
+    def test_malformed_custom_verdict_cannot_create_mutation_plan(self):
+        class _Classifier:
+            def __init__(self, result):
+                self.result = result
+
+            def classify(self, first, second):
+                return self.result
+
+        for verdict in (
+            ClassificationResult("MAYBE", "unsupported", 0.9),
+            ClassificationResult(RELATION_EQUIVALENT, "bad_score", float("nan")),
+            ClassificationResult(RELATION_EQUIVALENT, "missing_score", None),
+            ClassificationResult(RELATION_EQUIVALENT, "bad_evidence", 0.9, evidence=[]),
+            None,
+        ):
+            with self.subTest(verdict=verdict):
+                decision = ConsolidationDecider(classifier=_Classifier(verdict)).decide(
+                    _memory("mem-a", "fact a"), _memory("mem-b", "fact b")
+                )
+                self.assertEqual(decision.reason, "malformed_classifier_output")
+                self.assertEqual(decision.relation, RELATION_DISTINCT)
+                self.assertIsNone(decision.winner_id)
 
 
 class TestWinnerArbitration(unittest.TestCase):
