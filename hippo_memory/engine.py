@@ -1478,7 +1478,7 @@ class HippoEngine:
             Tuple of (accepted_memories_list, evaluation_trace_object).
         """
         import dataclasses
-        from hippo_memory.gate import filter_search_results_with_details
+        from hippo_memory.gate import _is_valid_numeric, filter_search_results_with_details
         from hippo_memory.lifecycle import is_active_memory, status_of
 
         try:
