@@ -47,6 +47,7 @@ from hippo_memory.decision import (
     ConsolidationDecider,
     ConsolidationDecision,
     RelationshipClassifier,
+    RelationshipClassificationBackend,
     WinnerArbiter,
 )
 
@@ -181,7 +182,7 @@ class MemoryConsolidator:
         self,
         engine: Any,
         *,
-        classifier: Optional[Any] = None,
+        classifier: Optional[RelationshipClassificationBackend] = None,
         discovery: Optional[CandidateDiscovery] = None,
         applier: Optional[ConsolidationApplier] = None,
         classifier_llm: Optional[Any] = None,
