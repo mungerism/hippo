@@ -845,7 +845,17 @@ def hook_retry(
             console.print("[cyan]正在触发前台消费...[/cyan]")
             worker = SpoolWorker(storage=storage)
             count = worker.drain(wait_for_retries=False)
-            console.print(f"[bold green]✓ Spool 消费完成，处理了 {count} 项作业。[/bold green]")
+            if job_id:
+                st = storage.load_state(job_id)
+                final_state = st.get("state")
+                if final_state == JobState.COMPLETED.value:
+                    console.print(f"[bold green]✓ 作业 {job_id} 消费重试成功！[/bold green]")
+                elif final_state == JobState.SKIPPED.value:
+                    console.print(f"[yellow]⚡ 作业 {job_id} 被跳过: {st.get('skip_reason')}[/yellow]")
+                else:
+                    console.print(f"[dim]Spool 消费已触发，作业 {job_id} 当前状态: {final_state}[/dim]")
+            else:
+                console.print(f"[bold green]✓ Spool 消费完成，处理了 {count} 项作业。[/bold green]")
 
 
 @hook_app.command("prune")

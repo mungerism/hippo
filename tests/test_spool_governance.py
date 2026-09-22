@@ -273,6 +273,22 @@ class TestTombstoneIdempotency(unittest.TestCase):
         self.assertTrue(self.storage.tombstones_dir.exists())
         self.assertTrue(self.storage.tombstones_dir.is_dir())
 
+    def test_tombstone_write_failure_aborts_deletion(self):
+        """If tombstone write fails, prune should abort deleting the job dir to preserve idempotency."""
+        payload = CapturedPayload(
+            job_id="tomb-fail", host="codex", event="Stop",
+            session_id="sess-1", project_dir="/tmp/test",
+        )
+        self.storage.enqueue(payload)
+        self.storage.update_state("tomb-fail", JobState.DEAD)
+
+        with patch("builtins.open", side_effect=OSError("Disk write error")):
+            pruned = self.storage.prune_jobs(states=[JobState.DEAD.value])
+
+        self.assertEqual(len(pruned), 0)
+        # Job directory must NOT be deleted
+        self.assertTrue((self.spool_dir / "jobs" / "tomb-fail").exists())
+
 
 class TestWorkerDaemonSignals(unittest.TestCase):
     """Tests for daemon single-instance lock behavior and signal handling."""
