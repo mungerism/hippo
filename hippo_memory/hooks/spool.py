@@ -136,6 +136,11 @@ TERMINAL_STATES: set[str] = {
     JobState.DEAD.value,
 }
 
+RETRYABLE_STATES: set[str] = {
+    JobState.DEAD.value,
+    JobState.SKIPPED.value,
+}
+
 
 class SpoolStorage:
     """Filesystem-based atomic spool queue and state store."""
@@ -357,11 +362,41 @@ class SpoolStorage:
             )
             logger.warning(f"Job {job_id} moved to DEAD state: {error_msg}")
 
-    def retry_job(self, job_id: str) -> bool:
-        """Reset a job back to pending state, clearing stale execution state."""
-        job_dir = self.jobs_dir / job_id
-        if not job_dir.exists():
+    def is_worker_active(self) -> bool:
+        """Non-blocking probe to check if a worker currently holds the lock on worker.lock.
+
+        Uses fcntl.flock to test lock contention in <0.1ms without invoking external processes.
+        """
+        try:
+            fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            except (BlockingIOError, OSError):
+                return True
+            finally:
+                os.close(fd)
+        except OSError:
             return False
+
+    def retry_job(self, job_id: str, allowed_states: Optional[set[str]] = None) -> bool:
+        """Reset a job back to pending state, clearing stale execution state.
+
+        Only jobs in retryable states (by default DEAD or SKIPPED) can be retried.
+        Returns False if job does not exist or its current state is not retryable.
+        """
+        st = self.load_state(job_id)
+        if not st:
+            return False
+        valid_states = allowed_states if allowed_states is not None else RETRYABLE_STATES
+        current_state = st.get("state")
+        if current_state not in valid_states:
+            logger.warning(
+                f"Cannot retry job {job_id} in state '{current_state}'; only {valid_states} allowed"
+            )
+            return False
+
         self.update_state(
             job_id,
             JobState.PENDING,
@@ -402,6 +437,9 @@ class SpoolStorage:
         if non_terminal:
             raise ValueError(f"Cannot prune non-terminal state(s): {', '.join(sorted(non_terminal))}")
 
+        if older_than_seconds is not None and older_than_seconds < 0:
+            raise ValueError("older_than_seconds must be non-negative")
+
         now = time.time()
         pruned: List[Dict[str, Any]] = []
 
@@ -409,7 +447,7 @@ class SpoolStorage:
             return pruned
 
         for entry in sorted(self.jobs_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0):
-            if not entry.is_dir():
+            if not entry.is_dir() or entry.name.startswith("."):
                 continue
             job_id = entry.name
             st = self.load_state(job_id)
@@ -429,7 +467,7 @@ class SpoolStorage:
                 if now - updated_at < older_than_seconds:
                     continue
 
-            # Secondary verification before actual deletion to prevent race condition
+            # Secondary verification and atomic deletion via staging directory to prevent race condition
             if not dry_run:
                 st_verify = self.load_state(job_id)
                 verify_state = st_verify.get("state")
@@ -439,12 +477,39 @@ class SpoolStorage:
                     )
                     continue
 
+                staging_entry = self.jobs_dir / f".prune_{job_id}_{os.getpid()}_{int(now * 1000)}"
+                try:
+                    entry.rename(staging_entry)
+                except OSError:
+                    # Concurrently moved, deleted, or claimed
+                    continue
+
+                state_file = staging_entry / "state.json"
+                st_disk = {}
+                if state_file.exists():
+                    try:
+                        with open(state_file, "r", encoding="utf-8") as f:
+                            st_disk = json.load(f)
+                    except Exception:
+                        pass
+
+                disk_state = st_disk.get("state")
+                if disk_state and disk_state not in target_states:
+                    logger.warning(
+                        f"Job {job_id} state changed from {current_state} to {disk_state} during prune, skipping"
+                    )
+                    try:
+                        staging_entry.rename(entry)
+                    except OSError:
+                        pass
+                    continue
+
                 # Write tombstone before deleting directory
                 tombstone_data = {
                     "job_id": job_id,
-                    "final_state": verify_state,
+                    "final_state": disk_state or verify_state,
                     "pruned_at": now,
-                    "semantic_cursor": st_verify.get("semantic_cursor"),
+                    "semantic_cursor": st_disk.get("semantic_cursor") or st_verify.get("semantic_cursor"),
                 }
                 tmp_tombstone = self.tombstones_dir / f"{job_id}.tmp"
                 final_tombstone = self.tombstones_dir / f"{job_id}.json"
@@ -454,12 +519,16 @@ class SpoolStorage:
                     os.replace(tmp_tombstone, final_tombstone)
                 except Exception as e:
                     logger.error(f"Failed to write tombstone for {job_id}: {e}")
+                    try:
+                        staging_entry.rename(entry)
+                    except OSError:
+                        pass
                     continue
 
                 try:
-                    shutil.rmtree(entry)
+                    shutil.rmtree(staging_entry)
                 except Exception as e:
-                    logger.error(f"Failed to remove job dir {entry}: {e}")
+                    logger.error(f"Failed to remove staging job dir {staging_entry}: {e}")
                     continue
 
             pruned.append({
