@@ -20,8 +20,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import math
-from typing import Any, Mapping, Optional
+from types import MappingProxyType
+from typing import Any, Mapping, Optional, Protocol
 
+from hippo_memory.lifecycle import is_active_memory
 from hippo_memory.renderer import UNTRUSTED_CONTEXT_INSTRUCTION, escape_untrusted_text
 
 
@@ -65,10 +67,49 @@ class ArbitrationResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _Classification:
+class ClassificationResult:
+    """A text-only relation verdict from a Cold Path classifier.
+
+    ``confidence`` is the backend's decision score. An adapter must identify
+    its meaning in ``evidence`` when that score is a class probability.
+    Provider-specific statistics belong in ``evidence`` separately and are
+    never used by the deterministic winner arbiter.
+    """
+
     relation: str
     reason: str
     confidence: Optional[float]
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+
+class RelationshipClassificationBackend(Protocol):
+    """Semantic relation seam, given read-only ID/text projections only."""
+
+    def classify(
+        self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
+    ) -> ClassificationResult: ...
+
+
+def _preclassify(
+    memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
+) -> Optional[ClassificationResult]:
+    """Apply the same deterministic text rules before any semantic backend."""
+    id_a = str(memory_a.get("id", "") or "")
+    id_b = str(memory_b.get("id", "") or "")
+    if id_a and id_a == id_b:
+        return ClassificationResult(
+            RELATION_DISTINCT, "self_pair_cannot_be_consolidated", None
+        )
+
+    text_a = _normalized_text(memory_a)
+    text_b = _normalized_text(memory_b)
+    if not text_a or not text_b:
+        return ClassificationResult(RELATION_DISTINCT, "empty_memory_text", None)
+    if text_a == text_b:
+        return ClassificationResult(
+            RELATION_EQUIVALENT, "exact_normalized_text_match", 1.0
+        )
+    return None
 
 
 class RelationshipClassifier:
@@ -118,28 +159,21 @@ class RelationshipClassifier:
 
     def classify(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
-    ) -> _Classification:
-        id_a = str(memory_a.get("id", "") or "")
-        id_b = str(memory_b.get("id", "") or "")
-        if id_a and id_a == id_b:
-            return _Classification(
-                RELATION_DISTINCT, "self_pair_cannot_be_consolidated", None
-            )
-
-        text_a = _normalized_text(memory_a)
-        text_b = _normalized_text(memory_b)
-        if not text_a or not text_b:
-            return _Classification(RELATION_DISTINCT, "empty_memory_text", None)
-        if text_a == text_b:
-            return _Classification(
-                RELATION_EQUIVALENT, "exact_normalized_text_match", 1.0
-            )
+    ) -> ClassificationResult:
+        preliminary = _preclassify(memory_a, memory_b)
+        if preliminary is not None:
+            return preliminary
 
         if self.llm is None:
-            return _Classification(
+            return ClassificationResult(
                 RELATION_DISTINCT, "no_semantic_classifier_available", None
             )
-        return self._classify_via_llm(memory_a, memory_b, id_a, id_b)
+        return self._classify_via_llm(
+            memory_a,
+            memory_b,
+            str(memory_a.get("id", "") or ""),
+            str(memory_b.get("id", "") or ""),
+        )
 
     def _classify_via_llm(
         self,
@@ -147,7 +181,7 @@ class RelationshipClassifier:
         memory_b: Mapping[str, Any],
         id_a: str,
         id_b: str,
-    ) -> _Classification:
+    ) -> ClassificationResult:
         # Canonical pair order keeps the prompt (and therefore the verdict)
         # independent of which side candidate discovery happened to seed.
         first, second = sorted(
@@ -165,15 +199,15 @@ class RelationshipClassifier:
                 messages, response_format={"type": "json_object"}
             )
         except Exception:
-            return _Classification(RELATION_DISTINCT, "classifier_exception", None)
+            return ClassificationResult(RELATION_DISTINCT, "classifier_exception", None)
 
         parsed = _parse_classifier_response(response)
         if parsed is None:
-            return _Classification(RELATION_DISTINCT, "malformed_classifier_output", None)
+            return ClassificationResult(RELATION_DISTINCT, "malformed_classifier_output", None)
         relation, confidence, reason = parsed
         if confidence < self.low_confidence_threshold:
-            return _Classification(RELATION_DISTINCT, "low_confidence", confidence)
-        return _Classification(relation, reason or "llm_classification", confidence)
+            return ClassificationResult(RELATION_DISTINCT, "low_confidence", confidence)
+        return ClassificationResult(relation, reason or "llm_classification", confidence)
 
 
 class WinnerArbiter:
@@ -284,11 +318,29 @@ class ConsolidationDecider:
     def __init__(
         self,
         *,
-        classifier: Optional[RelationshipClassifier] = None,
+        classifier: Optional[RelationshipClassificationBackend] = None,
         arbiter: Optional[WinnerArbiter] = None,
+        min_confidence: Optional[float] = None,
     ) -> None:
         self.classifier = classifier or RelationshipClassifier()
         self.arbiter = arbiter or WinnerArbiter()
+        # Keep an explicitly configured LLM threshold compatible. Other
+        # backends get a conservative default until their own calibrated
+        # threshold is supplied by the Cold Path configuration.
+        if min_confidence is None:
+            min_confidence = (
+                self.classifier.low_confidence_threshold
+                if isinstance(self.classifier, RelationshipClassifier)
+                else 0.6
+            )
+        if (
+            not isinstance(min_confidence, (int, float))
+            or isinstance(min_confidence, bool)
+            or not math.isfinite(min_confidence)
+            or not 0.0 <= min_confidence <= 1.0
+        ):
+            raise ValueError("min_confidence must be a finite number in [0.0, 1.0]")
+        self.min_confidence = float(min_confidence)
 
     def decide(
         self, memory_a: Mapping[str, Any], memory_b: Mapping[str, Any]
@@ -319,19 +371,64 @@ class ConsolidationDecider:
         if identity_a != identity_b:
             return fail_closed("identity_boundary_mismatch")
 
+        if not is_active_memory(memory_a) or not is_active_memory(memory_b):
+            return fail_closed("inactive_memory")
+
+        preliminary = _preclassify(memory_a, memory_b)
+
         try:
-            classification = self.classifier.classify(memory_a, memory_b)
+            # The classifier cannot inspect or alter arbitration metadata.
+            # Fresh copies also keep a buggy adapter away from store records.
+            classifier_a = MappingProxyType({
+                "id": str(memory_a["id"]),
+                "memory": str(memory_a.get("memory", "") or ""),
+            })
+            classifier_b = MappingProxyType({
+                "id": str(memory_b["id"]),
+                "memory": str(memory_b.get("memory", "") or ""),
+            })
+            classification = (
+                preliminary
+                if preliminary is not None
+                else self.classifier.classify(classifier_a, classifier_b)
+            )
         except Exception:
-            classification = _Classification(
+            classification = ClassificationResult(
                 RELATION_DISTINCT, "classifier_exception", None
             )
-        if classification.relation not in VALID_RELATIONS:
+        if (
+            not isinstance(classification, ClassificationResult)
+            or classification.relation not in VALID_RELATIONS
+            or not isinstance(classification.reason, str)
+            or not isinstance(classification.evidence, Mapping)
+            or (
+                classification.relation != RELATION_DISTINCT
+                and classification.confidence is None
+            )
+            or (
+                classification.confidence is not None
+                and (
+                    not isinstance(classification.confidence, (int, float))
+                    or isinstance(classification.confidence, bool)
+                    or not 0.0 <= classification.confidence <= 1.0
+                    or not math.isfinite(classification.confidence)
+                )
+            )
+        ):
             return fail_closed("malformed_classifier_output")
+
+        if (
+            classification.relation != RELATION_DISTINCT
+            and classification.confidence < self.min_confidence
+        ):
+            return fail_closed("low_confidence", classification.confidence)
 
         classification_evidence = {
             "reason": classification.reason,
             "confidence": classification.confidence,
         }
+        if classification.evidence:
+            classification_evidence["details"] = dict(classification.evidence)
         if classification.relation == RELATION_DISTINCT:
             return ConsolidationDecision(
                 relation=RELATION_DISTINCT,

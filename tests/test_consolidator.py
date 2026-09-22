@@ -35,7 +35,7 @@ from hippo_memory.consolidator import (
     parse_since,
 )
 import hippo_memory.consolidator as consolidator_module
-from hippo_memory.decision import ConsolidationDecision
+from hippo_memory.decision import ClassificationResult, ConsolidationDecision
 from hippo_memory.engine import HippoEngine
 
 
@@ -232,7 +232,7 @@ class _ScriptedLLM:
 
 
 class _Harness:
-    def __init__(self, records, *, semantic_scores=None, scripted="EQUIVALENT"):
+    def __init__(self, records, *, semantic_scores=None, scripted="EQUIVALENT", classifier=None):
         self.tmp = tempfile.TemporaryDirectory()
         self.lock_dir = Path(self.tmp.name) / "locks"
         self.operations_dir = Path(self.tmp.name) / "operations"
@@ -249,6 +249,7 @@ class _Harness:
         self.classifier_llm = _ScriptedLLM(scripted)
         self.consolidator = MemoryConsolidator(
             self.engine,
+            classifier=classifier,
             discovery=CandidateDiscovery(self.engine, semantic_threshold=0.0),
             classifier_llm=self.classifier_llm,
             applier=ConsolidationApplier(
@@ -333,6 +334,27 @@ class TestEquivalentEndToEnd(unittest.TestCase):
         self.assertEqual(audit["metadata"]["status"], "superseded")
         self.assertEqual(audit["metadata"]["supersede_reason"], "equivalent_merged")
         self.assertIn("superseded_at", audit["metadata"])
+
+    def test_injected_classifier_runs_through_existing_apply_path(self):
+        class _Classifier:
+            def classify(self, first, second):
+                return ClassificationResult("EQUIVALENT", "injected", 0.9)
+
+        harness = _Harness(
+            [_memory("left", "项目使用 PostgreSQL"),
+             _memory("right", "项目数据库为 PostgreSQL")],
+            semantic_scores={frozenset(("left", "right")): 0.93},
+            classifier=_Classifier(),
+        )
+        self.addCleanup(harness.cleanup)
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.merged, 1)
+        self.assertEqual(result.superseded, 1)
+        self.assertEqual(harness.classifier_llm.calls, 0)
+        self.assertEqual(len(harness.applier_journal_entries()), 1)
 
 
 class TestConflictEndToEnd(unittest.TestCase):

@@ -18,8 +18,10 @@ flowchart TD
 
     subgraph COLD ["Cold Path (离线治理 · 定时/手动)"]
         C1["hippo consolidate 触发<br/>(支持 --since 增量扫描)"] --> C2["候选聚类发现<br/>(ANN 相似性近邻图)"]
-        C2 --> C3["冲突 / 等价关系分类器<br/>(LLM 关系判别)"]
-        C3 --> C4["幂等 Apply 执行<br/>(等价合并、版本废弃、状态收敛)"]
+        C2 --> C3["身份与活跃性复核<br/>精确匹配 / 空文本规则"]
+        C3 --> C4["可替换的语义关系分类器<br/>(默认独立 LLM，异常保守弃权)"]
+        C4 --> C5["WinnerArbiter<br/>确定性胜者仲裁"]
+        C5 --> C6["幂等 Apply 执行<br/>(版本重验、软删除与恢复)"]
     end
 ```
 
@@ -52,8 +54,9 @@ flowchart TD
 - **核心目标**：长期运行后，记忆库中不可避免地会出现重复事实、互相冲突的偏好（例如“采用 Poetry”与后来的“迁移到 uv”），以及过期失效的技术计划。
 - **机制与实现**：
   - **候选发现 (Candidate Discovery)**：使用 ANN 近邻检索和时间窗口筛选潜在相关的记忆对；
-  - **关系分类 (Relationship Classification)**：通过高智商 LLM 判断两两记忆间的关系：
+  - **关系分类 (Relationship Classification)**：先复核 identity、活跃状态与精确文本规则，其余候选仅以只读 ID/事实文本投影交由分类器判定；默认仍使用独立 LLM。决策层对非独立关系再次应用低置信度门槛，分类器只返回关系、置信分值与可选审计证据：
     - `EQUIVALENT`（等价事实）：合并为一条更精确的陈述，继承两者的引用；
     - `CONFLICT`（冲突事实）：以最新明确的决策为胜者，将旧记忆标记为 `SUPERSEDED`；
     - `DISTINCT`（独立事实）：保留两者。
+  - **胜者仲裁 (Winner Arbitration)**：分类为等价或冲突后，才按确认时间、来源权威和稳定性规则确定赢家；模型证据不能直接指定赢家。
   - **幂等 Apply**：基于行版本号（Record Version）与并发锁原子执行，支持 `--dry-run` 预览。
