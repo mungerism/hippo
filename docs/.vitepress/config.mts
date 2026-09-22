@@ -70,6 +70,7 @@ export default withMermaid(
             { text: '0002: 会话记忆异步蒸馏与双事件', link: '/adr/0002-session-memory-distillation' },
             { text: '0003: Cold Path 记忆合并与生命周期', link: '/adr/0003-cold-path-memory-consolidation' },
             { text: '0004: 向量 Profile 隔离与重建迁移', link: '/adr/0004-embedding-profile-isolation-and-migration' },
+            { text: '0005: Spool 队列治理与 Worker 常驻保活', link: '/adr/0005-spool-governance-and-worker-service' },
           ],
         },
       ],

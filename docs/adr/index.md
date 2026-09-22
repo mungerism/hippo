@@ -12,6 +12,7 @@
 | [0002](/adr/0002-session-memory-distillation) | 会话记忆异步蒸馏与双事件 | 已通过 (Accepted) | 2026-09-08 | 采用 Spool 队列与异步 Worker 实现对话蒸馏，保障前台交互零延迟。 |
 | [0003](/adr/0003-cold-path-memory-consolidation) | Cold Path 记忆合并与生命周期 | 已通过 (Accepted) | 2026-09-13 | 引入离线候选发现、冲突消解分类器与行版本号幂等 Apply 机制。 |
 | [0004](/adr/0004-embedding-profile-isolation-and-migration) | 向量 Profile 隔离与重建迁移 | 已通过 (Accepted) | 2026-09-19 | 按 (provider, model, dims) 严格隔离集合，伴生实体同构迁移与只读断点续传。 |
+| [0005](/adr/0005-spool-governance-and-worker-service) | Spool 队列治理与 Worker 常驻保活 | 已通过 (Accepted) | 2026-09-22 | 建立 Worker LaunchAgent 双常驻架构、内核锁极速探测、Tombstone 幂等墓碑与原子修剪。 |
 
 ---
 
