@@ -129,6 +129,14 @@ def is_turns_superset(newer_turns: List[Dict[str, Any]], older_turns: List[Dict[
     return False
 
 
+TERMINAL_STATES: set[str] = {
+    JobState.COMPLETED.value,
+    JobState.SKIPPED.value,
+    JobState.COALESCED.value,
+    JobState.DEAD.value,
+}
+
+
 class SpoolStorage:
     """Filesystem-based atomic spool queue and state store."""
 
@@ -139,10 +147,12 @@ class SpoolStorage:
         self.base_dir = Path(base_dir).expanduser()
         self.jobs_dir = self.base_dir / "jobs"
         self.receipts_dir = self.base_dir / "receipts"
+        self.tombstones_dir = self.base_dir / "tombstones"
         self.lock_path = self.base_dir / "worker.lock"
 
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
+        self.tombstones_dir.mkdir(parents=True, exist_ok=True)
 
     def enqueue(self, payload: CapturedPayload) -> Tuple[bool, str]:
         """Atomically enqueue a job using mkdir as create-if-absent.
@@ -150,6 +160,11 @@ class SpoolStorage:
         Returns:
             (is_new, job_id)
         """
+        # Check tombstones for pruned job-id idempotency
+        tombstone_file = self.tombstones_dir / f"{payload.job_id}.json"
+        if tombstone_file.exists():
+            return False, payload.job_id
+
         job_dir = self.jobs_dir / payload.job_id
         try:
             job_dir.mkdir(parents=True, exist_ok=False)
@@ -341,6 +356,119 @@ class SpoolStorage:
                 error=error_msg,
             )
             logger.warning(f"Job {job_id} moved to DEAD state: {error_msg}")
+
+    def retry_job(self, job_id: str) -> bool:
+        """Reset a job back to pending state, clearing stale execution state."""
+        job_dir = self.jobs_dir / job_id
+        if not job_dir.exists():
+            return False
+        self.update_state(
+            job_id,
+            JobState.PENDING,
+            attempt=0,
+            not_before=0.0,
+            error=None,
+            worker_pid=None,
+            claimed_at=None,
+            skip_reason=None,
+        )
+        return True
+
+    def retry_all_dead(self, dry_run: bool = False) -> List[str]:
+        """Find all DEAD jobs and reset them to PENDING state."""
+        dead_jobs = self.list_jobs(state=JobState.DEAD)
+        retried: List[str] = []
+        for job in dead_jobs:
+            retried.append(job.job_id)
+            if not dry_run:
+                self.retry_job(job.job_id)
+        return retried
+
+    def prune_jobs(
+        self,
+        states: Optional[List[str]] = None,
+        older_than_seconds: Optional[float] = None,
+        dry_run: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Prune jobs in terminal states, creating tombstones to preserve job-id idempotency.
+
+        Raises ValueError if non-terminal states (pending/processing) are targeted.
+        """
+        import shutil
+
+        # Validate target states
+        target_states = set(states) if states else TERMINAL_STATES
+        non_terminal = target_states - TERMINAL_STATES
+        if non_terminal:
+            raise ValueError(f"Cannot prune non-terminal state(s): {', '.join(sorted(non_terminal))}")
+
+        now = time.time()
+        pruned: List[Dict[str, Any]] = []
+
+        if not self.jobs_dir.exists():
+            return pruned
+
+        for entry in sorted(self.jobs_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0):
+            if not entry.is_dir():
+                continue
+            job_id = entry.name
+            st = self.load_state(job_id)
+            current_state = st.get("state")
+
+            if current_state not in target_states:
+                continue
+
+            updated_at = st.get("updated_at")
+            if updated_at is None:
+                try:
+                    updated_at = entry.stat().st_mtime
+                except OSError:
+                    updated_at = now
+
+            if older_than_seconds is not None:
+                if now - updated_at < older_than_seconds:
+                    continue
+
+            # Secondary verification before actual deletion to prevent race condition
+            if not dry_run:
+                st_verify = self.load_state(job_id)
+                verify_state = st_verify.get("state")
+                if verify_state not in target_states:
+                    logger.warning(
+                        f"Job {job_id} state changed from {current_state} to {verify_state} during prune, skipping"
+                    )
+                    continue
+
+                # Write tombstone before deleting directory
+                tombstone_data = {
+                    "job_id": job_id,
+                    "final_state": verify_state,
+                    "pruned_at": now,
+                    "semantic_cursor": st_verify.get("semantic_cursor"),
+                }
+                tmp_tombstone = self.tombstones_dir / f"{job_id}.tmp"
+                final_tombstone = self.tombstones_dir / f"{job_id}.json"
+                try:
+                    with open(tmp_tombstone, "w", encoding="utf-8") as f:
+                        json.dump(tombstone_data, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_tombstone, final_tombstone)
+                except Exception as e:
+                    logger.error(f"Failed to write tombstone for {job_id}: {e}")
+                    continue
+
+                try:
+                    shutil.rmtree(entry)
+                except Exception as e:
+                    logger.error(f"Failed to remove job dir {entry}: {e}")
+                    continue
+
+            pruned.append({
+                "job_id": job_id,
+                "state": current_state,
+                "updated_at": updated_at,
+            })
+
+        return pruned
 
     def is_semantic_cursor_processed(self, cursor: str) -> bool:
         """Check if this semantic state has already been successfully distilled."""
@@ -611,24 +739,53 @@ class SpoolWorker:
         return processed
 
     def daemon(self, poll_interval: float = 2.0, run_once: bool = False) -> None:
-        """Run continuous background daemon loop."""
+        """Run continuous background daemon loop with signal handling and single-worker flock."""
+        import signal
+
         if not self.acquire_lock():
             logger.warning("Spool worker already running. Exiting daemon.")
             return
 
+        stop_requested = False
+
+        def _handle_signal(signum, frame):
+            nonlocal stop_requested
+            logger.info(f"Received signal {signum}, stopping worker daemon gracefully...")
+            stop_requested = True
+
+        old_sigterm = None
+        old_sigint = None
         try:
-            while True:
+            old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+            old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+        except (ValueError, AttributeError):
+            pass
+
+        try:
+            while not stop_requested:
                 self.storage.recover_expired_leases()
                 self.storage.coalesce_pending_jobs()
 
                 now = time.time()
                 pending = self.storage.list_jobs(state=JobState.PENDING)
                 for job in pending:
+                    if stop_requested:
+                        break
                     if job.not_before <= now:
                         self.process_one_job(job)
 
-                if run_once:
+                if run_once or stop_requested:
                     break
-                time.sleep(poll_interval)
+                try:
+                    time.sleep(poll_interval)
+                except InterruptedError:
+                    break
         finally:
+            try:
+                if old_sigterm is not None:
+                    signal.signal(signal.SIGTERM, old_sigterm)
+                if old_sigint is not None:
+                    signal.signal(signal.SIGINT, old_sigint)
+            except (ValueError, AttributeError):
+                pass
             self.release_lock()
