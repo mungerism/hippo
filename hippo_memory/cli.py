@@ -448,29 +448,54 @@ def doctor():
 
 @app.command()
 def service(
-    action: str = typer.Argument(..., help="操作: install | uninstall | status"),
+    action: str = typer.Argument(..., help="操作: install | uninstall | status | restart"),
+    target: str = typer.Argument("qdrant", help="服务目标: qdrant | worker | all (默认 qdrant)"),
 ):
-    """管理 Qdrant LaunchAgent 常驻服务（dev.hippo.qdrant）。"""
+    """管理 Qdrant 与 Worker LaunchAgent 常驻服务。"""
     from hippo_memory import service as svc
 
     try:
         if action == "install":
-            console.print(f"[bold green]✓ {svc.install_service()}[/bold green]")
+            console.print(f"[bold green]✓ {svc.install_service(target=target)}[/bold green]")
         elif action == "uninstall":
-            console.print(f"[bold green]✓ {svc.uninstall_service()}[/bold green]")
+            console.print(f"[bold green]✓ {svc.uninstall_service(target=target)}[/bold green]")
+        elif action == "restart":
+            console.print(f"[bold green]✓ {svc.restart_service(target=target)}[/bold green]")
         elif action == "status":
-            st = svc.service_status()
-            state = (
-                "常驻运行中" if st["loaded"] and st["listening"]
-                else "已加载但未监听" if st["loaded"]
-                else "已安装未加载" if st["plist_exists"]
-                else "未安装（按需拉起模式）"
+            st_all = svc.service_status_all()
+            q_st = st_all["qdrant"]
+            w_st = st_all["worker"]
+
+            table = Table(title="Hippo 常驻服务状态 (LaunchAgent)")
+            table.add_column("服务标识", style="cyan")
+            table.add_column("状态", style="bold")
+            table.add_column("PID / 端口", style="dim")
+            table.add_column("详细说明", style="dim")
+
+            q_state = (
+                "[green]常驻运行中[/green]" if q_st["loaded"] and q_st["listening"]
+                else "[yellow]已加载未监听[/yellow]" if q_st["loaded"]
+                else "[dim]已安装未加载[/dim]" if q_st["plist_exists"]
+                else "[dim]按需拉起模式（未安装）[/dim]"
             )
-            console.print(f"dev.hippo.qdrant: {state}（plist 存在: {st['plist_exists']}，端口监听: {st['listening']}）")
+            q_detail = f"端口: {svc.QDRANT_PORT}" if q_st["listening"] else "端口未监听"
+            table.add_row(svc.QDRANT_SERVICE_LABEL, q_state, str(svc.QDRANT_PORT) if q_st["listening"] else "-", q_detail)
+
+            w_state = (
+                "[green]常驻运行中[/green]" if w_st["running"]
+                else "[yellow]已加载未运行[/yellow]" if w_st["loaded"]
+                else "[dim]已安装未加载[/dim]" if w_st["plist_exists"]
+                else "[dim]未安装（按需消费模式）[/dim]"
+            )
+            w_pid = str(w_st["pid"]) if w_st["pid"] else "-"
+            w_note = f"PID: {w_pid}" if w_st["running"] else (f"退出码: {w_st['last_exit_code']}" if w_st["last_exit_code"] else "未运行")
+            table.add_row(svc.WORKER_SERVICE_LABEL, w_state, w_pid, w_note)
+
+            console.print(table)
         else:
-            console.print(f"[bold red]✗ 未知操作:[/bold red] {action}（可选 install | uninstall | status）")
+            console.print(f"[bold red]✗ 未知操作:[/bold red] {action}（可选 install | uninstall | status | restart）")
             raise typer.Exit(1)
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         console.print(f"[bold red]✗ {e}[/bold red]")
         raise typer.Exit(1)
 
@@ -668,19 +693,22 @@ def hook_capture(
             worker = SpoolWorker(storage=storage)
             worker.process_one_job(payload)
         else:
-            # Spawn background detached worker to process queue without blocking host.
-            # Attempting to drain regardless of is_new enables self-healing of any stranded jobs
-            # left by crashed workers (protected by mutual-exclusion kernel flock).
-            try:
-                subprocess.Popen(
-                    [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
+            # Check if dev.hippo.worker is currently running as LaunchAgent
+            from hippo_memory.service import is_worker_running
+            if not is_worker_running():
+                # Spawn background detached worker to process queue without blocking host.
+                # Attempting to drain regardless of is_new enables self-healing of any stranded jobs
+                # left by crashed workers (protected by mutual-exclusion kernel flock).
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
     except Exception as e:
         sys.stderr.write(f"Hippo Hook capture error: {e}\n")
     finally:
@@ -765,32 +793,133 @@ def hook_status():
 
 @hook_app.command("retry")
 def hook_retry(
-    job_id: str = typer.Argument(..., help="要重试的作业 ID"),
-    drain: bool = typer.Option(True, "--drain/--no-drain", help="重置状态后立即触发消费"),
+    job_id: Optional[str] = typer.Argument(None, help="要重试的单个作业 ID"),
+    all_dead: bool = typer.Option(False, "--all-dead", "-a", help="批量重试所有死信 (dead) 作业"),
+    drain: bool = typer.Option(True, "--drain/--no-drain", help="重置状态后触发消费"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览待重试的作业，不实际修改"),
 ):
     """将指定已失败 (dead) 或被跳过 (skipped) 的作业重新加入队列并触发消费。"""
     from hippo_memory.hooks import SpoolStorage, SpoolWorker, JobState
+    from hippo_memory.service import is_worker_running
+
+    if not job_id and not all_dead:
+        console.print("[bold red]✗ 请指定要重试的 job_id 或使用 --all-dead 批量重试所有死信作业。[/bold red]")
+        raise typer.Exit(1)
+    if job_id and all_dead:
+        console.print("[bold red]✗ 不能同时指定 job_id 和 --all-dead。[/bold red]")
+        raise typer.Exit(1)
+    if dry_run and drain:
+        drain = False
 
     storage = SpoolStorage()
-    payload = storage.load_payload(job_id)
-    if not payload:
-        console.print(f"[bold red]✗ 未找到作业: {job_id}[/bold red]")
-        raise typer.Exit(1)
 
-    storage.update_state(job_id, JobState.PENDING, attempt=0, not_before=0.0, error=None)
-    console.print(f"[bold green]✓ 作业 {job_id} 已重置为 pending 状态。[/bold green]")
+    if all_dead:
+        retried = storage.retry_all_dead(dry_run=dry_run)
+        if not retried:
+            console.print("[yellow]当前 Spool 队列中没有 dead 状态的死信作业。[/yellow]")
+            return
+        mode_str = "[yellow](DRY-RUN 预览)[/yellow]" if dry_run else "[green]已重置为 pending[/green]"
+        console.print(f"[bold green]✓ 共找到 {len(retried)} 个死信作业，{mode_str}。[/bold green]")
+        if dry_run:
+            for jid in retried[:10]:
+                console.print(f"  • {jid}")
+            if len(retried) > 10:
+                console.print(f"  ... 另有 {len(retried) - 10} 个作业未展开")
+            return
+    else:
+        payload = storage.load_payload(job_id)
+        if not payload:
+            console.print(f"[bold red]✗ 未找到作业: {job_id}[/bold red]")
+            raise typer.Exit(1)
+        if dry_run:
+            st = storage.load_state(job_id)
+            console.print(f"[yellow](DRY-RUN) 作业 {job_id} 当前状态: {st.get('state')}，将被重置为 pending。[/yellow]")
+            return
+        storage.retry_job(job_id)
+        console.print(f"[bold green]✓ 作业 {job_id} 已重置为 pending 状态。[/bold green]")
 
     if drain:
-        worker = SpoolWorker(storage=storage)
-        worker.drain(wait_for_retries=False)
-        st = storage.load_state(job_id)
-        final_state = st.get("state")
-        if final_state == JobState.COMPLETED.value:
-            console.print(f"[bold green]✓ 作业 {job_id} 消费重试成功！[/bold green]")
-        elif final_state == JobState.SKIPPED.value:
-            console.print(f"[yellow]⚡ 作业 {job_id} 被跳过: {st.get('skip_reason')}[/yellow]")
+        if is_worker_running():
+            console.print("[cyan]常驻 Worker (dev.hippo.worker) 正在运行中，作业已重新入队并将由后台守护进程自动消费。[/cyan]")
         else:
-            console.print(f"[dim]Spool 消费已触发，当前状态: {final_state}[/dim]")
+            console.print("[cyan]正在触发前台消费...[/cyan]")
+            worker = SpoolWorker(storage=storage)
+            count = worker.drain(wait_for_retries=False)
+            if job_id:
+                st = storage.load_state(job_id)
+                final_state = st.get("state")
+                if final_state == JobState.COMPLETED.value:
+                    console.print(f"[bold green]✓ 作业 {job_id} 消费重试成功！[/bold green]")
+                elif final_state == JobState.SKIPPED.value:
+                    console.print(f"[yellow]⚡ 作业 {job_id} 被跳过: {st.get('skip_reason')}[/yellow]")
+                else:
+                    console.print(f"[dim]Spool 消费已触发，作业 {job_id} 当前状态: {final_state}[/dim]")
+            else:
+                console.print(f"[bold green]✓ Spool 消费完成，处理了 {count} 项作业。[/bold green]")
+
+
+@hook_app.command("prune")
+def hook_prune(
+    state: str = typer.Option("all", "--state", "-s", help="按状态清理: dead | skipped | completed | coalesced | all"),
+    days: Optional[int] = typer.Option(None, "--days", "-d", help="清理早于指定天数的作业"),
+    hours: Optional[int] = typer.Option(None, "--hours", help="清理早于指定小时数的作业"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览待清理的作业，不实际删除"),
+    force: bool = typer.Option(False, "--force", "-f", help="确认执行删除（破坏性操作保护）"),
+):
+    """清理已完成或废弃的 Spool 历史作业（保留 receipts 凭证并写入 tombstones 保持幂等）。"""
+    from hippo_memory.hooks import SpoolStorage, TERMINAL_STATES
+
+    valid_states = {"dead", "skipped", "completed", "coalesced", "all"}
+    if state not in valid_states:
+        console.print(f"[bold red]✗ 无效的 --state:[/bold red] {state}（仅支持 {', '.join(sorted(valid_states))}）")
+        raise typer.Exit(1)
+
+    if not dry_run and not force:
+        console.print("[bold red]✗ 破坏性清理操作需要提供 --force / -f 参数确认执行。如仅需预览请使用 --dry-run。[/bold red]")
+        raise typer.Exit(1)
+
+    target_states = list(TERMINAL_STATES) if state == "all" else [state]
+
+    older_than_seconds = None
+    if days is not None:
+        older_than_seconds = days * 86400.0
+    if hours is not None:
+        h_sec = hours * 3600.0
+        older_than_seconds = min(older_than_seconds, h_sec) if older_than_seconds is not None else h_sec
+
+    storage = SpoolStorage()
+    try:
+        pruned = storage.prune_jobs(
+            states=target_states,
+            older_than_seconds=older_than_seconds,
+            dry_run=dry_run,
+        )
+    except ValueError as e:
+        console.print(f"[bold red]✗ 清理参数校验失败:[/bold red] {e}")
+        raise typer.Exit(1)
+
+    mode_label = "[bold yellow]DRY-RUN 预览（未删除任何作业）[/bold yellow]" if dry_run else "[bold green]清理完成[/bold green]"
+    console.print(f"[bold cyan]🦛 Spool 队列作业清理 | {mode_label}[/bold cyan]")
+
+    if not pruned:
+        console.print("[yellow]未找到符合清理条件的作业。[/yellow]")
+        return
+
+    by_state = {}
+    for item in pruned:
+        st = item["state"]
+        by_state[st] = by_state.get(st, 0) + 1
+
+    table = Table(title=f"Prune 结果统计 (共 {len(pruned)} 项)")
+    table.add_column("作业状态", style="cyan")
+    table.add_column("数量", justify="right")
+    for st, cnt in sorted(by_state.items()):
+        table.add_row(st, str(cnt))
+    table.add_row("[bold]总计[/bold]", f"[bold]{len(pruned)}[/bold]")
+    console.print(table)
+
+    if dry_run:
+        console.print(f"[dim]提示: 加上 --force 参数即可执行实际清理。已自动写入 tombstone 保持 job_id 幂等，receipts 语义去重凭证已完整保留。[/dim]")
 
 
 if __name__ == "__main__":
