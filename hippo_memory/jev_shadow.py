@@ -76,7 +76,9 @@ def _validate_choice(choice: JevChoice) -> None:
 
 
 class JevChoiceBackend(Protocol):
-    def classify_pair(self, memory_a: str, memory_b: str) -> JevChoice: ...
+    def classify_pair(
+        self, memory_a: str, memory_b: str, *, deadline_seconds: float
+    ) -> JevChoice: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,8 +184,13 @@ class JevShadowRun:
             self.skipped_budget += 1
             self.budget_exhausted = True
             return
-        self.attempted += 1
         fingerprint = self._fingerprint(pair)
+        remaining = self.policy.max_elapsed_seconds - (time.monotonic() - self.started)
+        if remaining <= 0:
+            self.skipped_budget += 1
+            self.budget_exhausted = True
+            return
+        self.attempted += 1
         started = time.monotonic()
         observation = {
             "pair_fingerprint": fingerprint,
@@ -192,7 +199,9 @@ class JevShadowRun:
             "rubric_version": JEV_RUBRIC_VERSION,
         }
         try:
-            choice = self.backend.classify_pair(pair[0][1], pair[1][1])
+            choice = self.backend.classify_pair(
+                pair[0][1], pair[1][1], deadline_seconds=remaining
+            )
             _validate_choice(choice)
             observation.update(
                 {

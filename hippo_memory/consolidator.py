@@ -427,7 +427,7 @@ class MemoryConsolidator:
             )
             return
 
-        # Both classifiers observe the same frozen text/metadata snapshot;
+        # Both classifiers observe the same copied record snapshot;
         # only the primary verdict may feed planning or apply.
         first_snapshot, second_snapshot = dict(first), dict(second)
         decision = decider.decide(first_snapshot, second_snapshot)

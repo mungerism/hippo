@@ -12,10 +12,12 @@ from tests.test_consolidator import _Harness, _memory
 class _Observer:
     def __init__(self, *, failure=None):
         self.calls = []
+        self.deadlines = []
         self.failure = failure
 
-    def classify_pair(self, first, second):
+    def classify_pair(self, first, second, *, deadline_seconds):
         self.calls.append((first, second))
+        self.deadlines.append(deadline_seconds)
         if self.failure is not None:
             raise self.failure
         return JevChoice(
@@ -55,7 +57,9 @@ class JevShadowTests(unittest.TestCase):
         observer = _Observer()
         shadow = _harness(
             shadow_backend=observer,
-            shadow_policy=JevShadowPolicy(frozenset({"hippo"})),
+            shadow_policy=JevShadowPolicy(
+                frozenset({"hippo"}), max_elapsed_seconds=1.0
+            ),
         )
         self.addCleanup(baseline.cleanup)
         self.addCleanup(shadow.cleanup)
@@ -69,6 +73,8 @@ class JevShadowTests(unittest.TestCase):
         self.assertEqual(actual.stats(), expected.stats())
         self.assertEqual(shadow.applier_journal_entries(), [])
         self.assertEqual(len(observer.calls), 1)
+        self.assertGreater(observer.deadlines[0], 0)
+        self.assertLess(observer.deadlines[0], 1.0)
         self.assertEqual(
             set(observer.calls[0]), {"项目使用 uv 管理依赖", "Python 依赖由 uv 管理"}
         )

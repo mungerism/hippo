@@ -1,6 +1,7 @@
 """Synthetic, account-free tests for the opt-in Jev observation adapter."""
 
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -173,6 +174,22 @@ class JevClientTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(result.evidence["failure_code"], "http_503")
         self.assertNotIn("private", repr(result))
+
+    def test_caller_deadline_caps_a_single_request(self):
+        def slow_response(_):
+            time.sleep(0.01)
+            return httpx.Response(200, json=response())
+
+        client = JevClient(
+            "secret",
+            client=httpx.Client(transport=httpx.MockTransport(slow_response)),
+            max_retries=0,
+        )
+        with self.assertRaisesRegex(JevFailure, "deadline_exceeded"):
+            client.classify_pair("A", "B", deadline_seconds=0.001)
+        for invalid in (0, -1, float("nan"), True):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                client.classify_pair("A", "B", deadline_seconds=invalid)
 
     def test_timeout_and_size_limits(self):
         def timeout(_):
