@@ -50,6 +50,7 @@ from hippo_memory.decision import (
     RelationshipClassificationBackend,
     WinnerArbiter,
 )
+from hippo_memory.jev_shadow import JevChoiceBackend, JevShadowPolicy, JevShadowRun
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class ConsolidationResult:
     stale_plans: int = 0
     errors: List[str] = field(default_factory=list)
     details: List[Dict[str, Any]] = field(default_factory=list)
+    shadow: Optional[Dict[str, Any]] = None
 
     @property
     def is_success(self) -> bool:
@@ -104,7 +106,7 @@ class ConsolidationResult:
         }
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "scope": self.scope,
             "project_id": self.project_id,
             "scanned": self.scanned,
@@ -120,6 +122,9 @@ class ConsolidationResult:
             "errors": list(self.errors),
             "details": [dict(detail) for detail in self.details],
         }
+        if self.shadow is not None:
+            payload["shadow"] = self.shadow
+        return payload
 
 
 def _build_isolated_classifier_llm(engine: Any) -> Optional[Any]:
@@ -186,10 +191,16 @@ class MemoryConsolidator:
         discovery: Optional[CandidateDiscovery] = None,
         applier: Optional[ConsolidationApplier] = None,
         classifier_llm: Optional[Any] = None,
+        shadow_backend: Optional[JevChoiceBackend] = None,
+        shadow_policy: Optional[JevShadowPolicy] = None,
     ) -> None:
+        if (shadow_backend is None) != (shadow_policy is None):
+            raise ValueError("shadow_backend and shadow_policy must be supplied together")
         self.engine = engine
         self._classifier_override = classifier
         self._classifier_llm = classifier_llm
+        self._shadow_backend = shadow_backend
+        self._shadow_policy = shadow_policy
         self.discovery = discovery or CandidateDiscovery(engine)
         self._classifier_degraded = False
         engine_cfg = getattr(engine, "config", None)
@@ -250,6 +261,17 @@ class MemoryConsolidator:
             result.errors.append(f"[discovery] {exc}")
             return result
 
+        shadow_run = (
+            JevShadowRun(
+                self._shadow_backend, self._shadow_policy,
+                scope=scope, identity=identity,
+            )
+            if self._shadow_backend is not None and self._shadow_policy is not None
+            else None
+        )
+        if shadow_run is not None:
+            result.shadow = shadow_run.report()
+
         # Crash recovery BEFORE discovery: a crash in the window after the
         # loser was superseded but before the journal was completed leaves
         # an unfinished operation the (now superseded) pair can no longer
@@ -284,7 +306,7 @@ class MemoryConsolidator:
             # Phase/operation context for the failure-report contract.
             context: Dict[str, Any] = {"phase": "decision", "operation_id": None}
             try:
-                self._process_edge(edge, decider, dry_run, result, context)
+                self._process_edge(edge, decider, dry_run, result, context, shadow_run)
             except Exception as exc:  # one failure must not sink the batch
                 logger.warning("consolidation of edge %s failed: %s", edge, exc)
                 operation = (
@@ -296,6 +318,8 @@ class MemoryConsolidator:
                     f"[{context['phase']}] edge {edge.seed_id}/{edge.neighbor_id}"
                     f"{operation}: {exc}"
                 )
+        if shadow_run is not None:
+            result.shadow = shadow_run.report()
         return result
 
     def _recover_unfinished(
@@ -374,7 +398,8 @@ class MemoryConsolidator:
             )
 
     def _process_edge(
-        self, edge, decider, dry_run: bool, result: ConsolidationResult, context: Dict[str, Any]
+        self, edge, decider, dry_run: bool, result: ConsolidationResult,
+        context: Dict[str, Any], shadow_run: Optional[JevShadowRun] = None,
     ) -> None:
         first = self.engine.get(edge.seed_id)
         second = self.engine.get(edge.neighbor_id)
@@ -402,7 +427,12 @@ class MemoryConsolidator:
             )
             return
 
-        decision = decider.decide(first, second)
+        # Both classifiers observe the same copied record snapshot;
+        # only the primary verdict may feed planning or apply.
+        first_snapshot, second_snapshot = dict(first), dict(second)
+        decision = decider.decide(first_snapshot, second_snapshot)
+        if shadow_run is not None:
+            shadow_run.observe(first_snapshot, second_snapshot, decision)
         if decision.relation == RELATION_DISTINCT:
             result.classified_distinct += 1
             result.details.append(self._detail(decision, result="distinct"))

@@ -124,7 +124,21 @@ class JevClient:
         if self._owns_client:
             self._client.close()
 
-    def classify_pair(self, memory_a: str, memory_b: str) -> JevChoice:
+    def classify_pair(
+        self, memory_a: str, memory_b: str, *, deadline_seconds: float | None = None
+    ) -> JevChoice:
+        """Classify one pair, optionally with a stricter caller-owned deadline."""
+        if deadline_seconds is not None:
+            if (
+                isinstance(deadline_seconds, bool)
+                or not isinstance(deadline_seconds, (int, float))
+                or not math.isfinite(deadline_seconds)
+                or deadline_seconds <= 0
+            ):
+                raise ValueError("deadline_seconds must be finite and positive")
+            request_budget = min(float(deadline_seconds), self.deadline_seconds)
+        else:
+            request_budget = self.deadline_seconds
         payload = {
             "model": JEV_MODEL,
             "state": {"memory_a": memory_a, "memory_b": memory_b},
@@ -133,7 +147,7 @@ class JevClient:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if len(encoded) > _MAX_REQUEST_BYTES:
             raise JevFailure("request_too_large")
-        end = time.monotonic() + self.deadline_seconds
+        end = time.monotonic() + request_budget
         for attempt in range(self.max_retries + 1):
             remaining = end - time.monotonic()
             if remaining <= 0:
