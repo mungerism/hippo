@@ -363,9 +363,10 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         h3 = cat_m.get("hit_rate@3", 0.0)
         n3 = cat_m.get("ndcg@3", 0.0)
         l3 = cat_m.get("forbidden_leakage@3", 0.0)
-        e3 = cat_m.get("empty_accuracy@3", 0.0)
+        e3 = cat_m.get("empty_accuracy@3")
+        e3_display = f"{e3:.4f}" if e3 is not None else "-"
         lines.append(
-            f"| `{cat}` | {cnt} | {r3:.4f} | {p3:.4f} | {h3:.4f} | {n3:.4f} | {l3:.2f} | {e3:.4f} |"
+            f"| `{cat}` | {cnt} | {r3:.4f} | {p3:.4f} | {h3:.4f} | {n3:.4f} | {l3:.2f} | {e3_display} |"
         )
 
     lines.extend([
