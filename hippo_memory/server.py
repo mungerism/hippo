@@ -174,7 +174,7 @@ def search_memories(
     """Search memories semantically or route explicit temporal intent to a timeline.
 
     Args:
-        query: Natural language question or search query (e.g. '技术栈选型', 'CQRS 架构', '代码规范').
+        query: Natural language question or search query (e.g. 'tech stack choices', 'CQRS architecture', 'coding standards').
         filters: Optional structured filters dictionary.
         limit: Maximum number of results to return (default: 3).
         user_id: Optional user identifier.

@@ -11,7 +11,7 @@ from hippo_memory.hooks.models import HookEvent, HostType
 
 class TestHostContracts(unittest.TestCase):
     def test_host_contracts_integrity(self):
-        """验证所有宿主契约的数据完整性、规范引用与字段非空。"""
+        """Verify data integrity, specification references, and non-empty fields of all host contracts."""
         from hippo_memory.hosts import get_host_contracts, get_contract
 
         contracts = get_host_contracts()
@@ -38,12 +38,12 @@ class TestHostContracts(unittest.TestCase):
             self.assertIsInstance(c.hook_needles, tuple)
             self.assertTrue(len(c.hook_needles) > 0)
 
-            # 单独查表一致性
+            # Individual contract lookup consistency
             self.assertEqual(get_contract(c.host).display_name, c.display_name)
             self.assertEqual(get_contract(c.host.value).display_name, c.display_name)
 
     def test_rebase_contracts_home(self):
-        """验证使用自定义 home 目录时契约路径正确重定向。"""
+        """Verify that contract paths are properly rebased when using custom home directory."""
         from hippo_memory.hosts import get_host_contracts, get_contract
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,75 +60,75 @@ class TestHostContracts(unittest.TestCase):
                 self.assertEqual(rebased.canonical_config_path, c.canonical_config_path)
 
     def test_sibling_fingerprints_verification(self):
-        """验证同级环境指纹交叉校验（Sibling Verification）。"""
+        """Verify sibling environment fingerprint verification (Sibling Verification)."""
         from hippo_memory.hosts import get_contract
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_home = Path(tmp)
             agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
 
-            # 1. 模拟空目录配置（无任何宿主指纹）
+            # 1. Simulate empty directory configuration (no host fingerprints)
             cfg_dir = agy_contract.canonical_config_path.parent
             cfg_dir.mkdir(parents=True, exist_ok=True)
             agy_contract.canonical_config_path.write_text('{"hippo-memory-distill": {}}', encoding="utf-8")
 
-            # 此时缺少 config.json / mcp_config.json 等指纹 -> 应返回 False
+            # Missing config.json / mcp_config.json fingerprints -> should return False
             self.assertFalse(agy_contract.verify_sibling_fingerprints())
 
-            # 2. 补齐核心指纹文件之一 -> 应返回 True
+            # 2. Provide one core fingerprint file -> should return True
             (cfg_dir / "config.json").write_text("{}", encoding="utf-8")
             self.assertTrue(agy_contract.verify_sibling_fingerprints())
 
     def test_pi_extension_sibling_verification_nested(self):
-        """验证 Pi 扩展在嵌套目录结构下的指纹校验与裸根目录识别。"""
+        """Verify fingerprint verification and bare root detection for Pi extension under nested directories."""
         from hippo_memory.hosts import get_contract
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_home = Path(tmp)
             pi_contract = get_contract(HostType.PI, home=tmp_home)
 
-            # 1. 模拟非标准目录（例如挂载在临时或未知路径）
+            # 1. Simulate non-standard directory (e.g. mounted in temp or unknown path)
             bogus_path = tmp_home / "custom_agent" / "extensions" / "hippo-memory.ts"
             bogus_path.parent.mkdir(parents=True, exist_ok=True)
             bogus_path.write_text("console.log('hippo')", encoding="utf-8")
 
-            # 挂载在非标准路径且无 models.json 指纹 -> 应返回 False
+            # Mounted in non-standard path without models.json fingerprint -> should return False
             self.assertFalse(pi_contract.verify_sibling_fingerprints(target_path=bogus_path))
 
-            # 在该非标准目录的 agent 级补齐相对指纹 models.json -> 应返回 True
+            # Provide relative models.json fingerprint at agent level -> should return True
             (bogus_path.parent.parent / "models.json").write_text("{}", encoding="utf-8")
             self.assertTrue(pi_contract.verify_sibling_fingerprints(target_path=bogus_path))
 
-            # 2. 挂载在官方标准路径：即使尚无 models.json，有效的 Pi agent 裸根目录自身即通过指纹核验
+            # 2. Mounted at canonical path: valid Pi agent bare root directory itself passes verification
             ext_dir = pi_contract.canonical_config_path.parent
             ext_dir.mkdir(parents=True, exist_ok=True)
             pi_contract.canonical_config_path.write_text("console.log('hippo')", encoding="utf-8")
             self.assertTrue(pi_contract.verify_sibling_fingerprints())
 
     def test_zombie_detection_and_cleaning(self):
-        """验证反向僵尸文件探测与安全清理（Zombie Configuration Probe & Clean）。"""
+        """Verify reverse zombie configuration detection and safe cleaning (Zombie Configuration Probe & Clean)."""
         from hippo_memory.hosts import get_contract
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_home = Path(tmp)
             agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
 
-            # 在易混淆的历史陷阱路径创建仅含 Hippo 的配置
+            # Create Hippo-only config in legacy trap path
             trap_path = agy_contract.legacy_trap_paths[0]
             trap_path.parent.mkdir(parents=True, exist_ok=True)
             trap_path.write_text('{"hippo-memory-distill": {"Stop": []}}', encoding="utf-8")
 
-            # 1. 探测应能捕获该僵尸文件
+            # 1. Detection should capture the zombie file
             zombies = agy_contract.detect_zombies()
             self.assertIn(trap_path, zombies)
 
-            # 2. 清理应安全移除仅含 Hippo 的僵尸文件
+            # 2. Cleaning should safely remove Hippo-only zombie file
             cleaned = agy_contract.clean_zombies()
             self.assertIn(trap_path, cleaned)
             self.assertFalse(trap_path.exists())
             self.assertEqual(agy_contract.detect_zombies(), [])
 
-            # 3. 若陷阱文件包含其他用户配置，只移除 Hippo 键而不破坏文件
+            # 3. If trap file contains other user configs, remove only Hippo key without destroying file
             mixed_content = {
                 "user_custom_tool": {"command": "echo 1"},
                 "hippo-memory-distill": {"Stop": []},
@@ -137,12 +137,12 @@ class TestHostContracts(unittest.TestCase):
             self.assertIn(trap_path, agy_contract.detect_zombies())
             cleaned2 = agy_contract.clean_zombies()
             self.assertIn(trap_path, cleaned2)
-            self.assertTrue(trap_path.exists())  # 用户配置仍在
+            self.assertTrue(trap_path.exists())  # User configuration preserved
             remaining_data = json.loads(trap_path.read_text(encoding="utf-8"))
             self.assertNotIn("hippo-memory-distill", remaining_data)
             self.assertIn("user_custom_tool", remaining_data)
 
-            # 4. 验证 ZCode 嵌套结构中，非事件设置 (如 enabled: true) 在清理 Hippo 后完好保留而不被误删
+            # 4. Verify non-event settings (e.g. enabled: true) in ZCode nested structure are preserved after cleaning
             zcode_contract = get_contract(HostType.ZCODE, home=tmp_home)
             ztrap = zcode_contract.legacy_trap_paths[0]
             ztrap.parent.mkdir(parents=True, exist_ok=True)
@@ -165,12 +165,12 @@ class TestHostContracts(unittest.TestCase):
             self.assertIn(ztrap, zcode_contract.detect_zombies())
             cleaned_z = zcode_contract.clean_zombies()
             self.assertIn(ztrap, cleaned_z)
-            self.assertTrue(ztrap.exists())  # 关键断言：包含 enabled 设置，文件严禁被删除！
+            self.assertTrue(ztrap.exists())  # Critical assertion: contains enabled setting, file must NOT be deleted!
             z_data = json.loads(ztrap.read_text(encoding="utf-8"))
             self.assertTrue(z_data["hooks"]["enabled"])
             self.assertEqual(z_data["hooks"]["events"], {})
 
-            # 5. 验证纯净且无任何非事件设置的专用 hooks.json 陷阱会被彻底 unlink
+            # 5. Verify dedicated hooks.json trap without non-event settings is completely unlinked
             codex_contract = get_contract(HostType.CODEX, home=tmp_home)
             pure_trap = codex_contract.legacy_trap_paths[0]
             pure_trap.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +184,7 @@ class TestHostContracts(unittest.TestCase):
             self.assertFalse(pure_trap.exists())
 
     def test_doctor_defensive_probes(self):
-        """验证 doctor 巡检在缺失指纹或发现僵尸文件时触发警告与失败。"""
+        """Verify that doctor triggers warnings and failures when fingerprints are missing or zombies are found."""
         from hippo_memory import doctor
         from hippo_memory.hosts import get_contract
 
@@ -192,7 +192,7 @@ class TestHostContracts(unittest.TestCase):
             tmp_home = Path(tmp)
             agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
 
-            # 构造已挂载但缺失指纹的配置
+            # Construct mounted config without fingerprints
             agy_contract.canonical_config_path.parent.mkdir(parents=True, exist_ok=True)
             cmd = "uv run -m hippo_memory.cli hook capture --host antigravity"
             agy_contract.canonical_config_path.write_text(
@@ -200,7 +200,7 @@ class TestHostContracts(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            # 构造僵尸陷阱文件
+            # Construct zombie trap file
             trap = agy_contract.legacy_trap_paths[0]
             trap.parent.mkdir(parents=True, exist_ok=True)
             trap.write_text(json.dumps({"hippo-memory-distill": {}}), encoding="utf-8")
@@ -212,14 +212,14 @@ class TestHostContracts(unittest.TestCase):
                  patch("hippo_memory.service.service_status", return_value={"loaded": True, "listening": True}):
                 checks = doctor.collect_checks()
 
-            # 1. 指纹缺失警告
+            # 1. Missing fingerprint warning
             agy_hook_check = next(
                 c for c in checks if c["category"] == "Hook 挂载" and c["name"] == "Antigravity (Stop)"
             )
             self.assertFalse(agy_hook_check["ok"])
             self.assertIn("缺少宿主核心指纹", agy_hook_check["detail"])
 
-            # 2. 僵尸文件警告
+            # 2. Zombie file warning
             zombie_check = next(
                 c for c in checks if c["category"] == "Hook 挂载" and "遗留陷阱" in c["name"]
             )
@@ -227,7 +227,7 @@ class TestHostContracts(unittest.TestCase):
             self.assertIn("检测到废弃历史路径残留配置", zombie_check["detail"])
 
     def test_run_init_cleans_zombies_automatically(self):
-        """验证 run_init 契约驱动执行时，能够自动挂载合法路径并彻底清理历史僵尸陷阱。"""
+        """Verify that run_init automatically mounts valid paths and thoroughly cleans legacy zombie traps."""
         from hippo_memory.init import run_init
         from hippo_memory.hosts import get_contract
 
@@ -235,30 +235,30 @@ class TestHostContracts(unittest.TestCase):
             tmp_home = Path(tmp)
             agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
 
-            # 模拟用户机器存在 Antigravity 宿主配置环境
+            # Simulate existing Antigravity environment
             agy_contract.canonical_config_path.parent.mkdir(parents=True, exist_ok=True)
             (agy_contract.canonical_config_path.parent / "config.json").write_text("{}", encoding="utf-8")
 
-            # 模拟历史遗留的僵尸路径文件
+            # Simulate legacy zombie file
             trap = agy_contract.legacy_trap_paths[0]
             trap.parent.mkdir(parents=True, exist_ok=True)
             trap.write_text(json.dumps({"hippo-memory-distill": {"Stop": []}}), encoding="utf-8")
             self.assertTrue(trap.exists())
 
-            # 执行 run_init
+            # Execute run_init
             with patch("pathlib.Path.home", return_value=tmp_home), \
                  patch("hippo_memory.router.detect_git_project", return_value=("test_proj", tmp_home)):
                 results = run_init()
 
-            # 验证合法路径已挂载
+            # Verify canonical path mounted
             self.assertTrue(agy_contract.canonical_config_path.exists())
             self.assertTrue(agy_contract.is_hook_installed())
 
-            # 验证僵尸文件已被自动清理
+            # Verify zombie file cleaned
             self.assertFalse(trap.exists())
 
     def test_run_init_cleans_zombies_even_if_host_directory_missing(self):
-        """验证即使用户未安装某宿主（标准目录不存在），其历史残留僵尸文件仍被彻底清理。"""
+        """Verify that legacy zombie files are cleaned even if host standard directory does not exist."""
         from hippo_memory.init import run_init
         from hippo_memory.hosts import get_contract
 
@@ -266,10 +266,10 @@ class TestHostContracts(unittest.TestCase):
             tmp_home = Path(tmp)
             agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
 
-            # 标准目录不存在！
+            # Canonical directory does not exist!
             self.assertFalse(agy_contract.canonical_config_path.parent.exists())
 
-            # 但历史遗留陷阱存在
+            # Legacy trap exists
             trap = agy_contract.legacy_trap_paths[0]
             trap.parent.mkdir(parents=True, exist_ok=True)
             trap.write_text(json.dumps({"hippo-memory-distill": {}}), encoding="utf-8")
@@ -278,12 +278,12 @@ class TestHostContracts(unittest.TestCase):
                  patch("hippo_memory.router.detect_git_project", return_value=("test_proj", tmp_home)):
                 run_init()
 
-            # 陷阱文件已被清理，且不会凭空创建虚假的合法目录
+            # Trap file cleaned, without falsely creating canonical directory
             self.assertFalse(trap.exists())
             self.assertFalse(agy_contract.canonical_config_path.exists())
 
     def test_pi_bare_agent_directory_detection_and_init(self):
-        """验证 Pi 仅存在裸 agent 根目录 (~/.pi/agent) 且尚未创建 extensions 时的环境识别与自动安装。"""
+        """Verify Pi environment detection and auto-installation when only bare agent root exists."""
         from hippo_memory.init import run_init
         from hippo_memory.hosts import get_contract
 
@@ -291,7 +291,7 @@ class TestHostContracts(unittest.TestCase):
             tmp_home = Path(tmp)
             pi_contract = get_contract(HostType.PI, home=tmp_home)
 
-            # 仅创建 ~/.pi/agent 根目录（无 extensions 子目录，无 models.json / settings.json 等）
+            # Create only ~/.pi/agent root without extensions subdir or models.json
             agent_root = tmp_home / ".pi" / "agent"
             agent_root.mkdir(parents=True, exist_ok=True)
 
@@ -301,31 +301,31 @@ class TestHostContracts(unittest.TestCase):
                  patch("hippo_memory.router.detect_git_project", return_value=("test_proj", tmp_home)):
                 results = run_init()
 
-            # 验证 extensions 目录及 hippo-memory.ts 成功创建
+            # Verify extensions directory and hippo-memory.ts created
             self.assertTrue(pi_contract.canonical_config_path.exists())
             self.assertTrue(pi_contract.is_hook_installed())
             self.assertIn(pi_contract.canonical_config_path, [p for p, _ in results])
 
     def test_legacy_trap_decoding_failure_resilience(self):
-        """验证探测与清理包含非 UTF-8 损坏数据的僵尸/配置文件时的防御性容错。"""
+        """Verify defensive error handling when probing and cleaning zombie files containing non-UTF-8 corrupt data."""
         from hippo_memory.hosts import get_contract
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_home = Path(tmp)
             agy_contract = get_contract(HostType.ANTIGRAVITY, home=tmp_home)
 
-            # 构造包含非 UTF-8 坏字节的僵尸文件
+            # Construct zombie file with non-UTF-8 corrupted bytes
             trap = agy_contract.legacy_trap_paths[0]
             trap.parent.mkdir(parents=True, exist_ok=True)
             trap.write_bytes(b"\xff\xfe\x00\x01\x80\x99invalid-utf8")
 
-            # 探测与清理不应抛出 UnicodeDecodeError
+            # Probe and clean should not raise UnicodeDecodeError
             zombies = agy_contract.detect_zombies()
             self.assertEqual(zombies, [])
             cleaned = agy_contract.clean_zombies()
             self.assertEqual(cleaned, [])
 
-            # 即使包含有效 marker 伴随坏字节也能被鲁棒识别
+            # Robustly identified even with valid marker alongside corrupt bytes
             trap.write_bytes(b"\xff\xfe hippo-memory-distill \x80\x99")
             zombies = agy_contract.detect_zombies()
             self.assertIn(trap, zombies)

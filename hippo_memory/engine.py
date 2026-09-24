@@ -302,11 +302,11 @@ def build_conversation(
 ) -> List[Dict[str, str]]:
     """Build the Mem0 `add()` conversation from text/content and messages.
 
-    - 仅 messages：原样使用。
-    - 仅 text/content：作为单条 user 消息。
-    - 两者都传：messages 保留为上下文，显式 text 作为 assistant 角色的补充
-      事实追加到末尾（对齐 Mem0 官方插件以 assistant 角色传递摘要的模式），
-      绝不静默丢弃任何一方。
+    - messages only: use as-is.
+    - text/content only: single user message.
+    - both provided: messages preserved as context; explicit text appended as an
+      assistant-role supplementary fact (aligning with Mem0 official plugin pattern),
+      never silently discarding either.
     """
     raw_text = text if text is not None else (content or "")
     if messages:
@@ -1830,7 +1830,7 @@ class HippoEngine:
         """Pull ADD/UPDATE/DELETE memory events inside a recent time window.
 
         Time-range recall over the history journal — complements semantic
-        search, which cannot see "今天 / 近 24 小时" style temporal intents.
+        search, which cannot see "today / past 24 hours" style temporal intents.
         One bounded history query plus one batched scope resolution; no
         per-row ``get()`` fan-out. See ``hippo_memory.recent`` for the
         contract details (lifecycle and ownership invariants included).

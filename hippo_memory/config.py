@@ -67,7 +67,7 @@ def ensure_qdrant_server():
                     [str(qdrant_bin), "--config-path", str(qdrant_cfg)],
                     stdout=f,
                     stderr=f,
-                    # qdrant 会在 cwd 下创建 ./snapshots/tmp 等相对路径，固定到可写的 HIPPO_HOME
+                    # Qdrant creates relative paths like ./snapshots/tmp under cwd; pin to writable HIPPO_HOME
                     cwd=str(HIPPO_HOME),
                     start_new_session=True,
                 )

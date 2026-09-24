@@ -40,11 +40,11 @@ class TestSearchGate(unittest.TestCase):
         }
 
     def test_empty_results(self):
-        """空候选列表安全返回空列表。"""
+        """Empty candidate list safely returns empty list."""
         self.assertEqual(filter_search_results([], config=self.default_config, limit=5), [])
 
     def test_all_low_scores_returns_empty(self):
-        """全低分噪音场景下 Fail-Closed，绝不强行凑数。"""
+        """Fail-Closed under all low-score noise scenarios, never padding results."""
         candidates = [
             self._make_candidate("1", "无关记忆1", 0.29, 0.58),
             self._make_candidate("2", "无关记忆2", 0.28, 0.56),
@@ -54,33 +54,33 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_real_scene_regression_pr_merge(self):
-        """现场真实复现：0.34 纯语义直接事实保留，0.30/0.29 噪音被剔除。"""
+        """Real-world reproduction: 0.34 pure semantic direct fact preserved, 0.30/0.29 noise eliminated."""
         candidates = [
             self._make_candidate("1", "PR #7 提交记录", 0.63, 0.70, bm25_score=0.56),
             self._make_candidate("2", "PR #7 代码审查", 0.62, 0.68, bm25_score=0.56),
             self._make_candidate("3", "PR #7 分支测试", 0.60, 0.64, bm25_score=0.56),
-            # 关键项：PR #3 合并事实，无 BM25 命中，但语义分高达 0.68，因分母为 2.0 折半为 0.34
+            # Key item: PR #3 merge fact, no BM25 hit, semantic score 0.68 halved to 0.34 by denominator 2.0
             self._make_candidate("4", "PR #3 已合并到 main", 0.34, 0.68, bm25_score=0.0),
-            # 噪音项：无 BM25，语义分仅 0.58（底噪），折半为 0.29~0.30
+            # Noise item: no BM25, semantic score 0.58 (noise floor), halved to 0.29~0.30
             self._make_candidate("5", "SQLAlchemy 迁移历史", 0.30, 0.58, bm25_score=0.0),
             self._make_candidate("6", "个人语言偏好为中文", 0.29, 0.57, bm25_score=0.0),
         ]
 
-        # 当 limit=5 时，前 4 条通过，后 2 条（0.30, 0.29）被严格剔除
+        # With limit=5, top 4 pass, trailing 2 (0.30, 0.29) are strictly filtered out
         res_limit_5 = filter_search_results(candidates, config=self.default_config, limit=5)
         self.assertEqual(len(res_limit_5), 4)
         self.assertEqual([r["id"] for r in res_limit_5], ["1", "2", "3", "4"])
 
-        # 当 limit=3 时，只截取通过门禁的前 3 条
+        # With limit=3, truncate to top 3 that passed the gate
         res_limit_3 = filter_search_results(candidates, config=self.default_config, limit=3)
         self.assertEqual(len(res_limit_3), 3)
         self.assertEqual([r["id"] for r in res_limit_3], ["1", "2", "3"])
 
     def test_dense_only_threshold(self):
-        """无 BM25/entity 支撑时，必须严格满足 dense_only_threshold (0.62)。"""
-        # semantic_score < 0.62，即使 final_score 达到 0.35 也拒绝
+        """Without BM25/entity support, dense_only_threshold (0.62) must be strictly met."""
+        # semantic_score < 0.62 rejected even if final_score reaches 0.35
         cand_low_dense = self._make_candidate("c1", "弱语义候选", 0.35, 0.60, max_possible=1.0)
-        # semantic_score >= 0.62 且 final_score >= 0.32，通过
+        # semantic_score >= 0.62 and final_score >= 0.32 passes
         cand_high_dense = self._make_candidate("c2", "强语义候选", 0.65, 0.65, max_possible=1.0)
 
         res = filter_search_results([cand_low_dense, cand_high_dense], config=self.default_config, limit=5)
@@ -88,10 +88,10 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual(res[0]["id"], "c2")
 
     def test_bm25_or_entity_support_relaxes_semantic_threshold(self):
-        """有 BM25 或 entity 支撑时放宽语义门槛，只要综合分达标即通过。"""
-        # BM25 支撑：semantic_score 仅 0.50 (< 0.62)，但 bm25 > 0 且 final_score=0.35 >= 0.32
+        """Semantic threshold is relaxed with BM25 or entity support as long as composite score qualifies."""
+        # BM25 support: semantic_score only 0.50 (< 0.62), but bm25 > 0 and final_score=0.35 >= 0.32
         cand_bm25 = self._make_candidate("b1", "BM25命中项", 0.35, 0.50, bm25_score=0.20)
-        # Entity 支撑：semantic_score 仅 0.48 (< 0.62)，但 entity_boost > 0 且 final_score=0.36 >= 0.32
+        # Entity support: semantic_score only 0.48 (< 0.62), but entity_boost > 0 and final_score=0.36 >= 0.32
         cand_entity = self._make_candidate("e1", "Entity命中项", 0.36, 0.48, entity_boost=0.24)
 
         res = filter_search_results([cand_bm25, cand_entity], config=self.default_config, limit=5)
@@ -99,9 +99,9 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual([r["id"] for r in res], ["b1", "e1"])
 
     def test_relative_threshold_ratio(self):
-        """相对最高分动态比例截断：显著低于最高分 50% 的尾部项被剔除。"""
-        # 最高分为 0.80，动态相对下限为 0.80 * 0.50 = 0.40
-        # 候选 2 综合分为 0.35（虽大于静态 0.32），但低于 0.40，应被拒绝
+        """Dynamic relative score ratio cut: trailing items significantly below 50% of top score are filtered."""
+        # Top score is 0.80, dynamic relative lower bound is 0.80 * 0.50 = 0.40
+        # Candidate 2 composite score 0.35 (though > static 0.32) is below 0.40 and should be rejected
         cand_best = self._make_candidate("top", "极高相关记忆", 0.80, 0.80, bm25_score=0.80)
         cand_gap = self._make_candidate("gap", "相对断崖低分记忆", 0.35, 0.70)
 
@@ -110,10 +110,10 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual(res[0]["id"], "top")
 
     def test_best_score_calculated_only_from_absolute_pass(self):
-        """最高分只能从通过绝对门禁的候选池中计算，畸形高分噪声不得抬高门槛。"""
-        # 畸形项：score 标为 0.99，但缺少 score_details（绝对门禁拒绝）
+        """Top score must be calculated only from candidates passing absolute gate; malformed scores cannot raise threshold."""
+        # Malformed item: score marked 0.99 but lacks score_details (rejected by absolute gate)
         invalid_high = {"id": "bad", "memory": "畸形项", "score": 0.99}
-        # 正常项：score 0.40，通过绝对门禁。如果从 invalid_high 算相对分 (0.99 * 0.5 = 0.495) 它会被误杀
+        # Normal item: score 0.40 passes absolute gate. Must not be rejected by relative ratio from invalid_high
         valid_item = self._make_candidate("good", "正常合格项", 0.40, 0.80)
 
         res = filter_search_results([invalid_high, valid_item], config=self.default_config, limit=5)
@@ -121,50 +121,50 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual(res[0]["id"], "good")
 
     def test_fail_closed_invalid_score_details(self):
-        """严格 Fail-Closed：各种异常结构直接拒绝，绝不盲目放行。"""
+        """Strictly Fail-Closed: abnormal structures are directly rejected, never blindly passed."""
         bad_cases = [
-            # 缺失 score_details
+            # Missing score_details
             {"id": "b1", "memory": "m", "score": 0.8},
-            # score_details 不是 dict
+            # score_details is not a dict
             {"id": "b2", "memory": "m", "score": 0.8, "score_details": "invalid"},
-            # 缺失 final_score
+            # Missing final_score
             {"id": "b3", "memory": "m", "score": 0.8, "score_details": {"semantic_score": 0.8}},
-            # 顶层 score 与 final_score 不一致 (> 1e-4)
+            # Top-level score and final_score mismatch (> 1e-4)
             {
                 "id": "b4",
                 "memory": "m",
                 "score": 0.8,
                 "score_details": {"semantic_score": 0.8, "final_score": 0.5},
             },
-            # NaN 分数
+            # NaN score
             {
                 "id": "b5",
                 "memory": "m",
                 "score": float("nan"),
                 "score_details": {"semantic_score": float("nan"), "final_score": float("nan")},
             },
-            # Inf 分数
+            # Inf score
             {
                 "id": "b6",
                 "memory": "m",
                 "score": float("inf"),
                 "score_details": {"semantic_score": float("inf"), "final_score": float("inf")},
             },
-            # 字符串分数
+            # String score
             {
                 "id": "b7",
                 "memory": "m",
                 "score": "0.8",
                 "score_details": {"semantic_score": "0.8", "final_score": "0.8"},
             },
-            # 缺失 bm25_score 字段
+            # Missing bm25_score field
             {
                 "id": "b8",
                 "memory": "m",
                 "score": 0.8,
                 "score_details": {"semantic_score": 0.8, "final_score": 0.8, "entity_boost": 0.0},
             },
-            # 缺失 entity_boost 字段
+            # Missing entity_boost field
             {
                 "id": "b9",
                 "memory": "m",
@@ -176,7 +176,7 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual(res, [])
 
     def test_relative_gate_zero_threshold_and_zero_score_candidate(self):
-        """当阈值设为 0.0 时，得分 0.0 的合法候选不应被相对门禁误杀。"""
+        """When threshold is set to 0.0, valid candidate with score 0.0 should not be rejected by relative gate."""
         zero_config = SearchGateConfig(
             final_threshold=0.0,
             dense_only_threshold=0.0,
@@ -189,34 +189,34 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual(res[0]["id"], "z1")
 
     def test_boundary_equality_conditions(self):
-        """临界值相等判定：== 阈值时均通过。"""
-        # final_score 恰好等于 0.32，semantic_score 恰好等于 0.62
+        """Boundary equality checks: passing when == threshold."""
+        # final_score exactly equals 0.32, semantic_score exactly equals 0.62
         exact_item = self._make_candidate("exact", "临界项", 0.32, 0.62)
         res = filter_search_results([exact_item], config=self.default_config, limit=5)
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["id"], "exact")
 
     def test_limit_zero_and_negative(self):
-        """limit <= 0 时安全返回空列表。"""
+        """Safely return empty list when limit <= 0."""
         item = self._make_candidate("1", "合格项", 0.60, 0.80)
         self.assertEqual(filter_search_results([item], config=self.default_config, limit=0), [])
         self.assertEqual(filter_search_results([item], config=self.default_config, limit=-1), [])
 
     def test_immutability_and_order_preservation(self):
-        """不修改入参对象，且严格保持 Mem0 的初始排序。"""
+        """Preserve input object immutability and retain Mem0 initial ordering."""
         c1 = self._make_candidate("1", "第一名", 0.70, 0.70)
         c2 = self._make_candidate("2", "第二名", 0.65, 0.65)
         original_c1_score = c1["score"]
 
         res = filter_search_results([c1, c2], config=self.default_config, limit=5)
         self.assertEqual([r["id"] for r in res], ["1", "2"])
-        # 入参未被修改
+        # Input object was not modified
         self.assertEqual(c1["score"], original_c1_score)
-        # 返回的是浅拷贝字典，不是同一引用
+        # Returns shallow copy dict, not the same reference
         self.assertIsNot(res[0], c1)
 
     def test_gate_disabled(self):
-        """当 enabled=False 时，跳过相关度门禁，但仍按 limit 截断。"""
+        """When enabled=False, skip relevance gate while still truncating by limit."""
         disabled_config = SearchGateConfig(enabled=False)
         candidates = [
             {"id": "1", "memory": "m1", "score": 0.1},
@@ -228,7 +228,7 @@ class TestSearchGate(unittest.TestCase):
         self.assertEqual([r["id"] for r in res], ["1", "2"])
 
     def test_config_validation(self):
-        """配置阈值必须在 [0.0, 1.0] 范围内且为有限浮点数。"""
+        """Config thresholds must be finite floats within [0.0, 1.0]."""
         with self.assertRaises(ValueError):
             SearchGateConfig(final_threshold=-0.1)
         with self.assertRaises(ValueError):
@@ -242,7 +242,7 @@ class TestSearchGate(unittest.TestCase):
 
 
 class TestMem0Contract(unittest.TestCase):
-    """零网络开销的本地 Mem0 契约测试，断言 scoring 与 explain 数据结构未漂移。"""
+    """Zero-network-overhead local Mem0 contract tests, asserting scoring and explain data structures have not drifted."""
 
     def test_mem0_scoring_explain_structure(self):
         from mem0.utils.scoring import score_and_rank
@@ -274,14 +274,14 @@ class TestMem0Contract(unittest.TestCase):
         }
         self.assertTrue(expected_keys.issubset(details.keys()))
         self.assertAlmostEqual(item["score"], details["final_score"], places=4)
-        # 确保全部为全小写 snake_case
+        # Ensure all keys are lowercase snake_case
         for k in details.keys():
             self.assertEqual(k, k.lower())
             self.assertFalse(any(c.isupper() for c in k))
 
 
 class TestEngineSearchWiring(unittest.TestCase):
-    """Engine 层的检索参数透传、宽候选池计算与门禁接线测试 (使用 Mock Memory)。"""
+    """Tests for Engine layer search parameter passthrough, wide candidate pool calculation, and search gate wiring (using Mock Memory)."""
 
     def setUp(self):
         from unittest.mock import MagicMock
@@ -291,7 +291,7 @@ class TestEngineSearchWiring(unittest.TestCase):
         self.mock_memory = MagicMock()
         self.engine._memory = self.mock_memory
 
-        # 模拟免副作用的 config
+        # Mock side-effect-free config
         config_mock = MagicMock()
         config_mock.user_id = "test_user"
         config_mock.semantic_threshold = 0.1
@@ -302,13 +302,13 @@ class TestEngineSearchWiring(unittest.TestCase):
         config_mock.get_gate_config.return_value = SearchGateConfig()
         self.engine.config = config_mock
 
-        # 模拟 router
+        # Mock router
         router_mock = MagicMock()
         router_mock.build_search_filters.return_value = {"user_id": "test_user"}
         self.engine.router = router_mock
 
     def test_engine_search_explain_and_threshold_passthrough(self):
-        """Engine.search 必须传递 explain=True，并使用配置中的 semantic_threshold。"""
+        """Engine.search must pass explain=True and use semantic_threshold from config."""
         self.mock_memory.search.return_value = []
 
         res = self.engine.search("test query", limit=5)
@@ -321,7 +321,7 @@ class TestEngineSearchWiring(unittest.TestCase):
         self.assertEqual(kwargs.get("top_k"), 20)  # max(5 * 4, 20) == 20
 
     def test_engine_search_threshold_zero_preservation(self):
-        """当显式传入 threshold=0.0 时，必须原样透传，不能被误吞退回默认值。"""
+        """When threshold=0.0 is explicitly passed, it must be passed through as-is rather than swallowed or reverted to default."""
         self.mock_memory.search.return_value = []
 
         self.engine.search("test query", threshold=0.0)
@@ -329,7 +329,7 @@ class TestEngineSearchWiring(unittest.TestCase):
         self.assertEqual(kwargs.get("threshold"), 0.0)
 
     def test_engine_search_limit_zero_does_not_call_memory(self):
-        """当 limit <= 0 时，直接返回空列表，绝不调用底层的 Memory.search。"""
+        """When limit <= 0, return an empty list immediately without calling underlying Memory.search."""
         res_zero = self.engine.search("query", limit=0)
         self.assertEqual(res_zero, [])
         self.mock_memory.search.assert_not_called()
@@ -339,7 +339,7 @@ class TestEngineSearchWiring(unittest.TestCase):
         self.mock_memory.search.assert_not_called()
 
     def test_engine_search_applies_gate_and_handles_dict_results(self):
-        """Engine 能处理 Mem0 返回 dict 的形态，并正确应用门禁过滤与截断。"""
+        """Engine handles dict return format from Mem0 and properly applies gate filtering and truncation."""
         raw_results = {
             "results": [
                 {
@@ -380,10 +380,10 @@ class TestEngineSearchWiring(unittest.TestCase):
 
 
 class TestMcpAndCliContracts(unittest.TestCase):
-    """MCP 极简安全契约与 CLI 调试选项测试。"""
+    """Tests for MCP minimalist safety contract and CLI debug options."""
 
     def test_mcp_search_memories_schema_has_no_threshold_or_gate_params(self):
-        """MCP 接口绝不对 Agent 暴露 threshold、explain 或门禁内部配置。"""
+        """MCP interface must never expose threshold, explain, or internal gate configs to agents."""
         import asyncio
         from hippo_memory.server import mcp_server
 
@@ -395,11 +395,11 @@ class TestMcpAndCliContracts(unittest.TestCase):
         for f in forbidden:
             self.assertNotIn(f, properties, f"MCP schema 不应暴露内部参数: {f}")
 
-        # 契约核验：向 Agent 暴露的默认 limit 必须与实际生效上限 (3) 一致
+        # Contract verification: default limit exposed to agents must match actual effective cap (3)
         self.assertEqual(properties.get("limit", {}).get("default"), 3)
 
     def test_mcp_search_memories_clamps_limit_and_handles_zero(self):
-        """MCP 必须将 Agent 传入的超大 limit 钳制到 max_injected，且 limit<=0 时不调用 engine。"""
+        """MCP must clamp excessively large limit passed by agent to max_injected, and avoid calling engine when limit <= 0."""
         from unittest.mock import patch, MagicMock
         from hippo_memory.server import search_memories
 
@@ -408,7 +408,7 @@ class TestMcpAndCliContracts(unittest.TestCase):
         mock_engine.search.return_value = []
 
         with patch("hippo_memory.server.get_engine", return_value=mock_engine):
-            # limit <= 0: 直接返回友好提示，不调用 engine.search
+            # limit <= 0: return user-friendly message directly without calling engine.search
             res_zero = search_memories("query", limit=0)
             self.assertIn("未找到与 'query' 相关的记忆事实", res_zero)
             mock_engine.search.assert_not_called()
@@ -417,14 +417,14 @@ class TestMcpAndCliContracts(unittest.TestCase):
             self.assertIn("未找到与 'query' 相关的记忆事实", res_neg)
             mock_engine.search.assert_not_called()
 
-            # limit=100: 自动被 clamp 到 max_injected (3)
+            # limit=100: automatically clamped to max_injected (3)
             search_memories("query", limit=100)
             mock_engine.search.assert_called_once()
             _, kwargs = mock_engine.search.call_args
             self.assertEqual(kwargs.get("limit"), 3)
 
     def test_cli_search_command_threshold_passthrough(self):
-        """CLI search 命令必须支持 --threshold 参数，并正确传递给 Engine。"""
+        """CLI search command must support --threshold parameter and forward it correctly to Engine."""
         from typer.testing import CliRunner
         from unittest.mock import patch, MagicMock
         from hippo_memory.cli import app
@@ -446,7 +446,7 @@ class TestMcpAndCliContracts(unittest.TestCase):
             mock_engine.search.assert_called_once()
             _, kwargs = mock_engine.search.call_args
             self.assertEqual(kwargs.get("threshold"), 0.2)
-            # 确认输出中包含了相关度列或数值
+            # Verify output contains relevance score column or value
             self.assertIn("0.55", result.output)
 
 

@@ -31,7 +31,7 @@ def add(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名称"),
     image: Optional[str] = typer.Option(None, "--image", "-i", help="引用的本地截图或图片路径"),
 ):
-    """沉淀一条新记忆到 Hippo 中枢。"""
+    """Store a new memory into the Hippo memory hub."""
     scope = "global" if is_global else "project"
     engine = _get_engine()
     resolved_proj = engine.router.resolve_project(project)
@@ -40,7 +40,7 @@ def add(
     with console.status(f"[bold cyan]正在提取并沉淀记忆至 {tag}...[/bold cyan]"):
         try:
             res = engine.add(content=content, scope=scope, project_id=project, image_path=image)
-            # Mem0 v1.1 返回 results 列表；抽取器判定无事实时为空，或仅含 event=NONE 的占位项
+            # Mem0 returns a results list; empty or contains placeholder with event=NONE when no facts are extracted
             stored = [
                 r for r in (res.get("results", []) if isinstance(res, dict) else [])
                 if r.get("event") != "NONE"
@@ -69,7 +69,7 @@ def search(
         help="Mem0 语义初筛阈值 (0.0~1.0，留空则使用配置默认值)",
     ),
 ):
-    """在记忆中枢中进行语义与多信号混合检索。"""
+    """Perform semantic and hybrid search across memories."""
     engine = _get_engine()
     with console.status(f"[bold cyan]正在检索与 '{query}' 相关的记忆 (Scope: {scope})...[/bold cyan]"):
         try:
@@ -116,7 +116,7 @@ def list(
     limit: int = typer.Option(20, "--limit", "-n", help="最大返回条数"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
 ):
-    """列出当前指定范围内的所有事实记忆清单。"""
+    """List all factual memories within the specified scope."""
     engine = _get_engine()
     with console.status(f"[bold cyan]正在拉取记忆列表 (Scope: {scope})...[/bold cyan]"):
         try:
@@ -155,7 +155,7 @@ def recent(
     limit: int = typer.Option(50, "--limit", "-n", help="最大返回条数（上限 100）"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
 ):
-    """按时间窗口回顾近期记忆事件（ADD/UPDATE/DELETE），适合每日复盘与任务交接。"""
+    """Review recent memory events (ADD/UPDATE/DELETE) over a time window for daily handoff."""
     from datetime import datetime
 
     if scope not in ("all", "global", "project"):
@@ -212,7 +212,7 @@ def recent(
 def profile(
     user_id: Optional[str] = typer.Option(None, "--user", "-u", help="用户 ID"),
 ):
-    """查看用户的全局开发偏好画像（适合快速校验全局规范）。"""
+    """View the user's global development preferences (useful for inspecting global rules)."""
     engine = _get_engine()
     prof = engine.get_user_profile(user_id=user_id)
     panel = Panel(
@@ -227,7 +227,7 @@ def profile(
 def get(
     memory_id: str = typer.Argument(..., help="要查看的记忆 ID"),
 ):
-    """获取指定单条记忆的详细信息。"""
+    """Get details of a single memory by ID."""
     engine = _get_engine()
     item = engine.get(memory_id)
     if not item:
@@ -254,7 +254,7 @@ def update(
     memory_id: str = typer.Argument(..., help="要更新的记忆 ID"),
     text: str = typer.Argument(..., help="更新后的记忆文本内容"),
 ):
-    """更新指定单条记忆的内容。"""
+    """Update the text of a single memory."""
     engine = _get_engine()
     try:
         res = engine.update(memory_id=memory_id, text=text)
@@ -268,7 +268,7 @@ def update(
 def delete(
     memory_id: str = typer.Argument(..., help="要删除的记忆 ID"),
 ):
-    """删除指定的单条记忆。"""
+    """Delete a specific memory by ID."""
     engine = _get_engine()
     if engine.delete(memory_id):
         console.print(f"[bold green]✓ 记忆 `{memory_id}` 已成功删除。[/bold green]")
@@ -278,7 +278,7 @@ def delete(
 
 @app.command()
 def status():
-    """查看当前 Hippo 配置状态与存储位置。"""
+    """Show current Hippo configuration status and storage locations."""
     cfg = HippoConfig()
     engine = _get_engine(cfg)
     detected_proj, git_root = engine.router.detect_git_project()
@@ -306,9 +306,9 @@ def consolidate(
     dry_run: bool = typer.Option(False, "--dry-run", help="只预览 decisions/plans，不修改任何记忆"),
     user_id: Optional[str] = typer.Option(None, "--user", help="显式指定用户标识"),
 ):
-    """运行 Cold Path 记忆治理：合并等价事实、消解冲突、收敛 canonical state。
+    """Run Cold Path memory consolidation: merge duplicates, resolve conflicts, and converge canonical state.
 
-    属于离线治理入口，默认不绑定每次写入，也不启用自动调度。
+    Offline maintenance command; never bound to writes or scheduled automatically by default.
     """
     from hippo_memory.consolidator import MemoryConsolidator, parse_since
 
@@ -373,7 +373,7 @@ def consolidate(
 
 @app.command()
 def serve():
-    """启动 Hippo MCP Server（标准 stdio 模式，供各 IDE 接入）。"""
+    """Start Hippo MCP Server (standard stdio mode for IDE integration)."""
     from hippo_memory.server import main as run_server
     run_server()
 
@@ -384,7 +384,7 @@ def init(
     skip_project: bool = typer.Option(False, "--skip-project", help="跳过当前项目 AGENTS.md"),
     no_hooks: bool = typer.Option(False, "--no-hooks", help="跳过自动配置各客户端生命周期 Hook 与 pi 扩展"),
 ):
-    """将记忆检索约定幂等写入客户端指令文件，并配置各宿主 Hook 蒸馏切面。"""
+    """Idempotently inject memory conventions into client instruction files and configure host hooks."""
     from hippo_memory.init import run_init
 
     status_zh = {
@@ -419,7 +419,7 @@ def init(
 
 @app.command()
 def doctor():
-    """巡检本地部署健康状态（Qdrant/配置/LaunchAgent/客户端接入）。"""
+    """Inspect local deployment health (Qdrant, configuration, LaunchAgents, client integrations)."""
     from hippo_memory.doctor import collect_checks
 
     checks = collect_checks()
@@ -451,7 +451,7 @@ def service(
     action: str = typer.Argument(..., help="操作: install | uninstall | status | restart"),
     target: str = typer.Argument("qdrant", help="服务目标: qdrant | worker | all (默认 qdrant)"),
 ):
-    """管理 Qdrant 与 Worker LaunchAgent 常驻服务。"""
+    """Manage Qdrant and Worker LaunchAgent daemon services."""
     from hippo_memory import service as svc
 
     try:
@@ -504,7 +504,7 @@ def service(
 def migrate_codex(
     concurrency: int = typer.Option(3, "--concurrency", "-c", help="并发迁移线程数"),
 ):
-    """一键将 Codex 本地 SQLite 中的历史项目记忆迁移至 Hippo。"""
+    """Migrate historical project memories from Codex local SQLite into Hippo."""
     from hippo_memory.migrate import migrate_all
 
     migrate_all(concurrency=concurrency)
@@ -512,7 +512,7 @@ def migrate_codex(
 
 @app.command()
 def migrate_zcode():
-    """一键将 ZCode 本地 ~/.zcode/cli/memories/ 中的精细记忆迁移至 Hippo。"""
+    """Migrate fine-grained memories from ZCode local ~/.zcode/cli/memories/ into Hippo."""
     from hippo_memory.migrate_zcode import migrate_zcode_all
 
     migrate_zcode_all()
@@ -529,11 +529,10 @@ def reindex(
     recompute_existing: bool = typer.Option(False, "--recompute-existing", help="对目标端已存在且 payload 一致的记录强制重新生成向量"),
     dry_run: bool = typer.Option(False, "--dry-run", help="预览迁移规模与目标配置，不执行向量生成与写入"),
 ):
-    """跨向量模型与 Provider 迁移历史记忆（Embedding Reindex / Migration）。
+    """Migrate historical memories across embedding models/providers (Embedding Reindex).
 
-    安全将源 Collection 中的记忆文本重新计算目标模型的向量并导入目标 Collection。
-    源 Collection 保持只读且绝不就地修改；支持伴生实体集合同构迁移、断点续传与冲突阻断。
-    注意：执行实际迁移时，请确保源端与目标端写入处于静止状态（quiescent）。
+    Safely re-embeds memory texts from source collection and imports them into target collection.
+    Source collection remains read-only; supports companion entity collections and conflict handling.
     """
     from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
     from hippo_memory.reindex import EmbeddingMigrator
@@ -663,7 +662,7 @@ def hook_capture(
     sync: bool = typer.Option(False, "--sync", help="同步执行蒸馏（调试与单测使用）"),
     cwd: Optional[str] = typer.Option(None, "--cwd", help="覆盖运行目录"),
 ):
-    """从 stdin 极速捕获宿主 Hook 上下文并压入 Spool 队列（<50ms 立即退出）。"""
+    """Capture host hook context from stdin and enqueue into spool (<50ms fast exit)."""
     import sys
     import subprocess
     from hippo_memory.hooks import SpoolStorage, SpoolWorker, get_adapter
@@ -729,7 +728,7 @@ def hook_worker(
     limit: Optional[int] = typer.Option(None, "--limit", "-n", help="最大消费作业数"),
     interval: float = typer.Option(2.0, "--interval", "-i", help="常驻轮询间隔秒数"),
 ):
-    """后台单 Worker 互斥消费 Spool 作业队列。"""
+    """Background single worker mutex-consuming the spool job queue."""
     from hippo_memory.hooks import SpoolStorage, SpoolWorker
 
     storage = SpoolStorage()
@@ -745,7 +744,7 @@ def hook_worker(
 
 @hook_app.command("status")
 def hook_status():
-    """查看 Spool 队列统计状态与作业流水。"""
+    """Inspect spool queue statistics and job journal."""
     import datetime
     from hippo_memory.hooks import SpoolStorage, JobState
 
@@ -796,7 +795,7 @@ def hook_retry(
     drain: bool = typer.Option(True, "--drain/--no-drain", help="重置状态后触发消费"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只预览待重试的作业，不实际修改"),
 ):
-    """将指定已失败 (dead) 或被跳过 (skipped) 的作业重新加入队列并触发消费。"""
+    """Re-enqueue failed (dead) or skipped jobs and trigger consumption."""
     from hippo_memory.hooks import SpoolStorage, SpoolWorker, JobState
     from hippo_memory.service import is_worker_running
 
@@ -872,7 +871,7 @@ def hook_prune(
     dry_run: bool = typer.Option(False, "--dry-run", help="只预览待清理的作业，不实际删除"),
     force: bool = typer.Option(False, "--force", "-f", help="确认执行删除（破坏性操作保护）"),
 ):
-    """清理已完成或废弃的 Spool 历史作业（保留 receipts 凭证并写入 tombstones 保持幂等）。"""
+    """Prune completed or discarded spool jobs (preserving receipts and tombstones for idempotency)."""
     from hippo_memory.hooks import SpoolStorage, TERMINAL_STATES
 
     valid_states = {"dead", "skipped", "completed", "coalesced", "all"}

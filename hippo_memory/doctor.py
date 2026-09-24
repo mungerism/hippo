@@ -1,4 +1,4 @@
-"""Hippo Doctor - 本地部署健康巡检（纯运维，不依赖 mem0 SDK）。"""
+"""Hippo Doctor - Local deployment health inspection (ops only, no mem0 SDK dependency)."""
 
 import importlib.metadata
 import os
@@ -15,7 +15,7 @@ from hippo_memory.service import (
 
 
 def _client_config_checks() -> List[tuple]:
-    """各客户端 MCP 配置检查项：(名称, 配置文件, 应包含的标记)。路径在调用时求值以便测试注入 HOME。"""
+    """Client MCP config checks: (name, config file, expected needle). Paths evaluated at call time for HOME injection in tests."""
     home = Path.home()
     return [
         ("antigravity", home / ".gemini" / "config" / "mcp_config.json", "hippo-mcp"),
@@ -85,7 +85,7 @@ def _provider_credentials_status(provider: str) -> tuple[bool, str]:
 
 
 def collect_checks() -> List[dict]:
-    """运行全部巡检项，返回 [{category, name, ok, detail}]；单项异常不中断整体。"""
+    """Run all health checks, returning [{category, name, ok, detail}]; single failure does not halt execution."""
     checks: List[dict] = []
 
     def add(category: str, name: str, ok: bool, detail: str = "") -> None:
@@ -136,7 +136,7 @@ def collect_checks() -> List[dict]:
     except Exception as e:
         add("Qdrant", "数据目录占用", False, str(e))
 
-    # --- 配置 ---
+    # --- Configuration ---
     add(
         "配置",
         "~/.hippo/.env",
@@ -183,7 +183,7 @@ def collect_checks() -> List[dict]:
             "在 ~/.hippo/.env 设置 GOOGLE_API_KEY（或 OPENAI_API_KEY）",
         )
 
-    # --- 服务（LaunchAgent）---
+    # --- Services (LaunchAgent) ---
     try:
         st = service_status()
         if st["loaded"]:
@@ -199,11 +199,11 @@ def collect_checks() -> List[dict]:
     except Exception as e:
         add("服务", "dev.hippo.qdrant", False, f"状态查询失败: {e}")
 
-    # --- Worker 常驻服务巡检 ---
+    # --- Worker Daemon Service Check ---
     try:
         w_st = worker_service_status()
         if not w_st["plist_exists"]:
-            # 未安装 = healthy fallback (按需消费模式)
+            # Not installed = healthy fallback (on-demand mode)
             add(
                 "服务",
                 "dev.hippo.worker",
@@ -225,7 +225,7 @@ def collect_checks() -> List[dict]:
     except Exception as e:
         add("服务", "dev.hippo.worker", False, f"状态查询失败: {e}")
 
-    # --- 客户端接入 ---
+    # --- Client Integrations ---
     for name, path, needle in _client_config_checks():
         try:
             ok = path.exists() and needle in path.read_text(encoding="utf-8")
@@ -241,13 +241,13 @@ def collect_checks() -> List[dict]:
     pi_contract = get_contract(HostType.PI, home=home)
     add("客户端", "pi 扩展", pi_contract.canonical_config_path.exists(), str(pi_contract.canonical_config_path))
 
-    # --- 生命周期 Hook 挂载与防呆巡检 ---
+    # --- Lifecycle Hook Mounting & Safety Checks ---
     for contract in get_host_contracts(home=home):
         event_names = "/".join(e.value for e in contract.events)
         name = f"{contract.display_name} ({event_names})"
 
         if contract.is_hook_installed():
-            # 1. 正向同级指纹交叉核验 (Sibling Verification)
+            # 1. Forward sibling fingerprint verification
             if contract.verify_sibling_fingerprints():
                 add("Hook 挂载", name, True, "已挂载")
             else:
@@ -260,7 +260,7 @@ def collect_checks() -> List[dict]:
         else:
             add("Hook 挂载", name, False, "未挂载 (可运行 hippo init)")
 
-        # 2. 反向僵尸文件探测 (Zombie Configuration Probe)
+        # 2. Reverse zombie configuration probe
         for zombie in contract.detect_zombies():
             add(
                 "Hook 挂载",
@@ -269,7 +269,7 @@ def collect_checks() -> List[dict]:
                 f"[WARN] 检测到废弃历史路径残留配置 ({zombie})，宿主不会读取，请运行 hippo init 清理",
             )
 
-    # --- Spool 队列巡检 ---
+    # --- Spool Queue Check ---
     try:
         from hippo_memory.hooks import SpoolStorage, JobState
 
@@ -314,7 +314,7 @@ def collect_checks() -> List[dict]:
     except Exception as e:
         add("Spool 队列", "队列状态", False, f"探测异常: {e}")
 
-    # --- 依赖 ---
+    # --- Dependencies ---
     try:
         version = importlib.metadata.version("mem0ai")
         add("依赖", "mem0ai", True, f"v{version}")
