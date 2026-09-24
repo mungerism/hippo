@@ -103,7 +103,10 @@ def recall_at_k(
     top_k = retrieved[:k]
 
     if total_relevant == 0:
-        # No ground-truth relevant items exist for this query
+        # Empty qrels are only a scored abstention case when the dataset explicitly
+        # marks the query as expected_empty. Missing labels must not look like success.
+        if not expected_empty:
+            return 0.0
         return 1.0 if len(top_k) == 0 else 0.0
 
     hits = sum(1 for item in top_k if qrels.get(item, 0) > 0)
@@ -225,7 +228,8 @@ def evaluate_single_query(
         metrics[f"forbidden_leakage@{k}"] = float(
             forbidden_leakage(clean_retrieved, forbidden_ids, k)
         )
-        metrics[f"empty_accuracy@{k}"] = empty_accuracy(clean_retrieved, k)
+        if query.expected_empty:
+            metrics[f"empty_accuracy@{k}"] = empty_accuracy(clean_retrieved, k)
 
     return metrics
 
