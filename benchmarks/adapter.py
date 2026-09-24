@@ -11,8 +11,10 @@ Provides:
 from __future__ import annotations
 
 import abc
+import copy
 from dataclasses import asdict
 import logging
+from pathlib import Path
 import re
 import tempfile
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -298,56 +300,98 @@ class HippoEngineAdapter(BenchmarkAdapter):
         from hippo_memory.config import HippoConfig
         from hippo_memory.engine import HippoEngine
 
-        cfg = config or HippoConfig.from_env()
+        base_cfg = config or HippoConfig.from_env()
+        cfg = copy.copy(base_cfg)
 
-        # Generate or validate isolated collection name
+        # Generate or validate isolated collection name.
         if collection_name is None:
             isolated_coll = f"eval_bench_{uuid.uuid4().hex[:12]}"
         else:
             isolated_coll = collection_name
 
-        # Security invariant: Never touch the default production collection!
-        prod_coll = getattr(cfg, "collection_name", "hippo_memories")
+        # Resolve the collection that the supplied configuration would really use.
+        # HippoConfig does not expose a mutable collection_name field; get_mem0_config()
+        # is the source of truth.
+        prod_coll = getattr(base_cfg, "collection_name", None)
+        if not isinstance(prod_coll, str) or not prod_coll:
+            try:
+                prod_mem0_cfg = base_cfg.get_mem0_config()
+                prod_coll = (
+                    prod_mem0_cfg.get("vector_store", {})
+                    .get("config", {})
+                    .get("collection_name")
+                )
+            except Exception:
+                prod_coll = None
+
         if isolated_coll == prod_coll or not isolated_coll.startswith("eval_"):
             raise ValueError(
                 f"Security violation: evaluation collection {isolated_coll!r} must start with 'eval_' "
                 f"and cannot match production collection {prod_coll!r}."
             )
 
-        # Override collection name in config
-        cfg.collection_name = isolated_coll
+        # Isolate every local persistence surface as well as the vector collection.
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="hippo_eval_")
+        cfg.storage_dir = Path(self._temp_dir.name)
+        cfg.history_db_path = str(cfg.storage_dir / "history.db")
+
+        original_get_mem0_config = cfg.get_mem0_config
+
+        def isolated_get_mem0_config() -> Dict[str, Any]:
+            mem0_cfg = copy.deepcopy(original_get_mem0_config())
+            vector_cfg = mem0_cfg.setdefault("vector_store", {}).setdefault("config", {})
+            vector_cfg["collection_name"] = isolated_coll
+            mem0_cfg["history_db_path"] = cfg.history_db_path
+            return mem0_cfg
+
+        cfg.get_mem0_config = isolated_get_mem0_config
+
         self.collection_name = isolated_coll
         self.config = cfg
+        self.gate_config = (
+            cfg.get_gate_config() if hasattr(cfg, "get_gate_config") else SearchGateConfig()
+        )
         self.engine = HippoEngine(config=cfg)
 
     def get_embedding_profile(self) -> Dict[str, Any]:
-        """Extract effective embedding profile from engine configuration."""
-        emb_cfg = getattr(self.config, "embedding", None)
-        provider = getattr(emb_cfg, "provider", "ollama") if emb_cfg else "ollama"
-        model = getattr(emb_cfg, "model", "bge-m3") if emb_cfg else "bge-m3"
-        dims = getattr(emb_cfg, "dims", 1024) if emb_cfg else 1024
+        """Extract the effective embedding profile from the actual Mem0 config."""
+        mem0_cfg = self.config.get_mem0_config()
+        emb_cfg = mem0_cfg.get("embedder", {})
+        emb_params = emb_cfg.get("config", {})
+        vector_params = mem0_cfg.get("vector_store", {}).get("config", {})
         return {
-            "provider": provider,
-            "model": model,
-            "dims": dims,
-            "collection": self.collection_name,
+            "provider": emb_cfg.get("provider", "unknown"),
+            "model": emb_params.get("model", "unknown"),
+            "dims": int(
+                emb_params.get(
+                    "embedding_dims",
+                    vector_params.get("embedding_model_dims", 0),
+                )
+                or 0
+            ),
+            "collection": vector_params.get("collection_name", self.collection_name),
         }
 
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
-        """Ingest corpus items into the isolated benchmark collection."""
+        """Ingest corpus deterministically into the isolated benchmark collection."""
         for item in corpus:
             meta = dict(item.metadata)
             meta["status"] = item.status
             meta["scope"] = item.scope
+            meta["benchmark_id"] = item.id
+            if item.category is not None:
+                meta["category"] = item.category
             if item.project_id:
                 meta["project"] = item.project_id
 
-            # Directly store into memory backend with isolated parameters
-            self.engine.memory.add(
-                messages=[{"role": "user", "content": item.text}],
+            # infer=False preserves a one-corpus-item -> one-memory relationship and
+            # avoids LLM extraction rewriting/splitting benchmark facts.
+            self.engine.add(
+                text=item.text,
                 user_id=item.user_id or self.config.user_id,
                 agent_id=item.project_id if item.scope == "project" else "global",
                 metadata=meta,
+                infer=False,
             )
 
     def search(
@@ -365,17 +409,23 @@ class HippoEngineAdapter(BenchmarkAdapter):
             limit=limit,
             query_id=query.query_id,
         )
-        retrieved_ids = [str(item.get("id")) for item in accepted]
+        def logical_id(item: Mapping[str, Any]) -> str:
+            meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+            return str(meta.get("benchmark_id") or item.get("benchmark_id") or item.get("id"))
+
+        retrieved_ids = [logical_id(item) for item in accepted]
         return retrieved_ids, trace if capture_trace else None
 
     def cleanup(self) -> None:
-        """Delete isolated benchmark collection."""
+        """Delete the isolated collection without lazily opening production-adjacent resources."""
         try:
-            if hasattr(self.engine.memory, "vector_store") and hasattr(
-                self.engine.memory.vector_store, "client"
-            ):
-                client = self.engine.memory.vector_store.client
+            mem = getattr(self.engine, "_memory", None)
+            vector_store = getattr(mem, "vector_store", None) if mem is not None else None
+            client = getattr(vector_store, "client", None)
+            if client is not None:
                 client.delete_collection(collection_name=self.collection_name)
                 logger.info("Deleted isolated evaluation collection: %s", self.collection_name)
         except Exception as e:
             logger.warning("Failed to delete isolated collection %s: %s", self.collection_name, e)
+        finally:
+            self._temp_dir.cleanup()
