@@ -1,42 +1,42 @@
 name: 🐛 Bug Report
-description: 提交缺陷或运行异常报告
+description: Report an issue or unexpected behavior
 title: "[Bug]: "
 labels: ["needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈 Bug！请详细描述遇到的问题，以便我们快速复现和定位。
+        Thank you for reporting a bug! (English is preferred, Chinese is welcome / 欢迎中英文反馈)
   - type: textarea
     id: what-happened
     attributes:
-      label: 问题描述 (Description)
-      description: 请详细描述发生了什么异常行为。
-      placeholder: 请在此描述具体的错误现象...
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: Describe what happened...
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: 复现步骤 (Steps to Reproduce)
-      description: 触发该问题的具体步骤。
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
       placeholder: |
-        1. 启动 hippo 服务或在 IDE 中配置 MCP
-        2. 执行 ...
-        3. 观察到 ...
+        1. Run `hippo ...` or mount MCP in IDE
+        2. Execute ...
+        3. See error ...
     validations:
       required: true
   - type: textarea
     id: logs
     attributes:
-      label: 错误日志与诊断输出 (Logs & Doctor Output)
-      description: 请运行 `hippo doctor` 并附上日志输出（请注意遮蔽敏感凭证）。
+      label: Logs & Doctor Diagnostics
+      description: Please run `hippo doctor` and attach the output (redacting any private credentials).
       render: shell
   - type: input
     id: environment
     attributes:
-      label: 环境信息 (Environment)
-      description: 操作系统、Python 版本、IDE 及宿主 Agent 类型。
+      label: Environment
+      description: OS version, Python version, IDE / Agent client.
       placeholder: macOS 15.0 / Python 3.12 / Cursor / gemini-3.5-flash-lite
     validations:
       required: true

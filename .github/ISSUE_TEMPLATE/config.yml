@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: 📖 Hippo 官方文档
+  - name: 📖 Hippo Documentation
     url: https://mungerism.github.io/hippo/
-    about: 查阅系统架构、ADR 决策、RFC 提案与排障手册
+    about: Read system architecture, ADRs, RFCs, and troubleshooting runbooks.
