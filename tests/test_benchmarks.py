@@ -11,8 +11,10 @@ Covers:
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -188,11 +190,19 @@ class TestBenchmarkMetrics(unittest.TestCase):
 
         # Edge case: Empty qrels (negative query / expected empty)
         empty_qrels: dict[str, int] = {}
-        # If retrieved is empty -> 1.0 (correct abstention)
-        self.assertEqual(recall_at_k([], empty_qrels, k=3), 1.0)
+        # Explicit hard-negative queries score correct abstention as 1.0.
+        self.assertEqual(recall_at_k([], empty_qrels, k=3, expected_empty=True), 1.0)
+        # Missing qrels alone must not be treated as a successful negative query.
+        self.assertEqual(recall_at_k([], empty_qrels, k=3, expected_empty=False), 0.0)
         # If retrieved is not empty -> 0.0 (unwanted hallucination/leakage)
-        self.assertEqual(recall_at_k(["doc1"], empty_qrels, k=3), 0.0)
-        self.assertEqual(recall_at_k(["doc1"], empty_qrels, k=0), 0.0)
+        self.assertEqual(
+            recall_at_k(["doc1"], empty_qrels, k=3, expected_empty=True),
+            0.0,
+        )
+        self.assertEqual(
+            recall_at_k(["doc1"], empty_qrels, k=0, expected_empty=True),
+            0.0,
+        )
 
     def test_mrr(self):
         qrels = {"doc_rel": 1}
@@ -233,6 +243,27 @@ class TestBenchmarkMetrics(unittest.TestCase):
         self.assertEqual(empty_accuracy([], k=3), 1.0)
         self.assertEqual(empty_accuracy(["doc1"], k=3), 0.0)
         self.assertEqual(empty_accuracy(["doc1"], k=0), 1.0)
+
+    def test_empty_accuracy_is_only_emitted_for_expected_empty_queries(self):
+        positive = EvaluationQuery(query_id="q_pos", query="positive", expected_empty=False)
+        positive_metrics = evaluate_single_query(
+            positive,
+            retrieved_ids=["doc1"],
+            qrels={"doc1": 1},
+            forbidden_ids=[],
+            k_values=(3,),
+        )
+        self.assertNotIn("empty_accuracy@3", positive_metrics)
+
+        negative = EvaluationQuery(query_id="q_neg", query="negative", expected_empty=True)
+        negative_metrics = evaluate_single_query(
+            negative,
+            retrieved_ids=[],
+            qrels={},
+            forbidden_ids=[],
+            k_values=(3,),
+        )
+        self.assertEqual(negative_metrics["empty_accuracy@3"], 1.0)
 
 
 class TestEvaluationTracePipeline(unittest.TestCase):
@@ -349,6 +380,90 @@ class TestBenchmarkAdapters(unittest.TestCase):
         prof = replay_adapter.get_embedding_profile()
         self.assertEqual(prof["provider"], "replay")
 
+    def test_live_adapter_overrides_effective_storage_and_preserves_logical_ids(self):
+        prod_mem0_cfg = {
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "collection_name": "hippo_memories_gemini_fixture",
+                    "embedding_model_dims": 768,
+                },
+            },
+            "embedder": {
+                "provider": "gemini",
+                "config": {
+                    "model": "models/gemini-embedding-2",
+                    "embedding_dims": 768,
+                },
+            },
+            "history_db_path": "/prod/history.db",
+        }
+        fake_cfg = SimpleNamespace(
+            collection_name="hippo_memories_gemini_fixture",
+            storage_dir=Path("/prod"),
+            history_db_path="/prod/history.db",
+            user_id="alice",
+            provider="gemini",
+            get_mem0_config=lambda: json.loads(json.dumps(prod_mem0_cfg)),
+            get_gate_config=lambda: SearchGateConfig(),
+        )
+
+        adapter = HippoEngineAdapter(collection_name="eval_unit_fixture", config=fake_cfg)
+        try:
+            effective = adapter.config.get_mem0_config()
+            self.assertEqual(
+                effective["vector_store"]["config"]["collection_name"],
+                "eval_unit_fixture",
+            )
+            self.assertNotEqual(effective["history_db_path"], "/prod/history.db")
+            self.assertTrue(effective["history_db_path"].startswith(adapter._temp_dir.name))
+
+            profile = adapter.get_embedding_profile()
+            self.assertEqual(profile["provider"], "gemini")
+            self.assertEqual(profile["model"], "models/gemini-embedding-2")
+            self.assertEqual(profile["dims"], 768)
+            self.assertEqual(profile["collection"], "eval_unit_fixture")
+
+            adapter.engine.add = MagicMock()
+            adapter.ingest_corpus(
+                [
+                    CorpusItem(
+                        id="logical_1",
+                        text="benchmark fact",
+                        scope="project",
+                        project_id="hippo",
+                        user_id="alice",
+                    )
+                ]
+            )
+            add_kwargs = adapter.engine.add.call_args.kwargs
+            self.assertFalse(add_kwargs["infer"])
+            self.assertEqual(add_kwargs["metadata"]["benchmark_id"], "logical_1")
+
+            adapter.engine.search_with_trace = MagicMock(
+                return_value=(
+                    [
+                        {
+                            "id": "physical_mem0_id",
+                            "metadata": {"benchmark_id": "logical_1"},
+                        }
+                    ],
+                    None,
+                )
+            )
+            retrieved_ids, _ = adapter.search(
+                EvaluationQuery(
+                    query_id="q1",
+                    query="benchmark fact",
+                    scope="project",
+                    project_id="hippo",
+                    user_id="alice",
+                )
+            )
+            self.assertEqual(retrieved_ids, ["logical_1"])
+        finally:
+            adapter.cleanup()
+
 
 class TestBenchmarkRunnerAndDiff(unittest.TestCase):
     """Test runner execution, JSON & Markdown parity, and baseline regression detection."""
@@ -430,6 +545,23 @@ class TestBenchmarkRunnerAndDiff(unittest.TestCase):
 
         diff_md = generate_diff_markdown(diff)
         self.assertIn("❌ 存在退化或泄漏", diff_md)
+
+    def test_compare_reports_rejects_incompatible_baseline(self):
+        dataset = create_smoke_fixture_dataset()
+        runner = BenchmarkRunner(adapter=ReplayFixtureAdapter(), max_injected=3)
+        baseline_report = runner.run(dataset)
+
+        incompatible_manifest = replace(
+            baseline_report.manifest,
+            dataset_hash="different-dataset-hash",
+        )
+        incompatible_report = replace(
+            baseline_report,
+            manifest=incompatible_manifest,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Incompatible baseline report"):
+            compare_reports(baseline_report, incompatible_report)
 
 
 class TestMcpTraceIsolation(unittest.TestCase):
