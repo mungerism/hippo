@@ -1451,6 +1451,177 @@ class HippoEngine:
             logger.error("Error applying relevance gate to search results: %s", e)
             return []
 
+    def search_with_trace(
+        self,
+        query: str,
+        scope: str = "all",
+        project_id: Optional[str] = None,
+        limit: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        threshold: Optional[float] = None,
+        query_id: str = "",
+    ) -> tuple[List[Dict[str, Any]], Any]:
+        """Search relevant memories and capture the full four-stage evaluation trace.
+
+        This method is intended for benchmark harnesses, test suites, and internal diagnostics.
+        It is never exposed via MCP tools to the agent.
+
+        Stages captured:
+            1. candidate: Raw results returned by the vector/hybrid store.
+            2. lifecycle_scope: Active-only check and scope compatibility.
+            3. gate: Signal-aware anti-pollution gate decisions.
+            4. final: Top-N accepted results.
+
+        Returns:
+            Tuple of (accepted_memories_list, evaluation_trace_object).
+        """
+        import dataclasses
+        from hippo_memory.gate import _is_valid_numeric, filter_search_results_with_details
+        from hippo_memory.lifecycle import filter_active_memories_with_details, status_of
+
+        try:
+            from benchmarks.schemas import (
+                CandidateTraceItem,
+                EvaluationTrace,
+                GateTrace,
+                LifecycleScopeTrace,
+            )
+        except ImportError:
+            # Fallback if benchmarks is not installed or available
+            accepted = self.search(
+                query=query,
+                scope=scope,
+                project_id=project_id,
+                limit=limit,
+                filters=filters,
+                user_id=user_id,
+                agent_id=agent_id,
+                threshold=threshold,
+            )
+            return accepted, None
+
+        if limit <= 0:
+            trace = EvaluationTrace(
+                query_id=query_id,
+                query=query,
+                candidate_stage=[],
+                lifecycle_scope_stage=LifecycleScopeTrace(passed_ids=[], rejected=[]),
+                gate_stage=GateTrace(passed_ids=[], rejected=[]),
+                final_stage_ids=[],
+            )
+            return [], trace
+
+        uid = user_id or self.config.user_id
+
+        if filters:
+            computed_filters = filters.copy()
+            if "user_id" not in computed_filters and not any(
+                k in computed_filters for k in ("AND", "OR", "NOT")
+            ):
+                computed_filters["user_id"] = uid
+        elif agent_id:
+            computed_filters = {"user_id": uid, "agent_id": agent_id}
+        else:
+            computed_filters = self.router.build_search_filters(
+                scope=scope,
+                user_id=uid,
+                project_id=project_id,
+            )
+
+        effective_threshold = (
+            getattr(self.config, "semantic_threshold", 0.1)
+            if threshold is None
+            else threshold
+        )
+        candidate_pool_size = _candidate_pool_size(limit)
+
+        # Stage 1: Candidate retrieval follows the exact production pushdown path.
+        # Trace capture must never change which candidates compete for top-k.
+        results = self.memory.search(
+            query=query,
+            filters=add_lifecycle_exclusion(computed_filters),
+            top_k=candidate_pool_size,
+            threshold=effective_threshold,
+            explain=True,
+        )
+        raw_list = _unwrap_results(results)
+
+        candidate_stage: List[CandidateTraceItem] = []
+        for item in raw_list:
+            cid = str(item.get("id"))
+            meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+            score_val = item.get("score")
+            score_float = float(score_val) if _is_valid_numeric(score_val) else 0.0
+            dt = item.get("score_details")
+            details_dict = dict(dt) if isinstance(dt, Mapping) else {}
+            c_scope = meta.get("scope") or item.get("scope")
+            c_proj = meta.get("project") or item.get("project_id") or item.get("agent_id")
+            candidate_stage.append(
+                CandidateTraceItem(
+                    id=cid,
+                    text=str(item.get("memory") or item.get("text") or ""),
+                    score=score_float,
+                    score_details=details_dict,
+                    status=status_of(item),
+                    scope=c_scope,
+                    project_id=c_proj,
+                    user_id=item.get("user_id"),
+                )
+            )
+
+        # Stage 2: Apply the same defensive lifecycle filter as production.
+        # User/scope isolation has already been enforced by computed_filters above;
+        # re-filtering it here would make trace mode semantically different from search().
+        passed_lifecycle_items, rejected_lifecycle = filter_active_memories_with_details(raw_list)
+
+        lifecycle_trace = LifecycleScopeTrace(
+            passed_ids=[str(x.get("id")) for x in passed_lifecycle_items],
+            rejected=rejected_lifecycle,
+        )
+
+        # Stage 3: Gate filtering
+        gate_cfg = (
+            self.config.get_gate_config()
+            if hasattr(self.config, "get_gate_config")
+            else None
+        )
+        gate_dict = dataclasses.asdict(gate_cfg) if (gate_cfg and dataclasses.is_dataclass(gate_cfg)) else {}
+
+        accepted, decisions = filter_search_results_with_details(
+            passed_lifecycle_items, config=gate_cfg, limit=limit
+        )
+
+        gate_trace = GateTrace(
+            passed_ids=[d.memory_id for d in decisions if d.accepted],
+            rejected=[
+                {
+                    "id": d.memory_id,
+                    "reason": d.reason,
+                    "final_score": d.final_score,
+                    "details": d.details or {},
+                }
+                for d in decisions
+                if not d.accepted
+            ],
+            gate_config=gate_dict,
+        )
+
+        # Stage 4: Final stage
+        final_stage_ids = [str(x.get("id")) for x in accepted]
+
+        trace = EvaluationTrace(
+            query_id=query_id,
+            query=query,
+            candidate_stage=candidate_stage,
+            lifecycle_scope_stage=lifecycle_trace,
+            gate_stage=gate_trace,
+            final_stage_ids=final_stage_ids,
+        )
+
+        return accepted, trace
+
     def search_semantic_neighbors(
         self,
         query: str,
