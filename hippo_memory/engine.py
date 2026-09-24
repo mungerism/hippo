@@ -1479,7 +1479,7 @@ class HippoEngine:
         """
         import dataclasses
         from hippo_memory.gate import _is_valid_numeric, filter_search_results_with_details
-        from hippo_memory.lifecycle import is_active_memory, status_of
+        from hippo_memory.lifecycle import filter_active_memories_with_details, status_of
 
         try:
             from benchmarks.schemas import (
@@ -1514,11 +1514,6 @@ class HippoEngine:
             return [], trace
 
         uid = user_id or self.config.user_id
-        resolved_proj = (
-            self.router.resolve_project(project_id)
-            if hasattr(self, "router")
-            else project_id
-        )
 
         if filters:
             computed_filters = filters.copy()
@@ -1542,12 +1537,11 @@ class HippoEngine:
         )
         candidate_pool_size = _candidate_pool_size(limit)
 
-        # Stage 1: Candidate retrieval
-        # In search_with_trace, query without lifecycle pushdown exclusion so Stage 2
-        # can explicitly observe, record, and verify defensive lifecycle filtering.
+        # Stage 1: Candidate retrieval follows the exact production pushdown path.
+        # Trace capture must never change which candidates compete for top-k.
         results = self.memory.search(
             query=query,
-            filters=computed_filters,
+            filters=add_lifecycle_exclusion(computed_filters),
             top_k=candidate_pool_size,
             threshold=effective_threshold,
             explain=True,
@@ -1577,35 +1571,10 @@ class HippoEngine:
                 )
             )
 
-        # Stage 2: Scope and lifecycle filtering
-        passed_lifecycle_items: List[Dict[str, Any]] = []
-        rejected_lifecycle: List[Dict[str, str]] = []
-        for item in raw_list:
-            cid = str(item.get("id"))
-            if not is_active_memory(item):
-                rejected_lifecycle.append({"id": cid, "reason": "superseded"})
-                continue
-
-            item_uid = item.get("user_id")
-            if item_uid is not None and item_uid != uid:
-                rejected_lifecycle.append({"id": cid, "reason": "cross_user"})
-                continue
-
-            meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
-            item_proj = meta.get("project") or item.get("project_id") or item.get("agent_id")
-            item_sc = meta.get("scope") or item.get("scope")
-
-            if scope == "global" and item_sc == "project" and item_proj != "global":
-                rejected_lifecycle.append({"id": cid, "reason": "cross_project"})
-                continue
-            if scope == "project" and item_sc == "global":
-                rejected_lifecycle.append({"id": cid, "reason": "scope_mismatch"})
-                continue
-            if scope == "project" and resolved_proj and item_proj and item_proj != resolved_proj:
-                rejected_lifecycle.append({"id": cid, "reason": "cross_project"})
-                continue
-
-            passed_lifecycle_items.append(dict(item))
+        # Stage 2: Apply the same defensive lifecycle filter as production.
+        # User/scope isolation has already been enforced by computed_filters above;
+        # re-filtering it here would make trace mode semantically different from search().
+        passed_lifecycle_items, rejected_lifecycle = filter_active_memories_with_details(raw_list)
 
         lifecycle_trace = LifecycleScopeTrace(
             passed_ids=[str(x.get("id")) for x in passed_lifecycle_items],
