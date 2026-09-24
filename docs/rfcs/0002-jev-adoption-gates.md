@@ -3,7 +3,8 @@
 - **作者**：Codex
 - **状态**：草稿，待评审；不代表已批准生产外发或自动治理
 - **创建日期**：2026-09-23
-- **关联议题**：[统一分类契约 #60](https://github.com/munger-lab/hippo/issues/60)、[Jev 适配器 #61](https://github.com/munger-lab/hippo/issues/61)、[离线评测 #62](https://github.com/munger-lab/hippo/issues/62)
+- **关联议题**：[统一分类契约 #60](https://github.com/mungerism/hippo/issues/60)、[Jev 适配器 #61](https://github.com/mungerism/hippo/issues/61)、[离线评测 #62](https://github.com/mungerism/hippo/issues/62)
+
 
 ## 背景与目标
 

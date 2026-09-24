@@ -16,6 +16,20 @@
    - 代码变更涉及架构、接口或关键行为变化时，同一 PR 必须同步更新相关文档；
    - 严禁直接 push 到 `main` 分支，必须在独立分支（如 `feat/...`、`docs/...`）上开发并通过 PR 提交审查。
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues (`mungerism/hippo`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical 5-role taxonomy (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (`docs/adr/` and lazy `CONTEXT.md` at root). See `docs/agents/domain.md`.
+
 
 <!-- hippo:memory:start -->
 ## 记忆检索约定 (Hippo)

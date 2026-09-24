@@ -1,0 +1,30 @@
+name: 💡 Feature Request
+description: 提出新功能建议或改进方案
+title: "[Feat]: "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出新想法！Hippo 的核心定位是 Mem0 的轻量工程封装，强调对齐标准规范与极简依赖。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 解决的痛点或背景 (Motivation)
+      description: 您遇到了什么问题或当前缺乏什么能力？
+      placeholder: 在 ... 场景下，现存机制存在 ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的解决方案 (Proposed Solution)
+      description: 您建议如何实现或改进？
+      placeholder: 建议增加 ... 或调整 ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案 (Alternatives Considered)
+      description: 您是否考虑过其他方案？为什么当前方案更合适？
