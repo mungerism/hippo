@@ -14,7 +14,9 @@
    - 优先阅读 [`docs/index.md`](docs/index.md) 与 [`docs/architecture/`](docs/architecture/) 获取最新系统架构与数据流；
    - 新的重要技术选型写入 ADR（[`docs/adr/`](docs/adr/)），尚未确定的方案编写 RFC（[`docs/rfcs/`](docs/rfcs/)）；
    - 代码变更涉及架构、接口或关键行为变化时，同一 PR 必须同步更新相关文档；
-   - 严禁直接 push 到 `main` 分支，必须在独立分支（如 `feat/...`、`docs/...`）上开发并通过 PR 提交审查。
+   - 严禁直接 push 到 `main` 分支，必须在独立分支（如 `feat/...`、`docs/...`）上开发并通过 PR 提交审查；
+   - Git Commit Message 与 PR 标题必须使用英文规范（Conventional Commits，如 `feat(mcp): ...`）；PR 正文推荐英文，亦可附带中文说明。
+
 
 ## Agent skills
 

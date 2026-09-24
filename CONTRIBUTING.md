@@ -75,15 +75,20 @@ pnpm --dir docs run build
    - 文档改进：`docs/<topic>`
    - 重构优化：`refactor/<topic>`
 3. **提交规范 (Conventional Commits)**：
-   - `feat(...)`: 新功能
-   - `fix(...)`: 修复缺陷
-   - `docs(...)`: 文档更新
-   - `test(...)`: 增加或更新测试
-   - `refactor(...)`: 重构
-4. **发起 PR**：
-   - PR 标题与正文请使用清晰的中文或英文阐明变更意图与改动点。
-   - 确认 CI（Code Quality & Syntax, Tests, Build, Docs）全部通过。
+   - Git Commit Message 与 PR 标题必须使用**英文**，遵循 [Conventional Commits](https://www.conventionalcommits.org/) 格式：
+     - `feat(...)`: new feature
+     - `fix(...)`: bug fix
+     - `docs(...)`: documentation changes
+     - `test(...)`: adding or updating tests
+     - `refactor(...)`: code refactoring without behavior change
+     - `perf(...)`: performance improvement
+     - `ci(...)`: CI/CD configuration
+4. **发起 PR 与 Issue**：
+   - **PR Title**: 必须使用英文规范（例如 `feat(mcp): support dynamic agent routing`），便于自动化 Changelog 生成。
+   - **PR Body / Issue**: 推荐英文（English is preferred），亦完全欢迎中文反馈与讨论（Issues in Chinese are also welcome）。
+   - 确认本地与 CI（Code Quality & Syntax, Tests, Build, Docs）全部通过。
    - PR 将在通过代码审查后由 Maintainer 合并至 `main`。
+
 
 ---
 
