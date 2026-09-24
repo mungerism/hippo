@@ -404,18 +404,63 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
     return "\n".join(lines)
 
 
+def _embedding_signature(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return only embedding fields that must match across comparable runs."""
+    return {
+        "provider": profile.get("provider"),
+        "model": profile.get("model"),
+        "dims": profile.get("dims"),
+    }
+
+
+def _validate_baseline_compatibility(
+    current: BenchmarkReport,
+    baseline: BenchmarkReport,
+) -> None:
+    """Fail fast when two reports do not describe the same evaluation contract."""
+    c = current.manifest
+    b = baseline.manifest
+    mismatches: List[str] = []
+
+    checks = [
+        ("dataset_name", c.dataset_name, b.dataset_name),
+        ("dataset_hash", c.dataset_hash, b.dataset_hash),
+        ("schema_version", c.schema_version, b.schema_version),
+        ("max_injected", c.max_injected, b.max_injected),
+        ("k_values", list(c.k_values), list(b.k_values)),
+        ("gate_thresholds", dict(c.gate_thresholds), dict(b.gate_thresholds)),
+        (
+            "embedding_profile",
+            _embedding_signature(c.embedding_profile),
+            _embedding_signature(b.embedding_profile),
+        ),
+    ]
+    for name, current_value, baseline_value in checks:
+        if current_value != baseline_value:
+            mismatches.append(
+                f"{name}: current={current_value!r}, baseline={baseline_value!r}"
+            )
+
+    if mismatches:
+        raise ValueError(
+            "Incompatible baseline report; refusing to compare runs with different "
+            "evaluation contracts: " + "; ".join(mismatches)
+        )
+
+
 def compare_reports(
     current: BenchmarkReport,
     baseline: BenchmarkReport,
     tolerance: float = 0.001,
 ) -> Dict[str, Any]:
-    """Compare current evaluation report with a baseline report.
+    """Compare current evaluation report with a compatible baseline report.
 
     Detects:
         - Metric regressions (drop > tolerance)
         - Forbidden leakage regressions (any increase > 0)
         - Per-query regressions and improvements
     """
+    _validate_baseline_compatibility(current, baseline)
     diff_metrics: Dict[str, Dict[str, Any]] = {}
     has_regression = False
     has_security_violation = False
@@ -647,7 +692,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"Warning: Baseline file not found: {baseline_path}", file=sys.stderr)
             else:
                 baseline_report = BenchmarkReport.from_json(baseline_path.read_text(encoding="utf-8"))
-                diff = compare_reports(report, baseline_report)
+                try:
+                    diff = compare_reports(report, baseline_report)
+                except ValueError as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    return 1
                 diff_md = generate_diff_markdown(diff)
                 diff_path = out_dir / f"diff_{dataset.name}.md"
                 diff_path.write_text(diff_md, encoding="utf-8")
