@@ -353,6 +353,57 @@ class TestEvaluationTracePipeline(unittest.TestCase):
         self.assertEqual(trace.final_stage_ids, retrieved_ids)
 
 
+    def test_search_with_trace_matches_production_search_semantics(self):
+        from hippo_memory.engine import HippoEngine
+
+        candidate = {
+            "id": "mem_active",
+            "memory": "relevant memory",
+            "score": 0.8,
+            "score_details": {
+                "final_score": 0.8,
+                "semantic_score": 0.8,
+                "bm25_score": 0.0,
+                "entity_boost": 0.0,
+            },
+            "metadata": {"status": "active", "scope": "global"},
+            "user_id": "alice",
+            "agent_id": "global",
+        }
+        search_mock = MagicMock(return_value={"results": [candidate]})
+        fake_cfg = SimpleNamespace(
+            user_id="alice",
+            semantic_threshold=0.1,
+            get_gate_config=lambda: SearchGateConfig(),
+        )
+        engine = HippoEngine(config=fake_cfg)
+        engine._memory = SimpleNamespace(search=search_mock)
+
+        production = engine.search(
+            query="relevant",
+            scope="global",
+            user_id="alice",
+            limit=3,
+        )
+        traced, trace = engine.search_with_trace(
+            query="relevant",
+            scope="global",
+            user_id="alice",
+            limit=3,
+            query_id="q_trace_parity",
+        )
+
+        self.assertEqual(
+            [item["id"] for item in traced],
+            [item["id"] for item in production],
+        )
+        self.assertEqual(trace.final_stage_ids, [item["id"] for item in production])
+        self.assertEqual(
+            search_mock.call_args_list[0].kwargs["filters"],
+            search_mock.call_args_list[1].kwargs["filters"],
+        )
+
+
 class TestBenchmarkAdapters(unittest.TestCase):
     """Test physical storage isolation invariants for live and replay adapters."""
 
