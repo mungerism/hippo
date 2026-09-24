@@ -8,6 +8,7 @@
 
 | 文档标题 | 主题方向 | 核心价值 |
 | :--- | :--- | :--- |
+| [Jev 结构化决策后端调研](/knowledge/jev-research) | Jev API、能力边界与部署 | 核对官方协议、中文局限、成本与数据条款，评估离线关系分类接入 |
 | [Codex 记忆机制深度调研](/knowledge/codex-memory-research) | Codex Local Memory | 剖析 Codex 的 Stage1/Stage2 记忆抽取与 SQLite 存储机制 |
 | [会话记忆蒸馏工程调研](/knowledge/session-distill-research) | Warm Path 会话反思 | 对比前台实时提取与后台异步蒸馏的延迟、成本与质量权衡 |
 | [Mem0 内部机制与边界剖析](/knowledge/mem0-deep-dive) | Mem0 源码机制 | 深入剖析 Mem0 的 Graph/VectorStore 架构与开源版工程短板 |

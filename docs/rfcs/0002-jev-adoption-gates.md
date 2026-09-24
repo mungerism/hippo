@@ -5,6 +5,7 @@
 - **创建日期**：2026-09-23
 - **关联议题**：[统一分类契约 #60](https://github.com/mungerism/hippo/issues/60)、[Jev 适配器 #61](https://github.com/mungerism/hippo/issues/61)、[离线评测 #62](https://github.com/mungerism/hippo/issues/62)
 
+
 ## 背景与目标
 
 现有 Cold Path 已把关系分类与确定性胜者仲裁分开。Jev 的 Choice API 可对候选事实对返回 `EQUIVALENT`、`CONFLICT`、`DISTINCT` 的概率，但这些概率尚未在 Hippo 的中文、英文和中英混合数据上校准，不能直接作为合并授权。

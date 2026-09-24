@@ -1,0 +1,42 @@
+name: 🐛 Bug Report
+description: 提交缺陷或运行异常报告
+title: "[Bug]: "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈 Bug！请详细描述遇到的问题，以便我们快速复现和定位。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述 (Description)
+      description: 请详细描述发生了什么异常行为。
+      placeholder: 请在此描述具体的错误现象...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤 (Steps to Reproduce)
+      description: 触发该问题的具体步骤。
+      placeholder: |
+        1. 启动 hippo 服务或在 IDE 中配置 MCP
+        2. 执行 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志与诊断输出 (Logs & Doctor Output)
+      description: 请运行 `hippo doctor` 并附上日志输出（请注意遮蔽敏感凭证）。
+      render: shell
+  - type: input
+    id: environment
+    attributes:
+      label: 环境信息 (Environment)
+      description: 操作系统、Python 版本、IDE 及宿主 Agent 类型。
+      placeholder: macOS 15.0 / Python 3.12 / Cursor / gemini-3.5-flash-lite
+    validations:
+      required: true

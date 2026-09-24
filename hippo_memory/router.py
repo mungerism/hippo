@@ -39,8 +39,12 @@ def detect_git_project(start_path: Optional[Path] = None) -> Tuple[Optional[str]
 class ScopeRouter:
     """Routes and manages memory scopes across global and project levels."""
 
-    def __init__(self, default_user_id: str = "munger"):
-        self.default_user_id = default_user_id
+    def __init__(self, default_user_id: Optional[str] = None):
+        if default_user_id is not None:
+            self.default_user_id = default_user_id
+        else:
+            from hippo_memory.config import get_default_user_id
+            self.default_user_id = get_default_user_id()
 
     def detect_git_project(self, start_path: Optional[Path] = None) -> Tuple[Optional[str], Optional[Path]]:
         """Detect Git repository root and project name."""

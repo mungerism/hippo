@@ -1,5 +1,10 @@
 # Hippo (海马体) 🦛
 
+[![CI](https://github.com/mungerism/hippo/actions/workflows/ci.yml/badge.svg)](https://github.com/mungerism/hippo/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Docs](https://img.shields.io/badge/docs-GitHub_Pages-brightgreen.svg)](https://mungerism.github.io/hippo/)
+
 > 面向 AI 编码智能体（antigravity, Codex, ZCode, Zed AI, Cursor, pi 等）的统一长短期记忆中枢，基于 Mem0 与 MCP (Model Context Protocol) 打造。
 
 > [!IMPORTANT]
@@ -18,16 +23,17 @@
 - **零外部服务依赖**：基于嵌入式 Qdrant 本地文件存储（`~/.hippo/storage/qdrant`），无需 Docker 或单独数据库守护进程。
 - **多模型灵活适配**：支持 Google Gemini Developer API、Google Vertex AI（ADC）或 OpenAI；Vertex AI 可使用 `gemini-embedding-2`。
 - **终端快捷 CLI**：提供 `hippo` 命令行工具，随时手工查阅、新增、删除与诊断。
-- **Docs as Code 文档中心**：采用 VitePress 打造体系化私有文档站（系统架构、ADR 决策、RFC 提案、实施计划、运维手册与调研知识库），支持 Tailscale 私网秒级查阅。
+- **Docs as Code 文档中心**：采用 VitePress 打造体系化在线文档站（系统架构、ADR 决策、RFC 提案、实施计划、运维手册与调研知识库），在线直达：[mungerism.github.io/hippo](https://mungerism.github.io/hippo/)。
 
 ---
 
 ## 📚 文档中心 (Docs as Code)
 
-Hippo 遵循统一的 Docs as Code 规范，所有架构设计、决策记录与运维手册均沉淀在 [`docs/`](docs/) 目录中，并通过 VitePress 构建为静态文档站（`base: '/hippo/'`）：
+Hippo 遵循统一的 Docs as Code 规范，所有架构设计、决策记录与运维手册均沉淀在 [`docs/`](docs/) 目录中，并通过 VitePress 构建为静态文档站：
 
+- **在线官方文档**：🌐 [https://mungerism.github.io/hippo/](https://mungerism.github.io/hippo/)
 - **系统架构**：[`docs/architecture/`](docs/architecture/)（分层数据流与多宿主契约矩阵）
-- **架构决策 (ADR)**：[`docs/adr/`](docs/adr/)（捕获 0001~0004 核心技术选型与边界）
+- **架构决策 (ADR)**：[`docs/adr/`](docs/adr/)（捕获核心技术选型与边界）
 - **技术提案 (RFC)**：[`docs/rfcs/`](docs/rfcs/)（中大型需求与方案设计）
 - **实施计划 (Plans)**：[`docs/plans/`](docs/plans/)（开发任务拆解与进度管理）
 - **运维与排障手册**：[`docs/runbooks/`](docs/runbooks/)（Qdrant 部署运维、Doctor 巡检与记忆迁移手册）
@@ -46,17 +52,8 @@ pnpm --dir docs run dev
 pnpm --dir docs run build
 ```
 
-### 私有 VPS 一键部署 (Tailscale 局域网访问)
-```bash
-# 一键构建并同步至 VPS (your-server:/opt/docs/hippo/)
-./scripts/deploy-docs-to-vps.sh
-```
-部署后通过 Tailscale 私网秒级直达（零公网暴露）：
-- **Hippo 文档站**：`http://100.x.x.x/hippo/` 或 `http://your-server.tailnet.ts.net/hippo/`
-- **统一文档大厅**：`http://100.x.x.x/`
-
-
 ---
+
 
 ## 🚀 快速开始
 
@@ -168,7 +165,9 @@ Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机*
 
 ## 🔌 多客户端集成配置 (MCP)
 
-系统已为各大客户端完成了配置，只要客户端运行，就会自动启动并挂载 `hippo-memory` MCP 服务：
+系统已为各大客户端完成了配置。推荐直接使用 `uvx` 免安装运行，或克隆本仓库后指定源码目录：
+
+> 💡 **提示**：如果使用本地克隆开发，将下列配置中的 `/path/to/hippo` 替换为您本地克隆的实际绝对路径；如已通过 `uv tool install hippo-memory` 全局安装，可直接将 `command` 设为 `hippo-mcp`。
 
 ### 1. antigravity
 配置文件：`~/.gemini/config/mcp_config.json`
@@ -176,7 +175,7 @@ Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机*
 {
   "mcpServers": {
     "hippo-memory": {
-      "command": "/opt/homebrew/bin/uv",
+      "command": "uv",
       "args": [
         "--directory",
         "/path/to/hippo",
@@ -196,7 +195,7 @@ Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机*
     "servers": {
       "hippo-memory": {
         "type": "stdio",
-        "command": "/opt/homebrew/bin/uv",
+        "command": "uv",
         "args": [
           "--directory",
           "/path/to/hippo",
@@ -215,7 +214,7 @@ Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机*
 {
   "context_servers": {
     "hippo-memory": {
-      "command": "/opt/homebrew/bin/uv",
+      "command": "uv",
       "args": [
         "--directory",
         "/path/to/hippo",
@@ -227,13 +226,13 @@ Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机*
 }
 ```
 
-### 3. Cursor
+### 4. Cursor
 配置文件：`~/.cursor/mcp.json`
 ```json
 {
   "mcpServers": {
     "hippo-memory": {
-      "command": "/opt/homebrew/bin/uv",
+      "command": "uv",
       "args": [
         "--directory",
         "/path/to/hippo",
@@ -245,16 +244,16 @@ Hippo 采用**双事件容灾 (Dual-Event Resilience) 与异步 Spool 状态机*
 }
 ```
 
-### 4. Codex
+### 5. Codex
 配置文件：`~/.codex/config.toml`
 ```toml
 [mcp_servers.hippo-memory]
-command = "/opt/homebrew/bin/uv"
+command = "uv"
 args = ["--directory", "/path/to/hippo", "run", "hippo-mcp"]
 enabled = true
 ```
 
-### 5. pi-coding-agent (pi)
+### 6. pi-coding-agent (pi)
 扩展文件：`~/.pi/agent/extensions/hippo-memory.ts`
 > 自动加载为原生工具：`search_memories`、`add_memory` 及 `/hippo` 快捷命令。
 
@@ -303,4 +302,5 @@ hippo doctor
 ---
 
 ## 📚 延伸阅读
-- [Mem0 深度技术调研报告](./mem0_research.md)
+- [Mem0 深度技术调研报告](docs/knowledge/mem0-deep-dive.md)
+

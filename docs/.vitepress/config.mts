@@ -80,6 +80,7 @@ export default withMermaid(
           items: [
             { text: 'RFC 提案索引', link: '/rfcs/' },
             { text: 'RFC 标准模板', link: '/rfcs/template' },
+            { text: '0001: Jev 离线关系分类后端', link: '/rfcs/0001-jev-cold-path-classifier' },
           ],
         },
       ],
@@ -108,6 +109,7 @@ export default withMermaid(
           text: '领域知识库',
           items: [
             { text: '知识库概览', link: '/knowledge/' },
+            { text: 'Jev 结构化决策后端调研', link: '/knowledge/jev-research' },
             { text: 'Codex 记忆机制深度调研', link: '/knowledge/codex-memory-research' },
             { text: '会话记忆蒸馏工程调研', link: '/knowledge/session-distill-research' },
             { text: 'Cold Path 记忆固化与索引设计', link: '/knowledge/cold-path-consolidation-design' },
@@ -128,6 +130,7 @@ export default withMermaid(
     socialLinks: [
       { icon: 'github', link: 'https://github.com/mungerism/hippo' },
     ],
+
 
     outline: {
       level: [2, 3],

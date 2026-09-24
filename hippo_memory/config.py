@@ -198,6 +198,21 @@ def _register_vertex_genai_embedder() -> None:
     ] = "hippo_memory.embeddings.vertex_genai.VertexAIGenAIEmbedding"
 
 
+def get_default_user_id() -> str:
+    """Return the default user ID from env, OS user, or fallback to 'default'."""
+    env_user = os.getenv("HIPPO_USER_ID")
+    if env_user and env_user.strip():
+        return env_user.strip()
+    try:
+        import getpass
+        username = getpass.getuser()
+        if username and username.strip():
+            return username.strip()
+    except Exception:
+        pass
+    return "default"
+
+
 class HippoConfig:
     """Hippo unified memory configuration."""
 
@@ -208,10 +223,11 @@ class HippoConfig:
         provider: Optional[str] = None,
         consolidation_lock_timeout: Optional[float] = None,
     ):
-        self.user_id = user_id or os.getenv("HIPPO_USER_ID", "munger")
+        self.user_id = user_id or get_default_user_id()
         self.storage_dir = Path(
             storage_dir or os.getenv("HIPPO_STORAGE_DIR", str(DEFAULT_STORAGE_DIR))
         ).expanduser()
+
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         raw_lock_timeout = os.getenv("HIPPO_LOCK_TIMEOUT", "10.0")
