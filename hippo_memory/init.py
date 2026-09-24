@@ -1,7 +1,7 @@
-"""Hippo Init - 为各客户端指令文件幂等写入记忆检索约定.
+"""Hippo Init - Idempotently inject memory retrieval conventions into client instruction files.
 
-将 Hippo 记忆使用约定合并进 Codex 全局 AGENTS.md 与当前项目 AGENTS.md，
-使各客户端的智能体在会话层面获得"先检索、后沉淀"的稳定指引。
+Merges Hippo memory guidelines into client configuration and instruction files (e.g. AGENTS.md),
+giving coding agents stable 'retrieve first, persist later' guidance across sessions.
 """
 
 import json
@@ -305,12 +305,12 @@ def run_init(
     # 2. Host hooks auto-wiring driven by Host Contract Matrix
     if configure_hooks:
         for contract in get_host_contracts():
-            # (a) 无条件安全清理反向捕获的废弃历史路径残留 (Zombie Traps)
+            # (a) Unconditionally clean legacy path remnants (Zombie Traps)
             cleaned = contract.clean_zombies()
             for cz in cleaned:
-                logger.info(f"[{contract.display_name}] 已安全清理废弃历史残留配置: {cz}")
+                logger.info(f"[{contract.display_name}] Safely cleaned legacy configuration remnant: {cz}")
 
-            # (b) 若宿主环境就绪，执行权威标准路径挂载
+            # (b) If host environment is present, perform canonical standard path mounting
             if contract.is_host_environment_present():
                 target = contract.canonical_config_path
                 installer = HOOK_INSTALLERS.get(contract.host)

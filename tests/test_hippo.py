@@ -50,7 +50,7 @@ class TestHippo(unittest.TestCase):
         }
         self.assertEqual(set(tool_dict.keys()), expected_tools)
 
-        # 契约核验：add_memory 绝不暴露 messages，text 限制 2000 字符
+        # Contract check: add_memory never exposes messages, text capped at 2000 chars
         add_tool = tool_dict["add_memory"]
         properties = add_tool.input_schema.get("properties", {})
         self.assertNotIn("messages", properties)
@@ -98,33 +98,33 @@ class TestHippo(unittest.TestCase):
             {"role": "assistant", "content": "建议 uv。"},
         ]
 
-        # 仅 messages：原样使用
+        # messages only: use as-is
         self.assertEqual(build_conversation(None, None, msgs), msgs)
 
-        # 仅 text：单条 user 消息
+        # text only: single user message
         self.assertEqual(
             build_conversation("偏好 uv", None, None),
             [{"role": "user", "content": "偏好 uv"}],
         )
 
-        # text + messages：messages 为上下文，text 追加为 assistant 补充事实（不丢弃）
+        # text + messages: messages as context, text appended as assistant supplementary fact (not dropped)
         combined = build_conversation("决策：项目偏好 uv", None, msgs)
         self.assertEqual(combined[:2], msgs)
         self.assertEqual(
             combined[2], {"role": "assistant", "content": "决策：项目偏好 uv"}
         )
 
-        # content 别名与 text 等价
+        # content alias is equivalent to text
         self.assertEqual(
             build_conversation(None, "偏好 uv", None)[0]["content"], "偏好 uv"
         )
 
-        # 全空：显式报错而非静默存空记忆
+        # All empty: explicit error rather than silently saving empty memory
         with self.assertRaises(ValueError):
             build_conversation(None, None, None)
         with self.assertRaises(ValueError):
-            build_conversation("  ", None, [{"role": "user", "content": "x"}][:0])  # 空列表
-        self.assertEqual(build_conversation("  ", None, msgs), msgs)  # 空白 text 不追加
+            build_conversation("  ", None, [{"role": "user", "content": "x"}][:0])  # Empty list
+        self.assertEqual(build_conversation("  ", None, msgs), msgs)  # Blank text is not appended
 
     def test_service_plist_and_preflight(self):
         import tempfile
@@ -141,7 +141,7 @@ class TestHippo(unittest.TestCase):
         self.assertIn("--config-path", data["ProgramArguments"])
         self.assertTrue(data["ProgramArguments"][0].endswith("/bin/qdrant"))
 
-        # 缺少 qdrant 二进制/配置时应拒绝安装且不触碰 launchctl
+        # Missing qdrant binary/config should reject install and not touch launchctl
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             mock_plist = Path(tmp) / f"{SERVICE_LABEL}.plist"
@@ -149,7 +149,7 @@ class TestHippo(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     install_service(home=Path(tmp), load=False)
 
-                # 文件齐备（load=False 不经过 launchctl）→ 写出 plist 到 mock 路径
+                # Files present (load=False bypasses launchctl) -> write plist to mock path
                 (Path(tmp) / "bin").mkdir()
                 (Path(tmp) / "bin" / "qdrant").write_text("#!/bin/sh\n")
                 (Path(tmp) / "config").mkdir()
@@ -163,7 +163,7 @@ class TestHippo(unittest.TestCase):
         from unittest.mock import patch
         from hippo_memory import doctor
 
-        # 注入假的客户端路径（指向不存在的临时目录）与端口状态，保证离线可测
+        # Inject fake client paths (pointing to non-existent temp dir) and port status for offline testing
         with tempfile.TemporaryDirectory() as tmp:
             fake_cfg = Path(tmp) / "cfg.json"
             fake_cfg.write_text('{"command": "uv run hippo-mcp"}', encoding="utf-8")
@@ -173,18 +173,18 @@ class TestHippo(unittest.TestCase):
                  patch("hippo_memory.service.is_loaded", return_value=False):
                 checks = doctor.collect_checks()
 
-        self.assertTrue(checks)  # 必有检查项
+        self.assertTrue(checks)  # Required checks present
         names = {(c["category"], c["name"]) for c in checks}
         self.assertIn(("Qdrant", "服务监听 127.0.0.1:6333"), names)
         self.assertIn(("依赖", "mem0ai"), names)
 
-        # 客户端检查项使用注入路径：存在且含标记 → ok
+        # Client checks with injected paths: exists and contains needle -> ok
         client_checks = [c for c in checks if c["category"] == "客户端" and c["name"] == "FakeClient"]
         self.assertEqual(len(client_checks), 1)
         self.assertTrue(client_checks[0]["ok"])
         self.assertIn(str(fake_cfg), client_checks[0]["detail"])
 
-        # Qdrant 未监听 → 该项失败
+        # Qdrant not listening -> check fails
         qdrant_check = next(c for c in checks if c["name"] == "服务监听 127.0.0.1:6333")
         self.assertFalse(qdrant_check["ok"])
 
@@ -202,14 +202,14 @@ class TestHippo(unittest.TestCase):
             self.assertEqual(upsert_hippo_section(path), "unchanged")
             self.assertEqual(path.read_text(encoding="utf-8"), first)
 
-            # 用户改写段落内容后，再次 upsert 应回滚为标准段落（updated）
+            # If user modifies section content, subsequent upsert restores standard section (updated)
             path.write_text(
                 first.replace("search_memories", "STALE_MARKER"), encoding="utf-8"
             )
             self.assertEqual(upsert_hippo_section(path), "updated")
             self.assertIn("search_memories", path.read_text(encoding="utf-8"))
 
-            # 既有无标记文件应追加而非破坏原内容
+            # Existing file without marker should append rather than overwrite original content
             other = Path(tmp) / "notes.md"
             other.write_text("原始内容\n", encoding="utf-8")
             self.assertEqual(upsert_hippo_section(other), "appended")
@@ -259,7 +259,7 @@ class TestHippo(unittest.TestCase):
             self.assertEqual(upsert_pi_extension(pi_file), "unchanged")
 
     def test_hooks_init_malformed_json_guard(self):
-        """验证宿主现有配置文件损坏时安全中止，拒绝破坏性清空。"""
+        """Verify safe abort without destructive overwrite when host config file is corrupted."""
         import tempfile
         from hippo_memory.init import (
             upsert_codex_hooks,
@@ -290,7 +290,7 @@ class TestHippo(unittest.TestCase):
             self.assertEqual(a_file.read_text(encoding="utf-8"), bad_content)
 
     def test_migrate_zcode_invokes_migration(self):
-        """验证 hippo migrate-zcode 命令确实执行了 migrate_zcode_all()。"""
+        """Verify that hippo migrate-zcode command executes migrate_zcode_all()."""
         from unittest.mock import patch
         from typer.testing import CliRunner
         from hippo_memory.cli import app
@@ -303,7 +303,7 @@ class TestHippo(unittest.TestCase):
             mock_migrate.assert_called_once()
 
     def test_init_cli_no_hooks(self):
-        """验证 hippo init --no-hooks 参数能正确跳过 hook 配置。"""
+        """Verify that hippo init --no-hooks correctly skips hook configuration."""
         from unittest.mock import patch
         from typer.testing import CliRunner
         from hippo_memory.cli import app
@@ -320,7 +320,7 @@ class TestHippo(unittest.TestCase):
             )
 
     def test_init_hooks_refresh_on_command_change(self):
-        """验证当 Hippo 可执行文件路径变更时，init 会自动刷新 hooks 中的 command 命令。"""
+        """Verify that init automatically refreshes hook commands when hippo binary path changes."""
         import tempfile
         import json
         from unittest.mock import patch
@@ -333,12 +333,12 @@ class TestHippo(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
-            # 1. 模拟旧路径
+            # 1. Mock old path
             with patch("hippo_memory.init.resolve_hippo_command", return_value="'/old/bin/hippo' hook capture --host codex"):
                 c_file = tmp_path / "codex_hooks.json"
                 self.assertEqual(upsert_codex_hooks(c_file), "created")
 
-            # 2. 模拟新路径运行 init，必须更新为新路径并返回 updated
+            # 2. Run init with new path; must update to new path and return updated
             with patch("hippo_memory.init.resolve_hippo_command", return_value="'/new/bin/hippo' hook capture --host codex"):
                 self.assertEqual(upsert_codex_hooks(c_file), "updated")
                 c_data = json.loads(c_file.read_text(encoding="utf-8"))
@@ -346,7 +346,7 @@ class TestHippo(unittest.TestCase):
                     cmd = c_data["hooks"][event][0]["hooks"][0]["command"]
                     self.assertEqual(cmd, "'/new/bin/hippo' hook capture --host codex")
 
-            # 3. ZCode 刷新测试
+            # 3. ZCode refresh test
             with patch("hippo_memory.init.resolve_hippo_command", return_value="'/old/bin/hippo' hook capture --host zcode"):
                 z_file = tmp_path / "zcode_config.json"
                 self.assertEqual(upsert_zcode_hooks(z_file), "created")
@@ -357,7 +357,7 @@ class TestHippo(unittest.TestCase):
                 cmd = z_data["hooks"]["events"]["Stop"][0]["hooks"][0]["command"]
                 self.assertEqual(cmd, "'/new/bin/hippo' hook capture --host zcode")
 
-            # 4. Antigravity 刷新测试
+            # 4. Antigravity refresh test
             with patch("hippo_memory.init.resolve_hippo_command", return_value="'/old/bin/hippo' hook capture --host antigravity"):
                 a_file = tmp_path / "agy_hooks.json"
                 self.assertEqual(upsert_antigravity_hooks(a_file), "created")
@@ -369,7 +369,7 @@ class TestHippo(unittest.TestCase):
                 self.assertEqual(cmd, "'/new/bin/hippo' hook capture --host antigravity")
 
     def test_init_zcode_persists_reenabled_hook(self):
-        """验证当 ZCode 现有配置包含 hook 但 hooks.enabled 为 false 时，init 会将其设为 true 并持久化保存。"""
+        """Verify that init sets hooks.enabled to true when existing ZCode config has hook disabled."""
         import tempfile
         import json
         from unittest.mock import patch
@@ -377,7 +377,7 @@ class TestHippo(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             z_file = Path(tmp) / "zcode_config.json"
-            # 预置包含 hook 但被禁用的配置
+            # Preset config containing hook with enabled: false
             initial_cfg = {
                 "hooks": {
                     "enabled": False,
@@ -399,7 +399,7 @@ class TestHippo(unittest.TestCase):
             }
             z_file.write_text(json.dumps(initial_cfg, indent=2), encoding="utf-8")
 
-            # 模拟执行 init（此时 command 相同，但 enabled 应被重新持久化为 true）
+            # Run init (same command, but enabled should be persisted as true)
             with patch("hippo_memory.init.resolve_hippo_command", return_value="'hippo' hook capture --host zcode"):
                 result = upsert_zcode_hooks(z_file)
                 self.assertEqual(result, "updated")

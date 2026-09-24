@@ -1182,7 +1182,7 @@ class TestWriterLockProtocol(unittest.TestCase):
         import hippo_memory.apply as apply_module
 
         canonical = self.lock_dir.expanduser().resolve()
-        # 使用包含未规范化段的别名路径，确保在所有系统（包括 Linux）下 alias != canonical
+        # Use alias path with unnormalized segments to ensure alias != canonical across all systems (including Linux)
         alias = self.lock_dir / ".." / self.lock_dir.name
 
         with consolidation_lock(

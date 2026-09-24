@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Pure transient short phrases for Delta Skip filtering (normalized, case-insensitive)
 TRANSIENT_PHRASES: set[str] = {
-    # 确认答复类
+    # Acknowledgement phrases
     "好的",
     "收到",
     "明白了",
@@ -41,7 +41,7 @@ TRANSIENT_PHRASES: set[str] = {
     "got it",
     "done",
     "working on it",
-    # 临时探测类
+    # Ephemeral probing phrases
     "运行测试",
     "跑测试",
     "跑下测试",
@@ -584,8 +584,8 @@ class SpoolStorage:
 
             newest = jobs[-1]
 
-            # 严格安全包含不变量 (Safe Coalescing Invariant):
-            # 仅当最新作业对前置作业构成严格超集（内容包含且无滑动窗口截断）时方可折叠
+            # Safe Coalescing Invariant:
+            # Only coalesce when the newest job is a strict superset of the older job (content contained without sliding window truncation)
             for older in jobs[:-1]:
                 can_coalesce = False
                 if newest.turns and older.turns:
@@ -787,7 +787,7 @@ class SpoolWorker:
                 if limit is not None and processed >= limit:
                     break
 
-                # 检查是否存在因 429/503 退避等待下一次重试的作业
+                # Check if there are jobs backed off due to 429/503 waiting for next retry
                 now = time.time()
                 pending_after = self.storage.list_jobs(state=JobState.PENDING)
                 future_jobs = [j for j in pending_after if j.not_before > now]
@@ -795,7 +795,7 @@ class SpoolWorker:
                 if not future_jobs or not wait_for_retries:
                     break
 
-                # 限制就地等待时间（最多等待 35 秒，完整覆盖常规 10s、20s 指数退避）
+                # Limit inline wait time (at most 35s, fully covering typical 10s, 20s exponential backoff)
                 min_wait = min(j.not_before - now for j in future_jobs)
                 if min_wait <= 35.0:
                     logger.info(f"Worker waiting {min_wait:.1f}s for scheduled retry job...")

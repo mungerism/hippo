@@ -13,7 +13,7 @@ from hippo_memory.hooks.models import CapturedPayload, sanitize_text
 
 logger = logging.getLogger(__name__)
 
-# 对标 Mem0 官方 capture_session_summary.py 文件识别规范
+# Aligned with official Mem0 capture_session_summary.py file recognition pattern
 FILE_EXT_RE = re.compile(
     r"[a-zA-Z0-9_./-]+\.(?:py|ts|tsx|js|jsx|rs|go|rb|java|sh|yaml|yml|json|toml|md|sql|css|html)"
 )

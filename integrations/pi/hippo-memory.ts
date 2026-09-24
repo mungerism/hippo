@@ -23,7 +23,7 @@ function resolveHippoBin(): string {
 }
 
 /**
- * 提取会话中的对话轮次（对齐 Mem0 官方 pi-agent-plugin 抽取规范）
+ * Extract conversation turns from session (aligned with Mem0 official pi-agent-plugin extraction spec)
  */
 function extractConversation(messages: any[]): Array<{ role: "user" | "assistant"; content: string }> {
   const result: Array<{ role: "user" | "assistant"; content: string }> = [];
@@ -50,7 +50,7 @@ function extractConversation(messages: any[]): Array<{ role: "user" | "assistant
 export default function (pi: ExtensionAPI) {
   const hippoBin = resolveHippoBin();
 
-  // 1. 语义与混合记忆检索工具 (Mem0 标准: search_memories)
+  // 1. Semantic and hybrid memory search tool (Mem0 standard: search_memories)
   pi.registerTool({
     name: "search_memories",
     label: "Mem0 Search Memories",
@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // 2. 沉淀新记忆工具 (Mem0 标准: add_memory)
+  // 2. Persist new memory tool (Mem0 standard: add_memory)
   pi.registerTool({
     name: "add_memory",
     label: "Mem0 Add Memory",
@@ -160,7 +160,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // 3. 注册 /hippo 便捷斜杠命令
+  // 3. Register /hippo convenience slash command
   pi.registerCommand("hippo", {
     description: "快速查看 Hippo 记忆库状态或执行检索",
     handler: async (args, ctx) => {
@@ -175,7 +175,7 @@ export default function (pi: ExtensionAPI) {
   });
 
 /**
- * 从会话上下文或工具调用中提取修改过的文件路径
+ * Extract touched file paths from conversation context or tool calls
  */
 function extractTouchedFiles(messages: any[]): string[] {
   const files = new Set<string>();
@@ -184,7 +184,7 @@ function extractTouchedFiles(messages: any[]): string[] {
 
   for (const msg of messages) {
     if (!msg) continue;
-    // 检查工具调用参数
+    // Check tool call arguments
     if (Array.isArray(msg.tool_calls)) {
       for (const tc of msg.tool_calls) {
         const args = tc?.function?.arguments || tc?.arguments;
@@ -193,7 +193,7 @@ function extractTouchedFiles(messages: any[]): string[] {
         if (matches) matches.forEach((f) => files.add(f));
       }
     }
-    // 检查工具返回或内容块
+    // Check tool result or content blocks
     if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
         if (block?.type === "tool_result" || block?.type === "tool_use") {
@@ -207,7 +207,7 @@ function extractTouchedFiles(messages: any[]): string[] {
   return Array.from(files).sort();
 }
 
-  // 4. 双事件生命周期自动蒸馏 (agent_settled 主检查点 + session_shutdown 退出兜底)
+  // 4. Dual-event lifecycle distillation (agent_settled primary checkpoint + session_shutdown fallback)
   const dispatchHook = (eventName: string, ctx: any) => {
     try {
       const sessionManager = ctx?.sessionManager;
@@ -224,7 +224,7 @@ function extractTouchedFiles(messages: any[]): string[] {
         } catch {}
       }
 
-      // 提取内存直传消息，免扫磁盘
+      // Extract in-memory direct messages without disk scanning
       let rawMsgs: any[] = [];
       if (Array.isArray(ctx?.messages)) {
         rawMsgs = ctx.messages;
@@ -253,21 +253,21 @@ function extractTouchedFiles(messages: any[]): string[] {
         stdio: ["pipe", "ignore", "ignore"],
       });
 
-      // 关键防崩：为子进程及其 stdin 绑定异步 error 监听器，防止因可执行文件缺失（ENOENT）导致宿主崩溃
+      // Crash prevention: attach async error listeners to child process and stdin to prevent host crashes (e.g. ENOENT)
       child.on("error", () => {
-        // 静默容灾，绝不打扰用户
+        // Silent fail-safe, never disrupt user
       });
 
       if (child.stdin) {
         child.stdin.on("error", () => {
-          // 捕获 EPIPE 异步管道异常
+          // Catch async EPIPE pipe errors
         });
         child.stdin.write(payload);
         child.stdin.end();
       }
       child.unref();
     } catch {
-      // 同步异常静默容灾
+      // Silent fail-safe for synchronous exceptions
     }
   };
 

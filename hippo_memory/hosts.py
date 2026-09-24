@@ -24,11 +24,11 @@ class HostContract:
 
     host: HostType
     display_name: str
-    canonical_config_path: Path                      # 官方标准配置路径
-    events: Tuple[HookEvent, ...]                    # 支持的事件 (Stop / SessionEnd 等)
-    sibling_fingerprints: Tuple[str, ...]            # 宿主同级指纹文件 (相对 canonical_config_path.parent)
-    legacy_trap_paths: Tuple[Path, ...]              # 易混淆的历史/陷阱路径 (用于反向探测)
-    spec_reference: str                              # 官方规范文档链接或出处说明
+    canonical_config_path: Path                      # Canonical host configuration path
+    events: Tuple[HookEvent, ...]                    # Supported events (Stop / SessionEnd, etc.)
+    sibling_fingerprints: Tuple[str, ...]            # Sibling fingerprint files (relative to canonical_config_path.parent)
+    legacy_trap_paths: Tuple[Path, ...]              # Known legacy/trap paths (for reverse probing)
+    spec_reference: str                              # Official specification link or reference note
     hook_needles: Tuple[str, ...] = field(default_factory=tuple)
     environment_roots: Tuple[Path, ...] = field(default_factory=tuple)
 
@@ -78,7 +78,7 @@ class HostContract:
             if target.exists():
                 return True
 
-        # 宿主专用环境根目录核验 (例如 Pi 的 ~/.pi/agent 根目录)
+        # Host-specific environment root check (e.g. Pi's ~/.pi/agent root directory)
         for root in self.environment_roots:
             if root != parent and root.exists():
                 try:
@@ -114,13 +114,13 @@ class HostContract:
         zombies = self.detect_zombies()
         for trap in zombies:
             try:
-                # 1. 独立扩展或脚本文件 (.ts)
+                # 1. Standalone extension or script file (.ts)
                 if trap.suffix in (".ts", ".js") or trap.name == "hippo-memory.ts":
                     trap.unlink(missing_ok=True)
                     cleaned.append(trap)
                     continue
 
-                # 2. JSON 配置文件
+                # 2. JSON configuration file
                 try:
                     raw = trap.read_text(encoding="utf-8", errors="ignore").strip()
                     data = json.loads(raw) if raw else {}
@@ -130,7 +130,7 @@ class HostContract:
                 if not isinstance(data, dict):
                     continue
 
-                # Case A: Antigravity 历史陷阱
+                # Case A: Antigravity legacy trap
                 if self.host == HostType.ANTIGRAVITY:
                     if set(data.keys()) == {"hippo-memory-distill"}:
                         trap.unlink(missing_ok=True)
@@ -143,12 +143,12 @@ class HostContract:
                         )
                         cleaned.append(trap)
 
-                # Case B: Codex / ZCode / 通用 hooks 陷阱
+                # Case B: Codex / ZCode / generic hooks trap
                 elif "hooks" in data:
                     hooks_val = data["hooks"]
                     if isinstance(hooks_val, dict):
                         changed = False
-                        # 兼容 ZCode 嵌套结构 hooks.events.<Event> 与 Codex 扁平结构 hooks.<Event>
+                        # Compatible with ZCode nested structure hooks.events.<Event> and Codex flat structure hooks.<Event>
                         events_dict = (
                             hooks_val["events"]
                             if isinstance(hooks_val.get("events"), dict)
@@ -176,18 +176,18 @@ class HostContract:
                                             new_entries.append(entry)
                                     else:
                                         new_entries.append(entry)
-                                events_dict[evt] = new_entries
+                                    events_dict[evt] = new_entries
 
                         if changed:
                             cleaned.append(trap)
-                            # 1. 检查 events 内部是否还有其他宿主事件
+                            # 1. Check if there are other host events remaining inside events
                             has_remaining_events = any(bool(v) for v in events_dict.values() if isinstance(v, list))
-                            # 2. 检查 hooks 节点内是否有非事件元数据 (例如 enabled: true, logging 等)
+                            # 2. Check if hooks node has non-event metadata (e.g., enabled: true, logging, etc.)
                             hooks_non_event_keys = {
                                 k for k, v in hooks_val.items()
                                 if k != "events" and v not in (None, {}, [])
                             }
-                            # 3. 检查顶层其他配置键
+                            # 3. Check for other top-level configuration keys
                             top_level_non_hook_keys = set(data.keys()) - {"hooks"}
 
                             is_file_empty = (
@@ -206,7 +206,7 @@ class HostContract:
                                     encoding="utf-8",
                                 )
             except Exception as e:
-                logger.warning(f"清理僵尸文件 {trap} 失败: {e}")
+                logger.warning(f"Failed to clean zombie file {trap}: {e}")
         return cleaned
 
 
@@ -221,7 +221,7 @@ def get_host_contracts(home: Optional[Path] = None) -> List[HostContract]:
             events=(HookEvent.STOP, HookEvent.SESSION_END),
             sibling_fingerprints=("config.toml", "version.json"),
             legacy_trap_paths=(h / ".codex" / "config.json",),
-            spec_reference="Codex CLI 官方 Hooks 规范 (~/.codex/hooks.json) - 支持 Stop 与 SessionEnd 生命周期事件",
+            spec_reference="Codex CLI official Hooks spec (~/.codex/hooks.json) - supports Stop and SessionEnd lifecycle events",
             hook_needles=("hook capture --host codex",),
         ),
         HostContract(
@@ -231,7 +231,7 @@ def get_host_contracts(home: Optional[Path] = None) -> List[HostContract]:
             events=(HookEvent.STOP,),
             sibling_fingerprints=("agents", "artifacts", "db", "log"),
             legacy_trap_paths=(h / ".zcode" / "hooks.json", h / ".zcode" / "config.json"),
-            spec_reference="ZCode CLI 官方配置规范 (~/.zcode/cli/config.json) - hooks 节点支持 Stop 事件",
+            spec_reference="ZCode CLI official config spec (~/.zcode/cli/config.json) - hooks node supports Stop event",
             hook_needles=("hook capture --host zcode",),
         ),
         HostContract(
@@ -241,7 +241,7 @@ def get_host_contracts(home: Optional[Path] = None) -> List[HostContract]:
             events=(HookEvent.STOP,),
             sibling_fingerprints=("config.json", "mcp_config.json"),
             legacy_trap_paths=(h / ".gemini" / "antigravity-cli" / "hooks.json",),
-            spec_reference="Antigravity Hooks 官方规范 (agy-customizations/docs/hooks.md) - 全局配置根路径为 ~/.gemini/config/hooks.json",
+            spec_reference="Antigravity Hooks official spec (agy-customizations/docs/hooks.md) - global config at ~/.gemini/config/hooks.json",
             hook_needles=("hook capture --host antigravity",),
         ),
         HostContract(
@@ -256,7 +256,7 @@ def get_host_contracts(home: Optional[Path] = None) -> List[HostContract]:
                 h / ".pi" / "agent" / "hippo-memory.ts",
                 h / ".pi" / "hooks.json",
             ),
-            spec_reference="Pi Agent 官方 Extension 规范 (~/.pi/agent/extensions/hippo-memory.ts) - 扩展监听 agent_settled 与 session_shutdown 事件",
+            spec_reference="Pi Agent official Extension spec (~/.pi/agent/extensions/hippo-memory.ts) - extension listens for agent_settled and session_shutdown events",
             hook_needles=("agent_settled", "session_shutdown"),
         ),
     ]

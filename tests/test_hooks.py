@@ -69,7 +69,7 @@ class TestHookSpool(unittest.TestCase):
 
     def test_coalesce_pending_jobs(self):
         # Create two jobs for same session
-        # 1. 正常递增超集折叠
+        # 1. Normal monotonically increasing superset coalescing
         j1 = CapturedPayload(
             job_id="job-sess-1-old",
             host="codex",
@@ -100,7 +100,7 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(st1.get("superseded_by"), j2.job_id)
         self.assertEqual(st2.get("state"), JobState.PENDING.value)
 
-        # 2. 异常截断防护：若新作业 turns 变少，不满足超集不变量，拒绝折叠
+        # 2. Abnormal truncation guard: if newer job has fewer turns, superset invariant is violated, reject coalescing
         j3_rich = CapturedPayload(
             job_id="job-sess-2-rich",
             host="codex",
@@ -116,17 +116,17 @@ class TestHookSpool(unittest.TestCase):
             event="Stop",
             session_id="sess-trunc",
             project_dir="/tmp",
-            turns=[{"role": "user", "content": "a"}],  # 截断了
+            turns=[{"role": "user", "content": "a"}],  # Truncated
             created_at=400.0,
         )
         self.storage.enqueue(j3_rich)
         self.storage.enqueue(j4_truncated)
 
         coalesced2 = self.storage.coalesce_pending_jobs()
-        self.assertEqual(coalesced2, 0)  # 拒绝折叠，保留两者
+        self.assertEqual(coalesced2, 0)  # Reject coalescing, retain both
         self.assertEqual(self.storage.load_state(j3_rich.job_id).get("state"), JobState.PENDING.value)
 
-        # 3. 滑动窗口防护：turns 条数相同但内容移动（如第 10~29 轮与第 15~34 轮），内容不构成超集，必须拒绝折叠
+        # 3. Sliding window guard: same turns count but contents shifted (e.g. turns 10-29 vs 15-34), contents do not form a superset, must reject coalescing
         j5_window1 = CapturedPayload(
             job_id="job-win-1",
             host="pi",
@@ -142,14 +142,14 @@ class TestHookSpool(unittest.TestCase):
             event="Stop",
             session_id="sess-slide",
             project_dir="/tmp",
-            turns=[{"role": "assistant", "content": "t2"}, {"role": "user", "content": "t3"}],  # 相同长度2，但滑动了
+            turns=[{"role": "assistant", "content": "t2"}, {"role": "user", "content": "t3"}],  # Same length 2, but contents shifted
             created_at=600.0,
         )
         self.storage.enqueue(j5_window1)
         self.storage.enqueue(j6_window2)
 
         coalesced3 = self.storage.coalesce_pending_jobs()
-        self.assertEqual(coalesced3, 0)  # 内容不同，拒绝折叠
+        self.assertEqual(coalesced3, 0)  # Contents differ, reject coalescing
         self.assertEqual(self.storage.load_state(j5_window1.job_id).get("state"), JobState.PENDING.value)
         self.assertEqual(self.storage.load_state(j6_window2.job_id).get("state"), JobState.PENDING.value)
 
@@ -233,7 +233,7 @@ class TestHookSpool(unittest.TestCase):
         mock_engine.add.assert_not_called()
 
     def test_delta_skip_transient_end_to_end_normalized(self):
-        """端到端验证包含 Markdown 包裹与 Emoji 的瞬态交互在 drain 时被正确跳过。"""
+        """Verify end-to-end that transient interactions wrapped in Markdown or containing emojis are properly skipped during drain."""
         mock_engine = MagicMock()
         worker = SpoolWorker(storage=self.storage, engine=mock_engine)
 
@@ -260,40 +260,40 @@ class TestHookSpool(unittest.TestCase):
         mock_engine.add.assert_not_called()
 
     def test_clean_transient_text(self):
-        """验证 clean_transient_text 归一化清洗：剥离全角标点、连续省略号、Emoji、Markdown 包裹，并保留实质内容。"""
-        # 1. 全角波浪号与问号
+        """Verify clean_transient_text normalization: strips full-width punctuation, consecutive ellipses, emojis, Markdown formatting, while preserving substantive content."""
+        # 1. Full-width tildes and question marks
         self.assertEqual(clean_transient_text("好的～"), "好的")
         self.assertEqual(clean_transient_text("继续？"), "继续")
 
-        # 2. 连续英文点与中文省略号、感叹号
+        # 2. Consecutive dots, Chinese ellipses, and exclamation marks
         self.assertEqual(clean_transient_text("正在处理..."), "正在处理")
         self.assertEqual(clean_transient_text("好的……"), "好的")
         self.assertEqual(clean_transient_text("好的！！"), "好的")
 
-        # 3. 常见 Emoji 表情与颜文字
+        # 3. Common emojis and emoticons
         self.assertEqual(clean_transient_text("好的 👍"), "好的")
         self.assertEqual(clean_transient_text("收到 😊"), "收到")
         self.assertEqual(clean_transient_text("ok :)"), "ok")
 
-        # 4. Markdown 格式包裹与引号
+        # 4. Markdown wrappers and quotation marks
         self.assertEqual(clean_transient_text("**好的**"), "好的")
         self.assertEqual(clean_transient_text("`done`"), "done")
         self.assertEqual(clean_transient_text("「收到」"), "收到")
         self.assertEqual(clean_transient_text("“正在处理...”"), "正在处理")
         self.assertEqual(clean_transient_text("**`好的 👍`**"), "好的")
 
-        # 5. 实质性决策保护（内部标点与语句完整保留）
+        # 5. Substantive decision protection (internal punctuation and phrasing preserved)
         self.assertEqual(clean_transient_text("好的，我们决定采用 Redis 存储"), "好的，我们决定采用 Redis 存储")
         self.assertEqual(clean_transient_text("以后所有新脚本都要使用 Python 3.12 并配置 uv"), "以后所有新脚本都要使用 Python 3.12 并配置 uv")
         self.assertEqual(clean_transient_text(""), "")
         self.assertEqual(clean_transient_text("   "), "")
 
     def test_delta_skip_normalized_variations(self):
-        """验证 is_delta_transient 对全角符号、省略号、Emoji、Markdown 包裹等的归一化跳过及底线保护。"""
+        """Verify is_delta_transient normalization skips for full-width symbols, ellipses, emojis, Markdown wrappers, and safety baselines."""
         mock_engine = MagicMock()
         worker = SpoolWorker(storage=self.storage, engine=mock_engine)
 
-        # 1. 瞬态交互应被成功识别并跳过 (is_delta_transient == True)
+        # 1. Transient interactions should be recognized and skipped (is_delta_transient == True)
         transient_pairs = [
             ("运行测试", "好的～"),
             ("继续？", "好的……"),
@@ -325,10 +325,10 @@ class TestHookSpool(unittest.TestCase):
             )
             self.assertTrue(
                 worker.is_delta_transient(payload),
-                f"未能识别瞬态交互: user={user_msg!r}, assistant={assistant_msg!r}",
+                f"Failed to identify transient interaction: user={user_msg!r}, assistant={assistant_msg!r}",
             )
 
-        # 2. 安全底线 1: 用户实质性决策绝对不能跳过 (即使 assistant 回复简短且带 Emoji)
+        # 2. Safety baseline 1: substantive user decisions must never be skipped (even if assistant reply is brief with emojis)
         substantive_payload = CapturedPayload(
             job_id="substantive-1",
             host="codex",
@@ -345,7 +345,7 @@ class TestHookSpool(unittest.TestCase):
         )
         self.assertFalse(worker.is_delta_transient(substantive_payload))
 
-        # 3. 安全底线 2: 助手实质性回复绝对不能跳过 (即使用户输入简短)
+        # 3. Safety baseline 2: substantive assistant replies must never be skipped (even if user input is brief)
         assistant_substantive_payload = CapturedPayload(
             job_id="substantive-2",
             host="codex",
@@ -362,7 +362,7 @@ class TestHookSpool(unittest.TestCase):
         )
         self.assertFalse(worker.is_delta_transient(assistant_substantive_payload))
 
-        # 4. 安全底线 3: 有代码变动 (touched_files 非空) 100% 绝不跳过
+        # 4. Safety baseline 3: file modifications (non-empty touched_files) must 100% never be skipped
         code_touch_payload = CapturedPayload(
             job_id="code-touch-1",
             host="codex",
@@ -379,7 +379,7 @@ class TestHookSpool(unittest.TestCase):
         )
         self.assertFalse(worker.is_delta_transient(code_touch_payload))
 
-        # 5. 安全底线 4: 用户仅使用语义 Emoji 表达评价或决策 (如 "👎" / "❌")，绝不能被当作瞬态跳过
+        # 5. Safety baseline 4: semantic emojis indicating evaluations or decisions (e.g. "👎" / "❌") must never be skipped as transient
         emoji_decision_payload = CapturedPayload(
             job_id="substantive-emoji",
             host="codex",
@@ -396,7 +396,7 @@ class TestHookSpool(unittest.TestCase):
         )
         self.assertFalse(
             worker.is_delta_transient(emoji_decision_payload),
-            "用户仅输入 Emoji 表达评价/拒绝时，绝不能被 Delta Skip 静默跳过",
+            "When user inputs only emojis to express evaluation/rejection, it must not be silently skipped by Delta Skip",
         )
 
     def test_lease_recovery_and_dead_letter(self):
@@ -437,7 +437,7 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(st_dead.get("state"), JobState.DEAD.value)
 
     def test_project_id_derived_from_git_dir(self):
-        """验证蒸馏时从 project_dir 正确解析 Git 项目名，绝不使用完整路径作为 project_id。"""
+        """Verify Git project name is correctly derived from project_dir during extraction, never using full path as project_id."""
         mock_engine = MagicMock()
         mock_engine.router.resolve_project.side_effect = lambda project_id=None, cwd=None: "hippo"
         mock_engine.add.return_value = {"results": [{"id": "mem_1"}]}
@@ -460,10 +460,10 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(call_kwargs["project_id"], "hippo")
 
     def test_drain_auto_wakes_for_retries(self):
-        """验证 worker.drain 遇到瞬态退避重试时能够自动原地唤醒并再次重试。"""
+        """Verify worker.drain automatically wakes up in-place to retry when encountering transient backoff retries."""
         mock_engine = MagicMock()
         mock_engine.router.resolve_project.return_value = "test_repo"
-        # 第一次调用模拟 429 报错，第二次调用成功
+        # First call simulates 429 error, second call succeeds
         mock_engine.add.side_effect = [
             Exception("429 RESOURCE_EXHAUSTED: Rate limit exceeded"),
             {"results": [{"id": "mem_retry_success"}]},
@@ -481,7 +481,7 @@ class TestHookSpool(unittest.TestCase):
         )
         self.storage.enqueue(j)
 
-        # 缩短测试退避时间为 0.05 秒
+        # Shorten test backoff duration to 0.05s
         orig_fail = self.storage.fail_job
         def fast_fail(job_id, error_msg, retryable=True):
             orig_fail(job_id, error_msg, retryable=retryable)
@@ -495,7 +495,7 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(mock_engine.add.call_count, 2)
 
     def test_hook_retry_triggers_worker_drain(self):
-        """验证 hippo hook retry 命令重置作业后自动触发 worker 消费。"""
+        """Verify hippo hook retry command automatically triggers worker consumption after resetting job."""
         from typer.testing import CliRunner
         from hippo_memory.cli import app
 
@@ -521,7 +521,7 @@ class TestHookSpool(unittest.TestCase):
                     st = self.storage.load_state(j.job_id)
                     self.assertEqual(st.get("state"), JobState.PENDING.value)
 
-            # 验证常驻 Worker 运行时不触发前台 drain
+            # Verify daemon worker does not trigger foreground drain when running
             self.storage.update_state(j.job_id, JobState.DEAD)
             with patch("hippo_memory.service.is_worker_running", return_value=True):
                 with patch("hippo_memory.hooks.SpoolWorker.drain") as mock_drain:
@@ -531,7 +531,7 @@ class TestHookSpool(unittest.TestCase):
                     self.assertIn("常驻 Worker", res.output)
 
     def test_spool_worker_engine_dynamic_import_runtime(self):
-        """验证未显式注入 engine 时，SpoolWorker.engine 属性可动态加载 HippoEngine 而不报 NameError。"""
+        """Verify SpoolWorker.engine property dynamically loads HippoEngine without NameError when engine is not explicitly injected."""
         worker = SpoolWorker(storage=self.storage)
         self.assertIsNone(worker._engine)
         with patch("hippo_memory.engine.HippoEngine") as mock_engine_cls:
@@ -542,9 +542,9 @@ class TestHookSpool(unittest.TestCase):
             mock_engine_cls.assert_called_once()
 
     def test_preserve_file_backed_turn_windows_before_coalescing(self):
-        """验证同一个 session 的两个 file-backed pending jobs 在转录窗口发生漂移时，不会被错误折叠。"""
+        """Verify two file-backed pending jobs from the same session are not erroneously coalesced when transcript windows drift."""
         transcript_file = Path(self.tmp_dir.name) / "codex_transcript.jsonl"
-        # 写入前 5 轮
+        # Write first 5 turns
         early_records = [
             {"role": "user", "content": f"early goal {i}"}
             for i in range(5)
@@ -554,7 +554,7 @@ class TestHookSpool(unittest.TestCase):
                 f.write(json.dumps(r) + "\n")
         boundary_1 = str(os.path.getsize(transcript_file))
 
-        # 写入后续 25 轮，导致 early turns 滑出后续的 20 轮窗口
+        # Write subsequent 25 turns, causing early turns to slide out of the later 20-turn window
         later_records = [
             {"role": "user", "content": f"later goal {i}"}
             for i in range(25)
@@ -587,9 +587,9 @@ class TestHookSpool(unittest.TestCase):
         self.storage.enqueue(job1)
         self.storage.enqueue(job2)
 
-        # 执行 coalesce
+        # Execute coalesce
         coalesced = self.storage.coalesce_pending_jobs()
-        self.assertEqual(coalesced, 0, "因滑动窗口截断且超集不变量未满足，早期作业绝不能被错误折叠")
+        self.assertEqual(coalesced, 0, "Due to sliding window truncation and unsatisfied superset invariant, early jobs must never be erroneously coalesced")
 
         st1 = self.storage.load_state(job1.job_id)
         st2 = self.storage.load_state(job2.job_id)
@@ -597,7 +597,7 @@ class TestHookSpool(unittest.TestCase):
         self.assertEqual(st2.get("state"), JobState.PENDING.value)
 
     def test_delta_skip_preserves_substantive_user_decisions(self):
-        """验证用户陈述实质偏好或架构规则时，即使 assistant 仅简短回复且无文件修改，也绝不被跳过。"""
+        """Verify user statements of substantive preferences or architecture rules are never skipped, even if assistant reply is brief with no touched files."""
         mock_engine = MagicMock()
         mock_engine.add.return_value = {"id": "m1"}
         mock_engine.router.resolve_project.return_value = "test_repo"
@@ -615,17 +615,17 @@ class TestHookSpool(unittest.TestCase):
             ],
             last_user_goal="以后所有新脚本都要使用 Python 3.12 并配置 uv",
             last_assistant_final="好的",
-            touched_files=[],  # 无文件改动
+            touched_files=[],  # No file modifications
         )
         self.storage.enqueue(j)
         worker.drain()
 
         st = self.storage.load_state(j.job_id)
-        self.assertEqual(st.get("state"), JobState.COMPLETED.value, "实质用户偏好决策必须被正常消费蒸馏，绝不能被跳过")
+        self.assertEqual(st.get("state"), JobState.COMPLETED.value, "Substantive user preference decisions must be consumed and distilled normally, never skipped")
         mock_engine.add.assert_called_once()
 
     def test_claim_job_schedules_recovery_wakeup(self):
-        """验证 claim_job 时自动调度 recovery wake-up 防止 worker crash 后作业永久处于 processing 状态。"""
+        """Verify claim_job automatically schedules recovery wake-up to prevent jobs remaining permanently in processing state after worker crashes."""
         j = CapturedPayload(
             job_id="job-claim-wake",
             host="codex",
@@ -721,11 +721,11 @@ class TestHostAdapters(unittest.TestCase):
         self.assertIn("pyproject.toml", extracted.touched_files)
 
     def test_codex_adapter_rollout_response_item_payload(self):
-        """验证 Codex Code-mode rollout (response_item.payload + input_text/output_text) 格式能被正确解包蒸馏。"""
+        """Verify Codex Code-mode rollout (response_item.payload + input_text/output_text) format is properly unpacked and distilled."""
         adapter = get_adapter("codex")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             transcript_file = Path(f.name)
-            # 1. 真实 Codex rollout user turn (嵌套在 response_item.payload 且 content 为 input_text)
+            # 1. Real Codex rollout user turn (nested in response_item.payload with input_text content)
             f.write(json.dumps({
                 "type": "response_item",
                 "response_item": {
@@ -738,7 +738,7 @@ class TestHostAdapters(unittest.TestCase):
                     }
                 }
             }) + "\n")
-            # 2. 带有嵌套 tool_use 的 rollout 记录
+            # 2. Rollout record with nested tool_use
             f.write(json.dumps({
                 "type": "response_item",
                 "response_item": {
@@ -774,7 +774,7 @@ class TestHostAdapters(unittest.TestCase):
                 transcript_file.unlink()
 
     def test_codex_adapter_top_level_custom_tool_call(self):
-        """验证 Codex Code-mode 顶层 custom_tool_call 记录能正确提取 touched_files，防止 Done 回复被 Delta Skip 误跳过。"""
+        """Verify Codex Code-mode top-level custom_tool_call records correctly extract touched_files, preventing Done replies from being falsely skipped by Delta Skip."""
         adapter = get_adapter("codex")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             transcript_file = Path(f.name)
@@ -815,7 +815,7 @@ class TestHostAdapters(unittest.TestCase):
             self.assertEqual(extracted.last_assistant_final, "Done.")
             self.assertIn("src/infrastructure/db.ts", extracted.touched_files)
 
-            # 验证 Delta Skip 检测：由于存在 touched_files，绝不能被当作 transient 短确认跳过
+            # Verify Delta Skip detection: with touched_files present, it must never be skipped as a transient short acknowledgement
             from hippo_memory.hooks.spool import SpoolWorker
             worker = SpoolWorker()
             self.assertFalse(worker.is_delta_transient(extracted))
@@ -857,7 +857,7 @@ class TestHostAdapters(unittest.TestCase):
         self.assertEqual(payload.event, "Stop")
 
     def test_zcode_adapter_model_io_rollout(self):
-        """验证 ZCode model-io 结构 (request.messages / response.text / response.toolCalls) 的正确解析与文件提取。"""
+        """Verify proper parsing and file extraction from ZCode model-io structure (request.messages / response.text / response.toolCalls)."""
         adapter = get_adapter("zcode")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             transcript_file = Path(f.name)
@@ -927,7 +927,7 @@ class TestHostAdapters(unittest.TestCase):
                 transcript_file.unlink()
 
     def test_zcode_adapter_legacy_transcript(self):
-        """验证 ZCode 兼容标准单行 role/content 格式及工具调用。"""
+        """Verify ZCode compatibility with standard single-line role/content format and tool calls."""
         adapter = get_adapter("zcode")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             transcript_file = Path(f.name)
@@ -953,7 +953,7 @@ class TestHostAdapters(unittest.TestCase):
                 transcript_file.unlink()
 
     def test_pi_adapter_with_touched_files_prevents_delta_skip(self):
-        """验证 Pi 适配器解析 touched_files 并成功防止 Delta Skip 误跳过代码变更。"""
+        """Verify Pi adapter parses touched_files and successfully prevents Delta Skip from incorrectly skipping code modifications."""
         adapter = get_adapter("pi")
         raw_stdin = json.dumps({
             "session_id": "pi-sess-touched",
@@ -972,11 +972,11 @@ class TestHostAdapters(unittest.TestCase):
         mock_storage = MagicMock()
         worker = SpoolWorker(storage=mock_storage)
         extracted = adapter.extract_session_turns(payload)
-        # 即使消息简短如 Done.，只要存在 touched_files 就绝对不能被当作 delta transient 跳过
+        # Even if the message is as brief as Done., with touched_files present it must never be skipped as delta transient
         self.assertFalse(worker.is_delta_transient(extracted))
 
     def test_touched_files_deterministic_sorting(self):
-        """验证超过 30 个文件时，不同输入顺序均能确定性排序截断，杜绝跨进程 hash 种子分歧。"""
+        """Verify that for over 30 files, differing input orders deterministically sort and truncate, eliminating cross-process hash seed divergence."""
         adapter = get_adapter("codex")
         files_a = [f"file_{i:03d}.py" for i in range(50)]
         files_b = list(reversed(files_a))
@@ -989,9 +989,9 @@ class TestHostAdapters(unittest.TestCase):
         self.assertEqual(res_a, sorted(files_a)[:30])
 
     def test_pi_boundary_distinct_on_capped_turns_sliding_window(self):
-        """验证 Pi 会话超过 100 轮时，滑动窗口内容变化会生成不同的 boundary 和 job_id，防止 enqueue 静默丢弃。"""
+        """Verify that for Pi sessions over 100 turns, sliding window content changes generate distinct boundaries and job_ids, preventing silent enqueue drops."""
         adapter = get_adapter("pi")
-        # 构造第 1 批 100 轮对话
+        # Construct first batch of 100 conversation turns
         turns_window_1 = [{"role": "user", "content": f"Turn {i}"} for i in range(100)]
         payload_1 = adapter.parse_context(json.dumps({
             "session_id": "sess-pi-long",
@@ -999,7 +999,7 @@ class TestHostAdapters(unittest.TestCase):
             "total_turns": 100,
         }))
 
-        # 构造第 2 批滑动窗口（第 1 轮滑出，加入第 101 轮，总长度仍为 100）
+        # Construct second batch sliding window (turn 1 slides out, turn 101 added, total length still 100)
         turns_window_2 = turns_window_1[1:] + [{"role": "user", "content": "Turn 100"}]
         payload_2 = adapter.parse_context(json.dumps({
             "session_id": "sess-pi-long",
@@ -1009,7 +1009,7 @@ class TestHostAdapters(unittest.TestCase):
 
         self.assertNotEqual(payload_1.job_id, payload_2.job_id)
 
-        # 验证加入队列时，两者均可被 enqueue 接收为新作业
+        # Verify both are accepted as new jobs upon enqueuing
         with tempfile.TemporaryDirectory() as tmp_dir:
             storage = SpoolStorage(base_dir=Path(tmp_dir) / "spool")
             is_new_1, jid_1 = storage.enqueue(payload_1)
@@ -1018,8 +1018,8 @@ class TestHostAdapters(unittest.TestCase):
             self.assertTrue(is_new_2)
 
     def test_semantic_cursor_turn_window_digest_and_shutdown_normalization(self):
-        """验证 Semantic Cursor 包含 turns window 摘要，能区分相同 goal/reply 的不同对话，且正常归一化退出指令。"""
-        # 场景 1: 相同 goal/reply/files，但 turns 内部内容不同
+        """Verify Semantic Cursor includes turns window digest to distinguish different conversations with identical goal/reply, and normalizes exit commands."""
+        # Scenario 1: Same goal/reply/files, but differing internal turn contents
         turns_v1 = [
             {"role": "user", "content": "帮我优化下代码"},
             {"role": "assistant", "content": "好，已经重构完成。"},
@@ -1044,9 +1044,9 @@ class TestHostAdapters(unittest.TestCase):
             touched_files=["app.py"],
             turns=turns_v2,
         )
-        self.assertNotEqual(cursor_1, cursor_2, "不同对话窗口绝不能产生相同 cursor 导致新记忆被误跳过")
+        self.assertNotEqual(cursor_1, cursor_2, "Different conversation windows must never generate identical cursors causing new memories to be skipped")
 
-        # 场景 2: Stop 事件 vs SessionEnd 事件（包含退出命令 /exit）
+        # Scenario 2: Stop event vs SessionEnd event (containing exit command /exit)
         turns_stop = list(turns_v1)
         turns_session_end = turns_v1 + [{"role": "user", "content": "/exit"}]
 
@@ -1066,18 +1066,18 @@ class TestHostAdapters(unittest.TestCase):
             touched_files=["app.py"],
             turns=turns_session_end,
         )
-        self.assertEqual(cursor_stop, cursor_session_end, "Stop 与 SessionEnd 退出元数据归一化后必须生成相同 cursor")
+        self.assertEqual(cursor_stop, cursor_session_end, "Stop and SessionEnd must generate identical cursors after exit metadata normalization")
 
-        # 场景 3: SessionEnd 捕获中 last_user_goal 被终端退出指令污染为 /exit
+        # Scenario 3: last_user_goal polluted by terminal exit command /exit during SessionEnd capture
         cursor_polluted_goal = calculate_semantic_cursor(
             project_id="test_repo",
             session_id="sess-cursor-1",
-            last_user_goal="/exit",  # 模拟 adapter 接收到退出命令作为目标
+            last_user_goal="/exit",  # Simulate adapter receiving exit command as goal
             last_assistant_final="好，已经重构完成。",
             touched_files=["app.py"],
             turns=turns_session_end,
         )
-        self.assertEqual(cursor_stop, cursor_polluted_goal, "退出目标 /exit 被自动归一化回溯，必须与正常 Stop 的 cursor 一致")
+        self.assertEqual(cursor_stop, cursor_polluted_goal, "Exit goal /exit automatically normalized and backtracked, must match normal Stop cursor")
 
 
 if __name__ == "__main__":

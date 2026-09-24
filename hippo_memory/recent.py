@@ -1,7 +1,7 @@
 """Recent timeline retrieval over Mem0's history journal (Issue #12).
 
-Answers "回顾今天新增了什么记忆 / 昨天做出了哪些技术决策" with native time-window
-recall instead of semantic search, which is blind to temporal metadata.
+Answers questions like "What memories were added today? / What technical decisions were made yesterday?"
+with native time-window recall instead of semantic search, which is blind to temporal metadata.
 
 Data flow (no N+1):
 

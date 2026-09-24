@@ -100,7 +100,7 @@ class PiAdapter(BaseHostAdapter):
         return payload
 
     def _extract_touched_files_from_transcript(self, filepath: str) -> List[str]:
-        """从 Pi 本地 transcript 日志快速扫描工具调用产生的文件变更。"""
+        """Scan file modifications produced by tool calls from Pi local transcript log."""
         lines = self.read_transcript_lines(filepath, max_lines=1000)
         found: Set[str] = set()
         for line in lines:
@@ -111,18 +111,18 @@ class PiAdapter(BaseHostAdapter):
                 rec = json.loads(line_str)
             except Exception:
                 continue
-            # 匹配 toolUse / toolCall 参数中的文件
+            # Match files in toolUse / toolCall parameters
             if isinstance(rec, dict):
                 args = rec.get("arguments") or rec.get("args") or rec
                 if isinstance(args, dict):
                     found.update(self.extract_files_from_dict(args))
-                # 正则匹配整行中的代码文件名
+                # Regex match source file names across the entire line
                 for m in FILE_EXT_RE.findall(line_str):
                     found.add(m)
         return self.cap_touched_files(found)
 
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
-        # 若已有内存直传轮次，但缺少修改文件列表且有 transcript 日志，做快速文件补充，防御 Delta Skip 误杀
+        # If in-memory turns exist but touched files are missing and transcript log is available, replenish files to prevent false Delta Skip
         if not payload.touched_files and payload.transcript_path and os.path.isfile(payload.transcript_path):
             try:
                 payload.touched_files = self._extract_touched_files_from_transcript(payload.transcript_path)

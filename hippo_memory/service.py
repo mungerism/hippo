@@ -1,4 +1,4 @@
-"""Hippo Service - Qdrant 与 Worker LaunchAgent 生命周期管理（纯运维，不依赖 mem0）。"""
+"""Hippo Service - Qdrant and Worker LaunchAgent lifecycle management (ops only, no mem0 dependency)."""
 
 import os
 import plistlib
@@ -14,7 +14,7 @@ from hippo_memory.config import HIPPO_HOME
 
 QDRANT_SERVICE_LABEL = "dev.hippo.qdrant"
 WORKER_SERVICE_LABEL = "dev.hippo.worker"
-SERVICE_LABEL = QDRANT_SERVICE_LABEL  # 向后兼容别名
+SERVICE_LABEL = QDRANT_SERVICE_LABEL  # Backward compatibility alias
 QDRANT_PORT = 6333
 
 
@@ -23,32 +23,32 @@ def plist_path(label: str = QDRANT_SERVICE_LABEL) -> Path:
 
 
 def resolve_hippo_command() -> List[str]:
-    """解析执行 hippo CLI 的命令入口（优先 console script，fallback 到 sys.executable -m）。"""
-    # 1. 优先寻找当前 Python 解释器同目录下的 hippo 可执行文件
+    """Resolve the executable command for hippo CLI (prefers console script, falls back to sys.executable -m)."""
+    # 1. Look for hippo executable in the same directory as Python interpreter
     sibling = Path(sys.executable).parent / "hippo"
     if sibling.is_file() and os.access(sibling, os.X_OK):
         return [str(sibling.resolve())]
 
-    # 2. 检查系统 PATH 中的 hippo
+    # 2. Check hippo in system PATH
     which_hippo = shutil.which("hippo")
     if which_hippo:
         p = Path(which_hippo)
         if p.is_file() and os.access(p, os.X_OK):
             return [str(p.resolve())]
 
-    # 3. Fallback 到 [sys.executable, "-m", "hippo_memory.cli"]
+    # 3. Fallback to [sys.executable, "-m", "hippo_memory.cli"]
     return [sys.executable, "-m", "hippo_memory.cli"]
 
 
 def build_qdrant_plist_content(home: Path = HIPPO_HOME) -> str:
-    """生成 Qdrant LaunchAgent plist 内容（RunAtLoad + KeepAlive 常驻保活）。"""
+    """Generate Qdrant LaunchAgent plist content (RunAtLoad + KeepAlive daemon)."""
     qdrant_bin = home / "bin" / "qdrant"
     qdrant_cfg = home / "config" / "qdrant.yaml"
     log_path = home / "qdrant.log"
     plist = {
         "Label": QDRANT_SERVICE_LABEL,
         "ProgramArguments": [str(qdrant_bin), "--config-path", str(qdrant_cfg)],
-        # launchd 默认工作目录是只读的 /，qdrant 的相对路径（./snapshots/tmp）会启动即崩溃
+        # launchd default working directory is read-only /; Qdrant relative paths (./snapshots/tmp) crash if not set
         "WorkingDirectory": str(home),
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -58,11 +58,11 @@ def build_qdrant_plist_content(home: Path = HIPPO_HOME) -> str:
     return plistlib.dumps(plist).decode("utf-8")
 
 
-build_plist_content = build_qdrant_plist_content  # 向后兼容别名
+build_plist_content = build_qdrant_plist_content  # Backward compatibility alias
 
 
 def build_worker_plist_content(home: Path = HIPPO_HOME) -> str:
-    """生成 Worker LaunchAgent plist 内容（RunAtLoad + KeepAlive 常驻保活）。"""
+    """Generate Worker LaunchAgent plist content (RunAtLoad + KeepAlive daemon)."""
     log_path = home / "logs" / "worker.log"
     default_path = (
         f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
@@ -110,7 +110,7 @@ def is_loaded(label: str = QDRANT_SERVICE_LABEL) -> bool:
 
 
 def worker_service_status(home: Path = HIPPO_HOME) -> Dict[str, Any]:
-    """获取 dev.hippo.worker 的详细服务状态（plist_exists, loaded, running, pid, last_exit_code）。"""
+    """Get detailed service status of dev.hippo.worker (plist_exists, loaded, running, pid, last_exit_code)."""
     plist_file = plist_path(WORKER_SERVICE_LABEL)
     exists = plist_file.exists()
     res = _launchctl("print", f"gui/{_uid()}/{WORKER_SERVICE_LABEL}")
@@ -146,7 +146,7 @@ def worker_service_status(home: Path = HIPPO_HOME) -> Dict[str, Any]:
 
 
 def is_worker_running() -> bool:
-    """检查 dev.hippo.worker 是否正作为 LaunchAgent 常驻运行。"""
+    """Check if dev.hippo.worker is running as a LaunchAgent daemon."""
     st = worker_service_status()
     return bool(st.get("running", False))
 
@@ -154,7 +154,7 @@ def is_worker_running() -> bool:
 def install_qdrant(
     home: Path = HIPPO_HOME, load: bool = True, target_plist: Optional[Path] = None
 ) -> str:
-    """安装（或重装）Qdrant LaunchAgent 并加载。"""
+    """Install (or reinstall) Qdrant LaunchAgent and load it."""
     qdrant_bin = home / "bin" / "qdrant"
     qdrant_cfg = home / "config" / "qdrant.yaml"
     missing = [p for p in (qdrant_bin, qdrant_cfg) if not p.exists()]
@@ -165,10 +165,11 @@ def install_qdrant(
             + "。请先放置单二进制到 ~/.hippo/bin/qdrant 并准备 ~/.hippo/config/qdrant.yaml。"
         )
 
+
 def _bootstrap_service(
     label: str, target: Path, content: str, load: bool = True
 ) -> str:
-    """写入 plist 并通过 launchctl bootstrap 加载服务。"""
+    """Write plist and load service via launchctl bootstrap."""
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
@@ -193,7 +194,7 @@ def _bootstrap_service(
 
 
 def _uninstall_one(label: str) -> str:
-    """卸载指定 Label 的 LaunchAgent 服务。"""
+    """Uninstall LaunchAgent service for the specified label."""
     target = plist_path(label)
     if is_loaded(label):
         _launchctl("bootout", f"gui/{_uid()}/{label}")
@@ -206,7 +207,7 @@ def _uninstall_one(label: str) -> str:
 def install_qdrant(
     home: Path = HIPPO_HOME, load: bool = True, target_plist: Optional[Path] = None
 ) -> str:
-    """安装（或重装）Qdrant LaunchAgent 并加载。"""
+    """Install (or reinstall) Qdrant LaunchAgent and load it."""
     qdrant_bin = home / "bin" / "qdrant"
     qdrant_cfg = home / "config" / "qdrant.yaml"
     missing = [p for p in (qdrant_bin, qdrant_cfg) if not p.exists()]
@@ -226,7 +227,7 @@ def install_qdrant(
 def install_worker(
     home: Path = HIPPO_HOME, load: bool = True, target_plist: Optional[Path] = None
 ) -> str:
-    """安装（或重装）Worker LaunchAgent 并加载。"""
+    """Install (or reinstall) Worker LaunchAgent and load it."""
     (home / "logs").mkdir(parents=True, exist_ok=True)
     target = target_plist or plist_path(WORKER_SERVICE_LABEL)
     return _bootstrap_service(
@@ -240,7 +241,7 @@ def install_service(
     load: bool = True,
     target_plist: Optional[Path] = None,
 ) -> str:
-    """安装（或重装）指定 LaunchAgent 服务并加载。默认只操作 qdrant 保持向后兼容。"""
+    """Install (or reinstall) specified LaunchAgent service and load it. Defaults to qdrant for backward compatibility."""
     actions = {
         "qdrant": lambda: install_qdrant(home=home, load=load, target_plist=target_plist),
         "worker": lambda: install_worker(home=home, load=load, target_plist=target_plist),
@@ -260,7 +261,7 @@ def uninstall_worker() -> str:
 
 
 def uninstall_service(target: str = "qdrant") -> str:
-    """卸载指定 LaunchAgent 服务并删除 plist。默认只操作 qdrant 保持向后兼容。"""
+    """Uninstall specified LaunchAgent service and remove plist. Defaults to qdrant for backward compatibility."""
     actions = {
         "qdrant": uninstall_qdrant,
         "worker": uninstall_worker,
@@ -272,7 +273,7 @@ def uninstall_service(target: str = "qdrant") -> str:
 
 
 def restart_one(label: str, home: Path = HIPPO_HOME) -> str:
-    """重启单个服务：已加载时优先 kickstart -k，未加载但 plist 存在时 bootstrap。"""
+    """Restart a single service: kickstart -k if loaded, bootstrap if unloaded but plist exists."""
     target = plist_path(label)
     if is_loaded(label):
         res = _launchctl("kickstart", "-k", f"gui/{_uid()}/{label}")
@@ -289,7 +290,7 @@ def restart_one(label: str, home: Path = HIPPO_HOME) -> str:
 
 
 def restart_service(target: str = "all", home: Path = HIPPO_HOME) -> str:
-    """重启指定服务（qdrant | worker | all）。"""
+    """Restart specified service (qdrant | worker | all)."""
     actions = {
         "qdrant": lambda: restart_one(QDRANT_SERVICE_LABEL, home=home),
         "worker": lambda: restart_one(WORKER_SERVICE_LABEL, home=home),
@@ -307,7 +308,7 @@ def restart_service(target: str = "all", home: Path = HIPPO_HOME) -> str:
 
 
 def service_status() -> Dict[str, bool]:
-    """Qdrant 三态状态（向后兼容）：plist 存在 / launchctl 已加载 / 端口在监听。"""
+    """Qdrant 3-state status (backward compatibility): plist exists / launchctl loaded / port listening."""
     return {
         "plist_exists": plist_path(QDRANT_SERVICE_LABEL).exists(),
         "loaded": is_loaded(QDRANT_SERVICE_LABEL),
@@ -316,7 +317,7 @@ def service_status() -> Dict[str, bool]:
 
 
 def service_status_all() -> Dict[str, Any]:
-    """同时获取 Qdrant 与 Worker 两个常驻服务的运行状态。"""
+    """Retrieve runtime status for both Qdrant and Worker daemon services."""
     return {
         "qdrant": service_status(),
         "worker": worker_service_status(),

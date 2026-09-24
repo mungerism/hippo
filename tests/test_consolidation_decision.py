@@ -456,7 +456,7 @@ class TestWinnerArbitration(unittest.TestCase):
             _memory("mem-b", "new", confirmed_at="2026-09-01T12:01:01+00:00"),
         )
 
-        # Exactly the margin counts as "时间接近" and falls through to
+        # Exactly the margin counts as "close in time" and falls through to
         # stability; strictly beyond it decides by recency.
         self.assertEqual(at_margin.reason, "stability_id")
         self.assertEqual(at_margin.winner_id, "mem-a")
