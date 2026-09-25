@@ -29,7 +29,6 @@ from benchmarks.schemas import (
     LifecycleScopeTrace,
 )
 from hippo_memory.gate import (
-    GateDecision,
     SearchGateConfig,
     filter_search_results_with_details,
 )
@@ -41,251 +40,6 @@ from hippo_memory.lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Low-IDF and context stopwords across evaluation corpus
-BENCHMARK_STOP_WORDS = {
-    "a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or",
-    "is", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "how", "what", "where", "which", "who", "whom", "when", "why",
-    "can", "could", "should", "would", "will", "shall",
-    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
-    "my", "your", "his", "their", "our", "its", "this", "that", "these", "those",
-    "hippo", "repo", "repository", "project", "system", "code", "file", "files",
-    "use", "uses", "used", "using", "run", "runs", "running",
-    "configure", "located", "setting", "settings", "command",
-    "with", "across", "all", "into", "from", "up", "down", "set", "out",
-    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
-    "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
-    "自己", "这", "如何", "什么", "哪些", "怎么", "哪个", "是否",
-}
-
-# Generic software and architectural terms that should not be credited as unique entity matches
-BENCHMARK_GENERIC_TECH_WORDS = {
-    "server", "port", "queue", "queues", "build", "builds", "source", "ingestion",
-    "index", "core", "store", "cli", "dependency", "dependencies", "stage", "service",
-    "client", "database", "connection", "pipeline", "mapping", "stateful", "processing",
-    "topic", "topics", "cluster", "cache", "caching", "configuration", "config",
-    "token", "secrets", "secret", "proxy", "endpoint", "root", "user", "local",
-    "testing", "tests", "test", "web", "tools", "tool", "manager", "framework",
-    "directory", "storage", "memories", "jobs", "string", "mutations", "schema",
-    "deploy", "deployment", "values", "chart", "stack", "file", "mcp",
-}
-
-
-def is_transient_or_injection_query(q_text: str) -> bool:
-    """Detect whether query represents ephemeral chit-chat, raw log output, or prompt injection."""
-    t = q_text.strip().lower()
-    transient_phrases = [
-        "好的", "收到", "明白了", "thanks", "ok, got it", "ok, confirmed", "hello, are you there",
-        "明天下周", "明天再看",
-    ]
-    if any(p in t for p in transient_phrases):
-        return True
-    if any(p in t for p in ["debug", "trace", "segment 4 merged", "resetting dropped connection"]):
-        return True
-    if any(p in t for p in [
-        "ignore all previous commands", "grant sudo", "system prompt:", "reveal your system instructions",
-        "dump all environment variables", "act as an evil agent", "bypass all safety filters",
-    ]):
-        return True
-    if any(p in t for p in ["lorem ipsum", "recipe for chocolate chip", "bake flour butter"]):
-        return True
-    return False
-
-
-def is_noise_item(item: Any) -> bool:
-    """Identify noise memories (transient phrases, logs, prompt injections, unrelated text)."""
-    if isinstance(item, CorpusItem):
-        cat = item.category
-        cid = item.id
-        text = item.text
-    elif isinstance(item, Mapping):
-        meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
-        cat = meta.get("category") or item.get("category")
-        cid = str(meta.get("benchmark_id") or item.get("benchmark_id") or item.get("id", ""))
-        text = str(item.get("memory") or item.get("text") or "")
-    else:
-        cat = getattr(item, "category", None)
-        cid = str(getattr(item, "id", ""))
-        text = str(getattr(item, "text", "") or getattr(item, "memory", ""))
-
-    if cat in ("transient_phrase", "log_dump", "injection_attempt", "nonsense", "unrelated"):
-        return True
-    if cid.startswith("mem_noise_"):
-        return True
-    if any(p in text for p in ["Ignore all previous commands", "Grant sudo privileges", "DEBUG 2026-", "TRACE [qdrant"]):
-        return True
-    return False
-
-
-def is_subject_or_project_mismatched(
-    q_text: str, item_text: str, q_user: Optional[str] = None, q_proj: Optional[str] = None
-) -> bool:
-    """Detect whether a query targeting an external user or project is misrouted to Alice/Hippo memories."""
-    q_lower = q_text.lower()
-    i_lower = item_text.lower()
-    for third_party in ["bob", "carol"]:
-        if third_party in q_lower:
-            if "alice" in i_lower or third_party not in i_lower:
-                return True
-    for proj in ["zebra", "octopus"]:
-        if proj in q_lower:
-            if proj not in i_lower:
-                return True
-    return False
-
-
-def extract_meaningful_tokens(text: str) -> set[str]:
-    """Tokenize text excluding low-IDF and context stopwords."""
-    words = re.findall(r"[a-zA-Z0-9_\-]+", text.lower())
-    cn_chars = re.findall(r"[\u4e00-\u9fff]", text)
-    cn_bigrams = [cn_chars[i] + cn_chars[i + 1] for i in range(len(cn_chars) - 1)]
-    meaningful = set(w for w in words if w not in BENCHMARK_STOP_WORDS and len(w) >= 2)
-    meaningful |= set(ch for ch in cn_chars if ch not in BENCHMARK_STOP_WORDS)
-    meaningful |= set(bi for bi in cn_bigrams if bi not in BENCHMARK_STOP_WORDS)
-    return meaningful
-
-
-def extract_entity_tokens(text: str) -> set[str]:
-    """Extract distinct salient domain entities, excluding generic technical words."""
-    meaningful = extract_meaningful_tokens(text)
-    return set(w for w in meaningful if w not in BENCHMARK_GENERIC_TECH_WORDS)
-
-
-def apply_anti_pollution_gate(
-    query: EvaluationQuery,
-    candidates: Sequence[Any],
-    gate_config: Optional[SearchGateConfig] = None,
-    limit: int = 3,
-) -> tuple[List[str], List[Dict[str, Any]]]:
-    """Execute anti-pollution gating over candidate items."""
-    cfg = gate_config or SearchGateConfig()
-    gate_decisions: List[Dict[str, Any]] = []
-
-    if limit <= 0 or not candidates:
-        return [], gate_decisions
-
-    # 1. Query-side check for ephemeral chatter, raw log output, or prompt injection
-    if is_transient_or_injection_query(query.query):
-        for c in candidates:
-            cid = str(getattr(c, "id", None) or (c.get("id") if isinstance(c, Mapping) else ""))
-            dt = getattr(c, "score_details", None) or (c.get("score_details") if isinstance(c, Mapping) else {}) or {}
-            sc = getattr(c, "score", None) or (c.get("score") if isinstance(c, Mapping) else 0.0) or 0.0
-            gate_decisions.append({
-                "id": cid,
-                "reason": "injection_or_transient_query_suppression",
-                "final_score": float(sc),
-                "details": dict(dt),
-            })
-        return [], gate_decisions
-
-    q_tokens = extract_meaningful_tokens(query.query)
-    q_entities = extract_entity_tokens(query.query)
-
-    accepted_candidates: List[tuple[str, float]] = []
-
-    for c in candidates:
-        cid = str(getattr(c, "id", None) or (c.get("id") if isinstance(c, Mapping) else ""))
-        dt = getattr(c, "score_details", None) or (c.get("score_details") if isinstance(c, Mapping) else {}) or {}
-        sc = getattr(c, "score", None) or (c.get("score") if isinstance(c, Mapping) else 0.0) or 0.0
-        text = str(getattr(c, "text", "") or (c.get("memory") or c.get("text") if isinstance(c, Mapping) else ""))
-
-        # 2. Candidate-side noise suppression
-        if is_noise_item(c):
-            gate_decisions.append({
-                "id": cid,
-                "reason": "noise_memory_suppressed",
-                "final_score": float(sc),
-                "details": dict(dt),
-            })
-            continue
-
-        # 3. Subject and project mismatch suppression
-        if is_subject_or_project_mismatched(query.query, text, query.user_id, query.project_id):
-            gate_decisions.append({
-                "id": cid,
-                "reason": "subject_or_project_mismatch",
-                "final_score": float(sc),
-                "details": dict(dt),
-            })
-            continue
-
-        sem = float(dt.get("semantic_score", sc))
-        final_sc = float(dt.get("final_score", sc))
-
-        c_tokens = extract_meaningful_tokens(text)
-        c_entities = extract_entity_tokens(text)
-
-        entity_overlap = q_entities & c_entities
-        token_overlap = q_tokens & c_tokens
-
-        # 4. Spurious entity collision suppression: query asks about a distinct tech entity
-        # (e.g. Django, Redis, React, Spark), but candidate has zero overlap on salient entities
-        if len(q_entities) >= 1 and len(entity_overlap) == 0:
-            if sem < 0.85:
-                gate_decisions.append({
-                    "id": cid,
-                    "reason": "spurious_entity_mismatch",
-                    "final_score": final_sc,
-                    "details": dict(dt),
-                })
-                continue
-
-        # 5. Genuine keyword support vs pure dense threshold
-        has_true_support = len(token_overlap) > 0 or (float(dt.get("entity_boost", 0.0)) > 0.0)
-
-        if has_true_support:
-            if final_sc >= cfg.final_threshold and sem >= 0.55:
-                accepted_candidates.append((cid, final_sc))
-            else:
-                gate_decisions.append({
-                    "id": cid,
-                    "reason": "final_threshold_failed" if final_sc < cfg.final_threshold else "dense_threshold_failed",
-                    "final_score": final_sc,
-                    "details": dict(dt),
-                })
-        else:
-            if sem >= cfg.dense_only_threshold and final_sc >= cfg.final_threshold:
-                accepted_candidates.append((cid, final_sc))
-            else:
-                gate_decisions.append({
-                    "id": cid,
-                    "reason": "dense_threshold_failed" if sem < cfg.dense_only_threshold else "final_threshold_failed",
-                    "final_score": final_sc,
-                    "details": dict(dt),
-                })
-
-    passed_ids: List[str] = []
-    if accepted_candidates:
-        best_sc = max(s for _, s in accepted_candidates)
-        rel_floor = cfg.relative_threshold_ratio * best_sc if best_sc > 0.0 else 0.0
-        for cid, sc in accepted_candidates:
-            if sc >= rel_floor:
-                if len(passed_ids) < limit:
-                    passed_ids.append(cid)
-                    gate_decisions.append({
-                        "id": cid,
-                        "reason": "passed",
-                        "final_score": sc,
-                        "details": {},
-                    })
-                else:
-                    gate_decisions.append({
-                        "id": cid,
-                        "reason": "truncated_by_limit",
-                        "final_score": sc,
-                        "details": {},
-                    })
-            else:
-                gate_decisions.append({
-                    "id": cid,
-                    "reason": "relative_floor_failed",
-                    "final_score": sc,
-                    "details": {},
-                })
-
-    return passed_ids, gate_decisions
-
 
 class BenchmarkAdapter(abc.ABC):
     """Abstract interface for memory retrieval benchmark adapters."""
@@ -527,23 +281,29 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             rejected=rejected_lifecycle,
         )
 
-        # Stage 3: Anti-pollution relevance gate filtering
-        passed_gate_ids, gate_decisions = apply_anti_pollution_gate(
-            query=query,
-            candidates=passed_lifecycle,
-            gate_config=self.gate_config,
-            limit=limit,
+        # Stage 3: Relevance gate filtering. Replay uses the same generic gate
+        # contract as production; Gold labels/categories never participate in scoring.
+        accepted, decisions = filter_search_results_with_details(
+            passed_lifecycle, config=self.gate_config, limit=limit
         )
-        gate_rejected = [d for d in gate_decisions if d["reason"] != "passed"]
 
         gate_trace = GateTrace(
-            passed_ids=passed_gate_ids,
-            rejected=gate_rejected,
+            passed_ids=[d.memory_id for d in decisions if d.accepted],
+            rejected=[
+                {
+                    "id": d.memory_id,
+                    "reason": d.reason,
+                    "final_score": d.final_score,
+                    "details": d.details or {},
+                }
+                for d in decisions
+                if not d.accepted
+            ],
             gate_config=asdict(self.gate_config),
         )
 
         # Stage 4: Final Top-N IDs
-        final_stage_ids = list(passed_gate_ids)
+        final_stage_ids = [str(item.get("id")) for item in accepted]
 
         trace = None
         if capture_trace:
@@ -679,8 +439,6 @@ class HippoEngineAdapter(BenchmarkAdapter):
             meta["status"] = item.status
             meta["scope"] = item.scope
             meta["benchmark_id"] = item.id
-            if item.category is not None:
-                meta["category"] = item.category
             if item.project_id:
                 meta["project"] = item.project_id
 
@@ -728,68 +486,55 @@ class HippoEngineAdapter(BenchmarkAdapter):
             raw_id = str(value)
             return self._backend_to_logical.get(raw_id, raw_id)
 
+        retrieved_ids = [logical_id(item) for item in accepted]
         if trace is None:
-            retrieved_ids = [logical_id(item) for item in accepted]
             return retrieved_ids, None
 
-        # Transform candidate stage to logical IDs
-        normalized_candidates = [
-            replace(
-                candidate,
-                id=logical_id(candidate.id),
-                status=self._corpus_by_logical.get(
-                    logical_id(candidate.id), CorpusItem(id="", text="")
-                ).status
-                if logical_id(candidate.id) in self._corpus_by_logical
-                else candidate.status,
-                scope=self._corpus_by_logical.get(
-                    logical_id(candidate.id), CorpusItem(id="", text="")
-                ).scope
-                if logical_id(candidate.id) in self._corpus_by_logical
-                else candidate.scope,
-                project_id=self._corpus_by_logical.get(
-                    logical_id(candidate.id), CorpusItem(id="", text="")
-                ).project_id
-                if logical_id(candidate.id) in self._corpus_by_logical
-                else candidate.project_id,
-                user_id=self._corpus_by_logical.get(
-                    logical_id(candidate.id), CorpusItem(id="", text="")
-                ).user_id
-                if logical_id(candidate.id) in self._corpus_by_logical
-                else candidate.user_id,
-            )
-            for candidate in trace.candidate_stage
-        ]
+        def corpus_item_for(candidate_id: str) -> Optional[CorpusItem]:
+            return self._corpus_by_logical.get(logical_id(candidate_id))
 
-        # Stage 3: Apply anti-pollution relevance gate on candidate stage items
-        passed_gate_ids, gate_decisions = apply_anti_pollution_gate(
-            query=query,
-            candidates=normalized_candidates,
-            gate_config=self.gate_config,
-            limit=limit,
+        normalized_candidates = []
+        for candidate in trace.candidate_stage:
+            logical_candidate_id = logical_id(candidate.id)
+            corpus_item = corpus_item_for(candidate.id)
+            normalized_candidates.append(
+                replace(
+                    candidate,
+                    id=logical_candidate_id,
+                    status=corpus_item.status if corpus_item is not None else candidate.status,
+                    scope=corpus_item.scope if corpus_item is not None else candidate.scope,
+                    project_id=(
+                        corpus_item.project_id if corpus_item is not None else candidate.project_id
+                    ),
+                    user_id=corpus_item.user_id if corpus_item is not None else candidate.user_id,
+                )
+            )
+
+        normalized_trace = EvaluationTrace(
+            query_id=trace.query_id,
+            query=trace.query,
+            candidate_stage=normalized_candidates,
+            lifecycle_scope_stage=LifecycleScopeTrace(
+                passed_ids=[logical_id(i) for i in trace.lifecycle_scope_stage.passed_ids],
+                rejected=[
+                    {**item, "id": logical_id(item.get("id"))}
+                    for item in trace.lifecycle_scope_stage.rejected
+                ],
+            ),
+            gate_stage=GateTrace(
+                passed_ids=[logical_id(i) for i in trace.gate_stage.passed_ids],
+                rejected=[
+                    {**item, "id": logical_id(item.get("id"))}
+                    for item in trace.gate_stage.rejected
+                ],
+                gate_config=trace.gate_stage.gate_config,
+            ),
+            final_stage_ids=[logical_id(i) for i in trace.final_stage_ids],
         )
-        gate_rejected = [d for d in gate_decisions if d["reason"] != "passed"]
 
-        if trace is not None:
-            trace = EvaluationTrace(
-                query_id=trace.query_id,
-                query=trace.query,
-                candidate_stage=normalized_candidates,
-                lifecycle_scope_stage=LifecycleScopeTrace(
-                    passed_ids=[logical_id(i) for i in trace.lifecycle_scope_stage.passed_ids],
-                    rejected=[
-                        {**item, "id": logical_id(item.get("id"))}
-                        for item in trace.lifecycle_scope_stage.rejected
-                    ],
-                ),
-                gate_stage=GateTrace(
-                    passed_ids=passed_gate_ids,
-                    rejected=gate_rejected,
-                    gate_config=asdict(self.gate_config),
-                ),
-                final_stage_ids=passed_gate_ids,
-            )
-        return passed_gate_ids, trace if capture_trace else None
+        # The adapter is an observer, not an alternate retrieval policy. The IDs
+        # returned here must correspond exactly to HippoEngine.search_with_trace().
+        return retrieved_ids, normalized_trace if capture_trace else None
 
     def cleanup(self) -> None:
         """Delete the isolated collection without lazily opening production-adjacent resources."""
