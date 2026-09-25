@@ -338,10 +338,10 @@ class HippoEngineAdapter(BenchmarkAdapter):
         collection_name: Optional[str] = None,
         config: Optional[Any] = None,
     ):
-        from hippo_memory.config import HippoConfig, get_config
+        from hippo_memory.config import get_config
         from hippo_memory.engine import HippoEngine
 
-        base_cfg = config or (HippoConfig.from_env() if hasattr(HippoConfig, "from_env") else get_config())
+        base_cfg = config or get_config()
         cfg = copy.copy(base_cfg)
 
         # Generate or validate isolated collection name.
