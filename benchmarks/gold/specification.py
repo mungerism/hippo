@@ -85,7 +85,9 @@ def audit_security_gates(
             if q.user_id and candidate.user_id and candidate.user_id != q.user_id:
                 cross_user_leak_count += 1
 
-            if candidate.scope == "project":
+            if q.scope == "project" and candidate.scope == "global":
+                cross_project_leak_count += 1
+            elif candidate.scope == "project":
                 if q.scope == "global":
                     cross_project_leak_count += 1
                 elif (
