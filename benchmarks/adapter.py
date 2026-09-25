@@ -113,9 +113,9 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
         """Return embedding profile for replay."""
         return dict(self._embedding_profile)
 
-    def get_index_size_bytes(self) -> int:
+    def get_index_size_bytes(self) -> Optional[int]:
         """Replay has no persisted vector index."""
-        return 0
+        return None
 
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Store corpus items in memory for fixture replay."""
@@ -390,6 +390,7 @@ class HippoEngineAdapter(BenchmarkAdapter):
 
         self.collection_name = isolated_coll
         self._backend_to_logical: Dict[str, str] = {}
+        self._corpus_by_logical: Dict[str, CorpusItem] = {}
         self.config = cfg
         self.gate_config = (
             cfg.get_gate_config() if hasattr(cfg, "get_gate_config") else SearchGateConfig()
@@ -426,6 +427,7 @@ class HippoEngineAdapter(BenchmarkAdapter):
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Ingest corpus deterministically into the isolated benchmark collection."""
         for item in corpus:
+            self._corpus_by_logical[item.id] = item
             meta = dict(item.metadata)
             meta["status"] = item.status
             meta["scope"] = item.scope
@@ -486,7 +488,30 @@ class HippoEngineAdapter(BenchmarkAdapter):
                 query_id=trace.query_id,
                 query=trace.query,
                 candidate_stage=[
-                    replace(candidate, id=logical_id(candidate.id))
+                    replace(
+                        candidate,
+                        id=logical_id(candidate.id),
+                        status=self._corpus_by_logical.get(
+                            logical_id(candidate.id), CorpusItem(id="", text="")
+                        ).status
+                        if logical_id(candidate.id) in self._corpus_by_logical
+                        else candidate.status,
+                        scope=self._corpus_by_logical.get(
+                            logical_id(candidate.id), CorpusItem(id="", text="")
+                        ).scope
+                        if logical_id(candidate.id) in self._corpus_by_logical
+                        else candidate.scope,
+                        project_id=self._corpus_by_logical.get(
+                            logical_id(candidate.id), CorpusItem(id="", text="")
+                        ).project_id
+                        if logical_id(candidate.id) in self._corpus_by_logical
+                        else candidate.project_id,
+                        user_id=self._corpus_by_logical.get(
+                            logical_id(candidate.id), CorpusItem(id="", text="")
+                        ).user_id
+                        if logical_id(candidate.id) in self._corpus_by_logical
+                        else candidate.user_id,
+                    )
                     for candidate in trace.candidate_stage
                 ],
                 lifecycle_scope_stage=LifecycleScopeTrace(
@@ -521,4 +546,5 @@ class HippoEngineAdapter(BenchmarkAdapter):
             logger.warning("Failed to delete isolated collection %s: %s", self.collection_name, e)
         finally:
             self._backend_to_logical.clear()
+            self._corpus_by_logical.clear()
             self._temp_dir.cleanup()
