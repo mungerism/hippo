@@ -398,8 +398,16 @@ class HippoEngineAdapter(BenchmarkAdapter):
         self.engine = HippoEngine(config=cfg)
 
     def get_index_size_bytes(self) -> Optional[int]:
-        """Measure local isolated benchmark storage when it is filesystem-backed."""
-        root = Path(self._temp_dir.name)
+        """Measure vector index bytes only for filesystem-backed vector stores."""
+        vector_cfg = (
+            self.config.get_mem0_config()
+            .get("vector_store", {})
+            .get("config", {})
+        )
+        raw_path = vector_cfg.get("path") or vector_cfg.get("location")
+        if not raw_path:
+            return None
+        root = Path(str(raw_path)).expanduser()
         try:
             return sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
         except OSError:
