@@ -13,15 +13,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-GATE_SENTENCE_STARTERS = {
-    "what", "how", "where", "which", "when", "who", "why", "is", "are", "do",
-    "does", "did", "can", "could", "would", "should", "will", "the", "a", "an",
-    "in", "on", "at", "for", "to", "list", "show", "describe", "explain", "find",
-    "please", "tell", "give", "name", "resetting", "segment", "trace", "debug",
-}
-
-GATE_GENERIC_ACRONYMS = {"ide", "mcp", "pr", "ci", "cli", "api", "ui", "ux", "os", "io", "db"}
-
 GATE_STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
     "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
@@ -47,57 +38,67 @@ GATE_STOP_WORDS = {
 }
 
 RAW_LOG_PATTERN = re.compile(
-    r"^(?:DEBUG|TRACE|INFO|WARN|ERROR)\s+\d{4}-\d{2}-\d{2}|^(?:DEBUG|TRACE|INFO|WARN|ERROR)\s+\[",
+    r"^(?:DEBUG|TRACE|INFO|WARN(?:ING)?|ERROR|FATAL)\b"
+    r"(?:\s+\d{4}-\d{2}-\d{2}|\s+\[|\s+[A-Za-z0-9_.-]+)",
     re.IGNORECASE,
 )
-INJECTION_PATTERN = re.compile(
-    r"</?hippo_retrieved_context>|<admin>|ignore all previous commands|system instruction:|bypass all safety|reveal your system instructions",
+CONTEXT_CONTROL_TAG_PATTERN = re.compile(
+    r"</?[A-Za-z][\w:-]*(?:context|admin|system|developer)[\w:-]*\b[^>]*>",
     re.IGNORECASE,
 )
-TRANSIENT_PATTERN = re.compile(
-    r"^(?:好的|收到|明白|我知道了|thanks|thank you|ok,?\s*got it|looks great|lorem ipsum|recipe for)",
+INSTRUCTION_OVERRIDE_PATTERN = re.compile(
+    r"\b(?:ignore|disregard|override|bypass)\b.{0,80}"
+    r"\b(?:instruction|instructions|command|commands|prompt|prompts|policy|policies|rule|rules|safety)\b"
+    r"|\b(?:system|developer)\s+(?:instruction|instructions|prompt|message)\s*:"
+    r"|\b(?:reveal|show|print|expose)\b.{0,80}"
+    r"\b(?:system|developer)\s+(?:instruction|instructions|prompt|prompts|message|messages)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+TRANSIENT_ONLY_PATTERN = re.compile(
+    r"^(?:(?:好的|收到|明白(?:了)?|我知道了|知道了|没问题|可以|行|谢谢|多谢)[，,！!。.;；\s]*){1,3}$"
+    r"|^(?:(?:thanks(?:\s+(?:a lot|so much))?|thank you|ok(?:ay)?|got it|understood|"
+    r"sounds good|looks good|great)[,!.;\s]*){1,3}$",
     re.IGNORECASE,
 )
 
 
 def is_transient_or_injection(text: str) -> bool:
-    """Detect whether a query or candidate text represents transient dialogue, logs, or injection."""
+    """Detect structural retrieval hazards without matching benchmark-specific phrases.
+
+    This intentionally recognizes only raw log envelopes, control/instruction
+    structures, and acknowledgement-only utterances. A query that merely starts
+    with an acknowledgement but continues with a substantive question must still
+    be eligible for retrieval.
+    """
     s = text.strip()
     return bool(
         RAW_LOG_PATTERN.search(s)
-        or INJECTION_PATTERN.search(s)
-        or TRANSIENT_PATTERN.search(s)
+        or CONTEXT_CONTROL_TAG_PATTERN.search(s)
+        or INSTRUCTION_OVERRIDE_PATTERN.search(s)
+        or TRANSIENT_ONLY_PATTERN.fullmatch(s)
     )
 
 
 def extract_query_content_and_entities(query: str) -> tuple[set[str], set[str], set[str]]:
-    """Extract content words, primary salient entities, and CJK characters from query text.
+    """Extract lexical content and CJK characters from a query.
+
+    The middle return value is intentionally an empty set. Production retrieval
+    must not infer "primary entities" from capitalization or word position:
+    sentence starters and ordinary nouns are too easy to misclassify, which can
+    turn a relevance heuristic into a destructive hard filter. Entity-aware
+    relaxation remains available through Mem0's explicit entity_boost signal.
 
     Returns:
-        (content_tokens, primary_proper_entities, cjk_chars)
+        (content_tokens, empty_entity_set, cjk_chars)
     """
     raw_tokens = re.findall(r"\b[A-Za-z0-9_\.\-]+\b", query)
-    content_tokens: set[str] = set()
-    primary_entities: set[str] = set()
-
-    for i, t in enumerate(raw_tokens):
-        lower_t = t.lower()
-        if lower_t in GATE_STOP_WORDS or len(t) <= 1:
-            continue
-        content_tokens.add(lower_t)
-
-        if lower_t in GATE_SENTENCE_STARTERS or lower_t in GATE_GENERIC_ACRONYMS:
-            continue
-
-        is_entity_prefix = (i > 0 and raw_tokens[i - 1].lower() in ("project", "repo", "repository", "user", "in", "for", "does"))
-
-        if t[0].isupper() or t.isupper() or "." in t or "-" in t or "_" in t or is_entity_prefix:
-            primary_entities.add(lower_t)
-        if lower_t.endswith("'s"):
-            primary_entities.add(lower_t[:-2])
-
+    content_tokens = {
+        token.lower()
+        for token in raw_tokens
+        if len(token) > 1 and token.lower() not in GATE_STOP_WORDS
+    }
     cjk_chars = set(re.findall(r"[\u4e00-\u9fff]", query))
-    return content_tokens, primary_entities, cjk_chars
+    return content_tokens, set(), cjk_chars
 
 
 def _is_valid_numeric(val: Any) -> bool:
@@ -112,10 +113,20 @@ class SearchGateConfig:
     final_threshold: float = 0.32
     dense_only_threshold: float = 0.62
     relative_threshold_ratio: float = 0.50
+    lexical_min_coverage: float = 0.35
+    lexical_bm25_threshold: float = 0.15
+    lexical_semantic_threshold: float = 0.48
     enabled: bool = True
 
     def __post_init__(self):
-        for name in ("final_threshold", "dense_only_threshold", "relative_threshold_ratio"):
+        for name in (
+            "final_threshold",
+            "dense_only_threshold",
+            "relative_threshold_ratio",
+            "lexical_min_coverage",
+            "lexical_bm25_threshold",
+            "lexical_semantic_threshold",
+        ):
             val = getattr(self, name)
             if not _is_valid_numeric(val):
                 raise ValueError(f"{name} must be a finite float, got {val!r}")
@@ -175,7 +186,7 @@ def filter_search_results_with_details(
 
     # Pre-parse query context if provided
     query_unwanted = is_transient_or_injection(query) if query else False
-    q_content, q_primary_entities, q_cjk = (
+    q_content, _q_entities, q_cjk = (
         extract_query_content_and_entities(query) if query else (set(), set(), set())
     )
 
@@ -250,36 +261,36 @@ def filter_search_results_with_details(
             cand_cjk = set(re.findall(r"[\u4e00-\u9fff]", cand_text))
 
             content_overlap = q_content & cand_tokens
-            primary_overlap = q_primary_entities & cand_tokens
             cjk_overlap = q_cjk & cand_cjk
 
             token_cov = len(content_overlap) / len(q_content) if q_content else 0.0
             cjk_cov = len(cjk_overlap) / len(q_cjk) if q_cjk else 0.0
             effective_coverage = max(token_cov, cjk_cov)
 
-            # Signal 1: Primary Proper Entity Mismatch (e.g. query asked for Bob/Carol/Redis, candidate completely misses it)
-            if len(q_primary_entities) > 0 and len(primary_overlap) == 0:
-                decisions.append(GateDecision(memory_id=cid, accepted=False, reason="primary_entity_mismatch", final_score=final_score, details=dict(details)))
-                continue
-
-            # Signal 2: Strong Entity Support (explicit KG entity boost)
+            # Signal 1: Strong Entity Support (explicit KG entity boost).
+            # We deliberately avoid heuristic "entity mismatch" rejection based on
+            # capitalization or token position; those heuristics caused valid
+            # production queries to be dropped.
             has_strong_entity = (entity_boost > 0.0)
 
             # Signal 3: Meaningful Lexical Support
             has_meaningful_lexical = (
                 (
-                    effective_coverage >= 0.35
+                    effective_coverage >= cfg.lexical_min_coverage
                     or (len(q_content) <= 2 and len(content_overlap) >= 1)
                     or (len(q_cjk) <= 4 and len(cjk_overlap) >= 2)
                 )
-                and bm25_score >= 0.15
+                and bm25_score >= cfg.lexical_bm25_threshold
             )
 
             if has_strong_entity:
                 absolute_pass = (final_score >= cfg.final_threshold)
                 fail_reason = "final_threshold_failed"
             elif has_meaningful_lexical:
-                absolute_pass = (final_score >= cfg.final_threshold) and (semantic_score >= 0.48)
+                absolute_pass = (
+                    final_score >= cfg.final_threshold
+                    and semantic_score >= cfg.lexical_semantic_threshold
+                )
                 fail_reason = "lexical_semantic_threshold_failed"
             elif bm25_score == 0.0:
                 # Signal 3: Pure Dense Candidate (cross-lingual, synonyms, or conceptual answer)
