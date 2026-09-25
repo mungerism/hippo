@@ -113,6 +113,10 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
         """Return embedding profile for replay."""
         return dict(self._embedding_profile)
 
+    def get_index_size_bytes(self) -> int:
+        """Replay has no persisted vector index."""
+        return 0
+
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Store corpus items in memory for fixture replay."""
         for item in corpus:
@@ -391,6 +395,14 @@ class HippoEngineAdapter(BenchmarkAdapter):
             cfg.get_gate_config() if hasattr(cfg, "get_gate_config") else SearchGateConfig()
         )
         self.engine = HippoEngine(config=cfg)
+
+    def get_index_size_bytes(self) -> Optional[int]:
+        """Measure local isolated benchmark storage when it is filesystem-backed."""
+        root = Path(self._temp_dir.name)
+        try:
+            return sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
+        except OSError:
+            return None
 
     def get_embedding_profile(self) -> Dict[str, Any]:
         """Extract the effective embedding profile from the actual Mem0 config."""
