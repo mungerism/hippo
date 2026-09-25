@@ -1,6 +1,6 @@
 # Hippo Gold v1 评测黄金集与 Baseline 规范指南
 
-> **模块定位**：本模块为 Hippo 域内召回质量黄金集（Gold v1）及生产配置 Baseline，用于在 CI 与本地开发中守护记忆召回质量与防污染硬门禁。
+> **模块定位**：本模块为 Hippo 域内召回质量黄金集（Gold v1）及评测 Baseline。Replay 仅用于离线确定性回归；生产 Baseline 必须由 `HippoEngineAdapter` 真实写入/搜索链路生成。
 > 隶属于 GitHub Issue [#54](https://github.com/mungerism/hippo/issues/54) 与 Epic [#52](https://github.com/mungerism/hippo/issues/52)。
 
 ---
@@ -11,7 +11,8 @@
 - **总题目数**：210 条精心标注的评估 Query（满足 Issue #54 $\ge 200$ 条要求）；
 - **硬负样本数与占比**：80 条 `expected_empty=True`（占比 **38.10%**，满足 $\ge 25\%$ 要求）；
 - **语料规模**：114 条覆盖多用户、多项目、多生命周期状态的脱敏工程记忆；
-- **脱敏承诺**：100% 合成或工程脱敏语料，绝不包含真实用户密钥、Token 或个人隐私。
+- **脱敏承诺**：100% 合成或工程脱敏语料，绝不包含真实用户密钥、Token 或个人隐私；
+- **时间契约**：每条 Query 必须带结构化 `query_time`；时间场景的 corpus 使用绝对 `event_time`，避免把 `today/yesterday` 同时写入问题和答案造成词面自证。
 
 ### 2. 八大核心场景覆盖矩阵
 | 场景标识 (Category) | 题数 | 场景特征与验证目标 |
@@ -54,17 +55,22 @@ uv run python -m benchmarks.gold.builder
 
 ### 3. 运行评测并生成报告
 ```bash
-# 离线仿真 Replay 模式
+# 离线 Replay：只用于 schema / gate / report 的确定性回归，不得作为生产 Baseline
 uv run python -m benchmarks.runner --dataset benchmarks/data/hippo_gold_v1.json
 
-# 连接隔离临时 Qdrant 集合执行引擎真实链路
-uv run python -m benchmarks.runner --dataset benchmarks/data/hippo_gold_v1.json --adapter engine
+# 生产 Baseline：必须使用真实 HippoEngine + 隔离 Qdrant collection
+uv run python -m benchmarks.runner \
+  --dataset benchmarks/data/hippo_gold_v1.json \
+  --adapter engine \
+  --output-dir benchmarks/baselines \
+  --report-name hippo_gold_v1_baseline
 ```
 
 ### 4. 与核准 Baseline 进行对比 (Regression Diff)
 ```bash
 uv run python -m benchmarks.runner \
   --dataset benchmarks/data/hippo_gold_v1.json \
+  --adapter engine \
   --baseline benchmarks/baselines/hippo_gold_v1_baseline.json
 ```
 
@@ -90,8 +96,9 @@ uv run python -m benchmarks.runner \
 
 ### 1. 更新准入条件 (Promotion Criteria)
 - 必须基于独立的 Feature 分支提交，严禁直接修改 `main` 分支上的 Baseline；
-- 新方案在 `benchmarks/baselines/hippo_gold_v1_baseline.json` 中的各场景 Recall@3、Hit@3 和 nDCG@3 不得出现显著退化（Drop $> 0.1\%$）；
+- Recall@3 / nDCG@3 / MRR 任一绝对下降超过 **2 个百分点**即阻断；P95 延迟同 profile 上升超过 **10%**先告警，连续确认后升级为阻断；
 - 四大安全硬门禁必须全部保持绿色合格（Leakage 恒为 0，FPR $\le 2\%$）；
+- Baseline manifest 必须记录 `adapter=HippoEngineAdapter`、embedding profile、gate 配置、dataset hash、`max_injected`、ingest profile 与可获得的索引体积；Replay/unknown adapter 的报告不得晋升为生产 Baseline；
 - 同一 PR 中必须同步提交生成的 Markdown 差异对比报告。
 
 ### 2. 回滚机制 (Rollback Procedure)
