@@ -475,7 +475,9 @@ class TestBenchmarkAdapters(unittest.TestCase):
             self.assertEqual(profile["dims"], 768)
             self.assertEqual(profile["collection"], "eval_unit_fixture")
 
-            adapter.engine.add = MagicMock()
+            adapter.engine.add = MagicMock(
+                return_value={"results": [{"id": "physical_mem0_id"}]}
+            )
             adapter.ingest_corpus(
                 [
                     CorpusItem(
@@ -484,13 +486,47 @@ class TestBenchmarkAdapters(unittest.TestCase):
                         scope="project",
                         project_id="hippo",
                         user_id="alice",
+                        category="evaluation_only_label",
                     )
                 ]
             )
             add_kwargs = adapter.engine.add.call_args.kwargs
             self.assertFalse(add_kwargs["infer"])
             self.assertEqual(add_kwargs["metadata"]["benchmark_id"], "logical_1")
+            self.assertNotIn("category", add_kwargs["metadata"])
 
+            # Deliberately make the production-accepted item too weak for any
+            # hypothetical benchmark-side re-gating. The adapter must preserve
+            # HippoEngine.search_with_trace() semantics and only normalize IDs.
+            production_trace = EvaluationTrace(
+                query_id="q1",
+                query="benchmark fact",
+                candidate_stage=[
+                    CandidateTraceItem(
+                        id="physical_mem0_id",
+                        text="benchmark fact",
+                        score=0.01,
+                        score_details={
+                            "final_score": 0.01,
+                            "semantic_score": 0.01,
+                        },
+                        status="active",
+                        scope="project",
+                        project_id="hippo",
+                        user_id="alice",
+                    )
+                ],
+                lifecycle_scope_stage=LifecycleScopeTrace(
+                    passed_ids=["physical_mem0_id"],
+                    rejected=[],
+                ),
+                gate_stage=GateTrace(
+                    passed_ids=["physical_mem0_id"],
+                    rejected=[],
+                    gate_config={"source": "production"},
+                ),
+                final_stage_ids=["physical_mem0_id"],
+            )
             adapter.engine.search_with_trace = MagicMock(
                 return_value=(
                     [
@@ -499,10 +535,10 @@ class TestBenchmarkAdapters(unittest.TestCase):
                             "metadata": {"benchmark_id": "logical_1"},
                         }
                     ],
-                    None,
+                    production_trace,
                 )
             )
-            retrieved_ids, _ = adapter.search(
+            retrieved_ids, normalized_trace = adapter.search(
                 EvaluationQuery(
                     query_id="q1",
                     query="benchmark fact",
@@ -512,6 +548,17 @@ class TestBenchmarkAdapters(unittest.TestCase):
                 )
             )
             self.assertEqual(retrieved_ids, ["logical_1"])
+            self.assertIsNotNone(normalized_trace)
+            self.assertEqual(normalized_trace.final_stage_ids, ["logical_1"])
+            self.assertEqual(normalized_trace.gate_stage.passed_ids, ["logical_1"])
+            self.assertEqual(
+                normalized_trace.gate_stage.gate_config,
+                {"source": "production"},
+            )
+            self.assertEqual(
+                [candidate.id for candidate in normalized_trace.candidate_stage],
+                ["logical_1"],
+            )
         finally:
             adapter.cleanup()
 
