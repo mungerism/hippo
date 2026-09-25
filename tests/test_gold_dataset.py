@@ -266,6 +266,78 @@ class TestHippoGoldV1Dataset(unittest.TestCase):
         self.assertEqual(audit["cross_user_leakage"], 1)
         self.assertFalse(audit["passed"])
 
+    def test_security_gate_catches_unlisted_scope_and_lifecycle_leaks(self):
+        """Trace metadata must catch scope/project/superseded leaks without forbidden labels."""
+        candidates = [
+            CandidateTraceItem(
+                id="other-project",
+                user_id="alice",
+                scope="project",
+                project_id="zebra",
+                status="active",
+            ),
+            CandidateTraceItem(
+                id="global-item",
+                user_id="alice",
+                scope="global",
+                status="active",
+            ),
+            CandidateTraceItem(
+                id="old-item",
+                user_id="alice",
+                scope="project",
+                project_id="hippo",
+                status="superseded",
+            ),
+        ]
+        ids = [candidate.id for candidate in candidates]
+        trace = EvaluationTrace(
+            query_id="q1",
+            query="query",
+            candidate_stage=candidates,
+            lifecycle_scope_stage=LifecycleScopeTrace(passed_ids=ids, rejected=[]),
+            gate_stage=GateTrace(passed_ids=ids, rejected=[]),
+            final_stage_ids=ids,
+        )
+        result = QueryEvaluationResult(
+            query_id="q1",
+            query="query",
+            category=GoldScenario.SCOPE_ISOLATION.value,
+            retrieved_ids=ids,
+            relevant_ids=["wanted"],
+            forbidden_ids=[],
+            metrics={},
+            expected_empty=False,
+            scope="project",
+            project_id="hippo",
+            user_id="alice",
+            trace=trace,
+        )
+        report = BenchmarkReport(
+            manifest=RunManifest(
+                run_id="test",
+                timestamp="2026-09-25T12:00:00Z",
+                git_sha="test",
+                dataset_name="test",
+                dataset_hash="test",
+                mem0_version="test",
+                hippo_version="test",
+                embedding_profile={},
+                gate_thresholds={},
+                max_injected=3,
+                k_values=[1, 3],
+                seed=42,
+                duration_seconds=0.0,
+            ),
+            aggregate_metrics={},
+            category_metrics={},
+            query_results=[result],
+        )
+        audit = audit_security_gates(report)
+        self.assertEqual(audit["cross_project_leakage"], 2)
+        self.assertEqual(audit["superseded_leakage"], 1)
+        self.assertFalse(audit["passed"])
+
     def test_baseline_self_comparison_has_no_regression(self):
         """Comparing baseline report against itself must yield zero regressions."""
         report = BenchmarkReport.from_json(
