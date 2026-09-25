@@ -1,5 +1,7 @@
 # Hippo 召回评测报告: `hippo_gold_v1`
 
+> ⚠️ **状态：STALE / 不可晋升。** 本报告由已删除的 benchmark-only 二次 gate 生成，且 manifest Git SHA 带 `-dirty`。它不能代表当前生产 `HippoEngine.search_with_trace()` 的最终输出，必须在 clean commit 上用 `--adapter engine` 重新生成后才能作为生产 baseline。
+
 - **运行 ID**: `eval_hippo_gold_v1_1790310853`
 - **时间戳**: `2026-09-25T04:31:36.711032+00:00`
 - **Git SHA**: `2ea0e36a4e52ee7db9c206fe5b776b3799c7ff68-dirty`
