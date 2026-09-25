@@ -527,7 +527,7 @@ class TestBenchmarkRunnerAndDiff(unittest.TestCase):
 
         # Verify manifest
         self.assertEqual(report.manifest.dataset_name, "hippo_smoke_fixture")
-        self.assertEqual(report.manifest.schema_version, "1.0.0")
+        self.assertEqual(report.manifest.schema_version, "1.1.0")
         self.assertEqual(report.manifest.max_injected, 3)
         self.assertGreater(len(report.query_results), 0)
 
