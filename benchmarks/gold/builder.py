@@ -1,6 +1,6 @@
 """Deterministic generator and builder for Hippo Gold v1 benchmark dataset.
 
-Constructs 150+ synthetic engineering corpus items and 210 rigorously annotated
+Constructs 114 synthetic engineering corpus items and 210 rigorously annotated
 evaluation queries spanning the 8 canonical scenarios:
 - exact_paraphrase_term (45 queries)
 - scope_isolation (25 queries)
@@ -39,6 +39,7 @@ def build_gold_corpus() -> List[CorpusItem]:
         user_id: str | None = "alice",
         status: str = "active",
         category: str | None = "general",
+        metadata: Dict[str, object] | None = None,
     ) -> None:
         corpus.append(
             CorpusItem(
@@ -49,6 +50,7 @@ def build_gold_corpus() -> List[CorpusItem]:
                 user_id=user_id,
                 status=status,
                 category=category,
+                metadata=dict(metadata or {}),
             )
         )
 
@@ -165,16 +167,16 @@ def build_gold_corpus() -> List[CorpusItem]:
     # -------------------------------------------------------------------------
     # 7. Temporal & Time-bound Memories (Alice / Hippo)
     # -------------------------------------------------------------------------
-    add("mem_time_001", "Today 2026-09-25: Released Hippo v0.2.0 evaluation harness with 4-stage trace logging.", category="release")
-    add("mem_time_002", "Yesterday 2026-09-24: Merged Pull Request #59 closing Issue #53 for benchmark schemas and metrics.", category="timeline")
-    add("mem_time_003", "In the past 24 hours: Fixed Ruff syntax check lint error F821 in engine.py by explicitly importing _is_valid_numeric.", category="pitfall")
-    add("mem_time_004", "Last week: Decided to adopt ADR 0006 establishing zero production overhead evaluation seam.", category="decision")
-    add("mem_time_005", "Two weeks ago: Implemented Spool retry governance and worker service launchd plist for macOS.", category="architecture")
-    add("mem_time_006", "This morning: Upgraded Qdrant client to version 1.11.0 to support batch deletion of evaluation collections.", category="upgrade")
-    add("mem_time_007", "Yesterday afternoon: Added UntrustedContextEnvelope unit tests verifying HTML escaping and anti-breakout.", category="security")
-    add("mem_time_008", "Last month: Selected BAAI/bge-small-en-v1.5 after evaluating embedding latency on Apple Silicon M3.", category="decision")
-    add("mem_time_009", "3 days ago: Implemented ReplayFixtureAdapter allowing offline deterministic benchmark replay.", category="architecture")
-    add("mem_time_010", "Earlier this week: Documented PR review taxonomy in docs/agents/triage-labels.md.", category="documentation")
+    add("mem_time_001", "2026-09-25: Released Hippo v0.2.0 evaluation harness with 4-stage trace logging.", category="release", metadata={"event_time": "2026-09-25T09:00:00Z"})
+    add("mem_time_002", "2026-09-24: Merged Pull Request #59 closing Issue #53 for benchmark schemas and metrics.", category="timeline", metadata={"event_time": "2026-09-24T10:00:00Z"})
+    add("mem_time_003", "2026-09-24 18:00 UTC: Fixed Ruff syntax check lint error F821 in engine.py by explicitly importing _is_valid_numeric.", category="pitfall", metadata={"event_time": "2026-09-24T18:00:00Z"})
+    add("mem_time_004", "2026-09-18: Decided to adopt ADR 0006 establishing zero production overhead evaluation seam.", category="decision", metadata={"event_time": "2026-09-18T12:00:00Z"})
+    add("mem_time_005", "2026-09-11: Implemented Spool retry governance and worker service launchd plist for macOS.", category="architecture", metadata={"event_time": "2026-09-11T12:00:00Z"})
+    add("mem_time_006", "2026-09-25 08:00 UTC: Upgraded Qdrant client to version 1.11.0 to support batch deletion of evaluation collections.", category="upgrade", metadata={"event_time": "2026-09-25T08:00:00Z"})
+    add("mem_time_007", "2026-09-24 15:00 UTC: Added UntrustedContextEnvelope unit tests verifying HTML escaping and anti-breakout.", category="security", metadata={"event_time": "2026-09-24T15:00:00Z"})
+    add("mem_time_008", "2026-08-25: Selected BAAI/bge-small-en-v1.5 after evaluating embedding latency on Apple Silicon M3.", category="decision", metadata={"event_time": "2026-08-25T12:00:00Z"})
+    add("mem_time_009", "2026-09-22: Implemented ReplayFixtureAdapter allowing offline deterministic benchmark replay.", category="architecture", metadata={"event_time": "2026-09-22T12:00:00Z"})
+    add("mem_time_010", "2026-09-23: Documented PR review taxonomy in docs/agents/triage-labels.md.", category="documentation", metadata={"event_time": "2026-09-23T12:00:00Z"})
 
     # -------------------------------------------------------------------------
     # 8. Multi-evidence Components & Pitfalls (Alice / Hippo)
@@ -235,7 +237,8 @@ def build_gold_queries(corpus: List[CorpusItem]) -> Tuple[List[EvaluationQuery],
         user_id: str | None = "alice",
         relevant: Dict[str, int] | None = None,
         forbidden_ids: List[str] | None = None,
-        metadata: Dict[str, any] | None = None,
+        metadata: Dict[str, object] | None = None,
+        query_time: str = "2026-09-25T12:00:00Z",
     ) -> None:
         queries.append(
             EvaluationQuery(
@@ -246,6 +249,8 @@ def build_gold_queries(corpus: List[CorpusItem]) -> Tuple[List[EvaluationQuery],
                 user_id=user_id,
                 expected_empty=expected_empty,
                 category=scenario.value,
+                query_time=query_time,
+                evidence_ids=list((relevant or {}).keys()),
                 metadata=metadata or {},
             )
         )
