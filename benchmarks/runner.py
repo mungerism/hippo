@@ -367,6 +367,7 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         f"- **Git SHA**: `{m.git_sha}`",
         f"- **数据集 Hash**: `{m.dataset_hash[:16]}...`",
         f"- **Mem0 版本**: `{m.mem0_version}` | **Hippo 版本**: `{m.hippo_version}`",
+        f"- **Adapter / Ingest**: `{m.adapter}` / `{m.ingest_profile}`",
         f"- **评测耗时**: `{m.duration_seconds}s` (共 {len(report.query_results)} 道题目)",
         "",
         "## 0. 安全硬门禁审查 (Security Hard Gates)",
@@ -424,7 +425,11 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
             "",
             "> **性能与吞吐概览**：",
             f"> - P50 延迟: `{p50} ms` | P95 延迟: `{p95} ms` | 平均注入: `{avg_tokens or 0} tokens`",
-            f"> - 索引体积: `{int(agg.get('index_size_bytes', 0))} bytes`",
+            (
+                f"> - 索引体积: `{int(agg['index_size_bytes'])} bytes`"
+                if agg.get("index_size_bytes") is not None
+                else "> - 索引体积: `unavailable`（当前向量后端未暴露可复现的磁盘字节数）"
+            ),
         ])
 
     lines.extend([
