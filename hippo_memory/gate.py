@@ -43,7 +43,7 @@ RAW_LOG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CONTEXT_CONTROL_TAG_PATTERN = re.compile(
-    r"</?[A-Za-z][\w:-]*(?:context|admin|system|developer)[\w:-]*\b[^>]*>",
+    r"</?(?:[A-Za-z][\w:-]*context[\w:-]*|admin|system|developer)\b[^>]*>",
     re.IGNORECASE,
 )
 INSTRUCTION_OVERRIDE_PATTERN = re.compile(
