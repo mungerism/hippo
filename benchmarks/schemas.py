@@ -54,6 +54,9 @@ class EvaluationQuery:
     user_id: Optional[str] = None
     expected_empty: bool = False
     category: str = "general"
+    query_time: Optional[str] = None
+    reference_answer: Optional[str] = None
+    evidence_ids: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -69,6 +72,9 @@ class EvaluationQuery:
             user_id=data.get("user_id"),
             expected_empty=bool(data.get("expected_empty", False)),
             category=str(data.get("category", "general")),
+            query_time=data.get("query_time"),
+            reference_answer=data.get("reference_answer"),
+            evidence_ids=[str(i) for i in data.get("evidence_ids", [])],
             metadata=dict(data.get("metadata") or {}),
         )
 
@@ -90,17 +96,17 @@ class BenchmarkDataset:
     def compute_hash(self) -> str:
         """Calculate a deterministic SHA-256 hash representing dataset content."""
         hasher = hashlib.sha256()
-        # Sort corpus by ID
+        # Hash the complete corpus/query contract, including category and metadata.
+        # These fields can affect replay scoring and temporal evaluation semantics.
         sorted_corpus = sorted(self.corpus, key=lambda x: x.id)
         for c in sorted_corpus:
-            payload = f"c:{c.id}:{c.text}:{c.scope}:{c.project_id}:{c.user_id}:{c.status}"
-            hasher.update(payload.encode("utf-8"))
+            payload = json.dumps(c.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            hasher.update(f"c:{payload}".encode("utf-8"))
 
-        # Sort queries by query_id
         sorted_queries = sorted(self.queries, key=lambda x: x.query_id)
         for q in sorted_queries:
-            payload = f"q:{q.query_id}:{q.query}:{q.scope}:{q.project_id}:{q.user_id}:{q.expected_empty}:{q.category}"
-            hasher.update(payload.encode("utf-8"))
+            payload = json.dumps(q.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            hasher.update(f"q:{payload}".encode("utf-8"))
 
         # Sort qrels
         for q_id in sorted(self.qrels.keys()):
@@ -282,6 +288,10 @@ class QueryEvaluationResult:
     relevant_ids: List[str]
     forbidden_ids: List[str]
     metrics: Dict[str, float]
+    expected_empty: bool = False
+    scope: str = "all"
+    project_id: Optional[str] = None
+    user_id: Optional[str] = None
     trace: Optional[EvaluationTrace] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -293,6 +303,10 @@ class QueryEvaluationResult:
             "relevant_ids": list(self.relevant_ids),
             "forbidden_ids": list(self.forbidden_ids),
             "metrics": dict(self.metrics),
+            "expected_empty": self.expected_empty,
+            "scope": self.scope,
+            "project_id": self.project_id,
+            "user_id": self.user_id,
             "trace": self.trace.to_dict() if self.trace is not None else None,
         }
 
@@ -307,6 +321,10 @@ class QueryEvaluationResult:
             relevant_ids=[str(i) for i in data.get("relevant_ids", [])],
             forbidden_ids=[str(i) for i in data.get("forbidden_ids", [])],
             metrics={str(k): float(v) for k, v in data.get("metrics", {}).items()},
+            expected_empty=bool(data.get("expected_empty", False)),
+            scope=str(data.get("scope", "all")),
+            project_id=data.get("project_id"),
+            user_id=data.get("user_id"),
             trace=EvaluationTrace.from_dict(trace_data) if trace_data else None,
         )
 
@@ -328,6 +346,9 @@ class RunManifest:
     k_values: List[int]
     seed: Optional[int]
     duration_seconds: float
+    adapter: str = "unknown"
+    ingest_profile: str = "direct-facts"
+    index_size_bytes: Optional[int] = None
     schema_version: str = "1.0.0"
     host_info: Dict[str, Any] = field(default_factory=dict)
 
@@ -350,6 +371,11 @@ class RunManifest:
             k_values=[int(k) for k in data.get("k_values", [1, 3, 5, 10])],
             seed=data.get("seed"),
             duration_seconds=float(data.get("duration_seconds", 0.0)),
+            adapter=str(data.get("adapter", "unknown")),
+            ingest_profile=str(data.get("ingest_profile", "direct-facts")),
+            index_size_bytes=(
+                int(data["index_size_bytes"]) if data.get("index_size_bytes") is not None else None
+            ),
             schema_version=str(data.get("schema_version", "1.0.0")),
             host_info=dict(data.get("host_info") or {}),
         )
