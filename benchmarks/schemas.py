@@ -349,7 +349,7 @@ class RunManifest:
     adapter: str = "unknown"
     ingest_profile: str = "direct-facts"
     index_size_bytes: Optional[int] = None
-    schema_version: str = "1.0.0"
+    schema_version: str = "1.1.0"
     host_info: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -376,7 +376,7 @@ class RunManifest:
             index_size_bytes=(
                 int(data["index_size_bytes"]) if data.get("index_size_bytes") is not None else None
             ),
-            schema_version=str(data.get("schema_version", "1.0.0")),
+            schema_version=str(data.get("schema_version", "1.1.0")),
             host_info=dict(data.get("host_info") or {}),
         )
 
