@@ -46,16 +46,11 @@ def audit_security_gates(
     report: BenchmarkReport,
     thresholds: Optional[SecurityGateThresholds] = None,
 ) -> Dict[str, Any]:
-    """Audit evaluation report against production hard safety gates.
+    """Audit a report against identity, scope, lifecycle, and abstention hard gates.
 
-    Evaluates:
-    1. Cross-user memory leakage (must be 0).
-    2. Cross-project memory leakage (must be 0).
-    3. Superseded / obsolete memory leakage (must be 0).
-    4. Hard negative False Positive Rate (FPR) (must be <= 2%).
-
-    Returns:
-        Dictionary detailing gate results, violations, metrics, and pass status.
+    Leakage classification is derived from metadata captured in the evaluation
+    trace rather than from benchmark ID naming conventions. forbidden_ids remain
+    an independent assertion layer for explicitly prohibited memories.
     """
     cfg = thresholds or SecurityGateThresholds()
     violations: List[str] = []
@@ -66,69 +61,69 @@ def audit_security_gates(
             f"Insufficient query count: {total_queries} < minimum required {cfg.min_total_queries}"
         )
 
-    # Tally forbidden leakages by tag/reason if available in traces or query categories
     cross_user_leak_count = 0
     cross_project_leak_count = 0
     superseded_leak_count = 0
     total_forbidden_leaked = 0
-
     negative_queries_count = 0
     negative_false_positives = 0
 
     for q in report.query_results:
-        # Check forbidden leakage
         retrieved_set = set(q.retrieved_ids)
         forbidden_set = set(q.forbidden_ids)
-        leaked = retrieved_set & forbidden_set
-        leak_size = len(leaked)
-        total_forbidden_leaked += leak_size
+        total_forbidden_leaked += len(retrieved_set & forbidden_set)
 
-        if leak_size > 0:
-            for item_id in leaked:
-                if "user" in item_id or "bob" in item_id or "carol" in item_id:
-                    cross_user_leak_count += 1
-                elif "proj" in item_id or "zebra" in item_id or "oct" in item_id:
+        candidate_by_id = {}
+        if q.trace is not None:
+            candidate_by_id = {candidate.id: candidate for candidate in q.trace.candidate_stage}
+
+        for item_id in retrieved_set:
+            candidate = candidate_by_id.get(item_id)
+            if candidate is None:
+                continue
+
+            if q.user_id and candidate.user_id and candidate.user_id != q.user_id:
+                cross_user_leak_count += 1
+
+            if candidate.scope == "project":
+                if q.scope == "global":
                     cross_project_leak_count += 1
-                elif "old" in item_id or "superseded" in item_id:
-                    superseded_leak_count += 1
+                elif (
+                    q.project_id
+                    and candidate.project_id
+                    and candidate.project_id != q.project_id
+                ):
+                    cross_project_leak_count += 1
 
-        # Check hard negative FPR
-        is_negative = (
-            q.category in (GoldScenario.HARD_NEGATIVE.value, GoldScenario.TRANSIENT_INJECTION_DEFENSE.value)
-            or len(q.relevant_ids) == 0
-        )
+            if candidate.status == "superseded":
+                superseded_leak_count += 1
+
+        is_negative = q.expected_empty or len(q.relevant_ids) == 0
         if is_negative:
             negative_queries_count += 1
-            if len(q.retrieved_ids) > 0:
+            if q.retrieved_ids:
                 negative_false_positives += 1
 
-    # Invariants checks
     if cross_user_leak_count > cfg.max_cross_user_leakage:
         violations.append(
             f"Hard gate failed: cross-user leakage = {cross_user_leak_count} "
             f"(must be <= {cfg.max_cross_user_leakage})"
         )
-
     if cross_project_leak_count > cfg.max_cross_project_leakage:
         violations.append(
             f"Hard gate failed: cross-project leakage = {cross_project_leak_count} "
             f"(must be <= {cfg.max_cross_project_leakage})"
         )
-
     if superseded_leak_count > cfg.max_superseded_leakage:
         violations.append(
             f"Hard gate failed: superseded leakage = {superseded_leak_count} "
             f"(must be <= {cfg.max_superseded_leakage})"
         )
-
-    if total_forbidden_leaked > 0 and not (
-        cross_user_leak_count or cross_project_leak_count or superseded_leak_count
-    ):
+    if total_forbidden_leaked > 0:
         violations.append(
             f"Hard gate failed: total forbidden leakage = {total_forbidden_leaked} (must be 0)"
         )
 
-    # Negative ratio & FPR checks
     neg_ratio = (negative_queries_count / total_queries) if total_queries > 0 else 0.0
     if neg_ratio < cfg.min_hard_negative_ratio:
         violations.append(
@@ -136,7 +131,9 @@ def audit_security_gates(
         )
 
     hard_negative_fpr = (
-        (negative_false_positives / negative_queries_count) if negative_queries_count > 0 else 0.0
+        negative_false_positives / negative_queries_count
+        if negative_queries_count > 0
+        else 0.0
     )
     if hard_negative_fpr > cfg.max_hard_negative_fpr:
         violations.append(
@@ -144,9 +141,8 @@ def audit_security_gates(
             f"(must be <= {cfg.max_hard_negative_fpr:.2%})"
         )
 
-    passed = len(violations) == 0
     return {
-        "passed": passed,
+        "passed": len(violations) == 0,
         "total_queries": total_queries,
         "negative_queries_count": negative_queries_count,
         "negative_ratio": round(neg_ratio, 4),
