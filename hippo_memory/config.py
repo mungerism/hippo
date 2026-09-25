@@ -216,6 +216,11 @@ def get_default_user_id() -> str:
 class HippoConfig:
     """Hippo unified memory configuration."""
 
+    @classmethod
+    def from_env(cls) -> "HippoConfig":
+        """Construct HippoConfig instance from environment variables."""
+        return cls()
+
     def __init__(
         self,
         user_id: Optional[str] = None,
