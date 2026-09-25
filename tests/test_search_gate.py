@@ -502,7 +502,7 @@ class TestSearchGateAbstentionAndAntiPollution(unittest.TestCase):
         accepted, decisions = filter_search_results_with_details(
             [cand],
             config=self.config,
-            query="好的，我知道了",
+            query="Understood.",
         )
         self.assertEqual(accepted, [])
         self.assertEqual(decisions[0].reason, "query_transient_or_log")
