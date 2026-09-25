@@ -284,7 +284,7 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
         # Stage 3: Relevance gate filtering. Replay uses the same generic gate
         # contract as production; Gold labels/categories never participate in scoring.
         accepted, decisions = filter_search_results_with_details(
-            passed_lifecycle, config=self.gate_config, limit=limit
+            passed_lifecycle, config=self.gate_config, limit=limit, query=query.query
         )
 
         gate_trace = GateTrace(
