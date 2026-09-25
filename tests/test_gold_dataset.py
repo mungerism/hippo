@@ -80,6 +80,19 @@ class TestHippoGoldV1Dataset(unittest.TestCase):
             self.baseline_json_path.read_text(encoding="utf-8")
         )
         self.assertEqual(report.manifest.dataset_name, "hippo_gold_v1")
+        self.assertEqual(report.manifest.adapter, "HippoEngineAdapter")
+        self.assertNotIn(
+            "-dirty",
+            report.manifest.git_sha,
+            "Production baseline must be generated from a clean committed worktree",
+        )
+        self.assertRegex(
+            report.manifest.git_sha,
+            r"^[0-9a-f]{40}$",
+            "Production baseline git_sha must identify an exact commit",
+        )
+        dataset = BenchmarkDataset.from_json(self.data_path.read_text(encoding="utf-8"))
+        self.assertEqual(report.manifest.dataset_hash, dataset.compute_hash())
         self.assertIn("recall@3", report.aggregate_metrics)
         self.assertIn("forbidden_leakage@3", report.aggregate_metrics)
         self.assertIn("empty_accuracy@3", report.aggregate_metrics)
