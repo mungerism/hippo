@@ -246,13 +246,10 @@ class BenchmarkRunner:
 
             # Calculate Candidate Recall@20 from Stage 1 trace if available
             relevant_ids = [cid for cid, grade in qrels_for_q.items() if grade > 0]
-            if trace is not None and trace.candidate_stage:
+            if trace is not None and trace.candidate_stage and relevant_ids:
                 top20_cand_ids = {c.id for c in trace.candidate_stage[:20]}
-                if relevant_ids:
-                    cand_hits = sum(1 for rid in relevant_ids if rid in top20_cand_ids)
-                    cand_rec = cand_hits / float(len(relevant_ids))
-                else:
-                    cand_rec = 1.0
+                cand_hits = sum(1 for rid in relevant_ids if rid in top20_cand_ids)
+                cand_rec = cand_hits / float(len(relevant_ids))
                 cand_recalls_20.append(cand_rec)
                 metrics_dict["candidate_recall@20"] = round(cand_rec, 4)
 
@@ -270,6 +267,10 @@ class BenchmarkRunner:
                     relevant_ids=relevant_ids,
                     forbidden_ids=forbidden_for_q,
                     metrics=metrics_dict,
+                    expected_empty=q.expected_empty,
+                    scope=q.scope,
+                    project_id=q.project_id,
+                    user_id=q.user_id,
                     trace=trace,
                 )
             )
@@ -295,6 +296,11 @@ class BenchmarkRunner:
         if query_results:
             agg_metrics["avg_injected_tokens"] = round(total_injected_tokens / float(len(query_results)), 2)
 
+        if hasattr(self.adapter, "get_index_size_bytes"):
+            measured_index_size = self.adapter.get_index_size_bytes()
+            if measured_index_size is not None:
+                agg_metrics["index_size_bytes"] = float(measured_index_size)
+
         # Build manifest
         gate_cfg = getattr(self.adapter, "gate_config", SearchGateConfig())
         gate_thresholds = {
@@ -316,6 +322,10 @@ class BenchmarkRunner:
             }
         )
 
+        index_size_bytes = None
+        if hasattr(self.adapter, "get_index_size_bytes"):
+            index_size_bytes = self.adapter.get_index_size_bytes()
+
         manifest = RunManifest(
             run_id=run_id,
             timestamp=timestamp,
@@ -330,6 +340,9 @@ class BenchmarkRunner:
             k_values=self.k_values,
             seed=self.seed,
             duration_seconds=duration,
+            adapter=type(self.adapter).__name__,
+            ingest_profile="direct-facts",
+            index_size_bytes=index_size_bytes,
             host_info={"platform": sys.platform, "python_version": sys.version.split()[0]},
         )
 
@@ -411,6 +424,7 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
             "",
             "> **性能与吞吐概览**：",
             f"> - P50 延迟: `{p50} ms` | P95 延迟: `{p95} ms` | 平均注入: `{avg_tokens or 0} tokens`",
+            f"> - 索引体积: `{int(agg.get('index_size_bytes', 0))} bytes`",
         ])
 
     lines.extend([
@@ -500,6 +514,8 @@ def _validate_baseline_compatibility(
         ("max_injected", c.max_injected, b.max_injected),
         ("k_values", list(c.k_values), list(b.k_values)),
         ("gate_thresholds", dict(c.gate_thresholds), dict(b.gate_thresholds)),
+        ("adapter", c.adapter, b.adapter),
+        ("ingest_profile", c.ingest_profile, b.ingest_profile),
         (
             "embedding_profile",
             _embedding_signature(c.embedding_profile),
@@ -548,7 +564,7 @@ def compare_reports(
             if regressed:
                 has_security_violation = True
                 has_regression = True
-        elif "latency" in k or "token" in k:
+        elif "latency" in k or "token" in k or "index_size" in k:
             # Auxiliary performance metrics do not fail regression check
             regressed = False
         else:
