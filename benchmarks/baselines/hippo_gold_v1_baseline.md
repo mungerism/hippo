@@ -1,5 +1,7 @@
 # Hippo 召回评测报告: `hippo_gold_v1`
 
+> ⚠️ **状态：Replay 历史报告，未获生产 Baseline 批准。** 本报告由旧版离线 Replay 契约生成，不能代表真实 `HippoEngineAdapter` / Qdrant 生产链路。完成本 PR 修复后，必须使用 `--adapter engine` 重新生成并替换本文件及同名 JSON。
+
 - **运行 ID**: `eval_hippo_gold_v1_1790303831`
 - **时间戳**: `2026-09-25T02:37:10.858016+00:00`
 - **Git SHA**: `abd20a7b34a5d750115a5c67cd81ae64749c1890-dirty`
