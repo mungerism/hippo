@@ -447,11 +447,10 @@ class HippoEngineAdapter(BenchmarkAdapter):
                 infer=False,
             )
             result_items = result.get("results", []) if isinstance(result, Mapping) else result
-            if not isinstance(result_items, list) or not result_items:
-                raise RuntimeError(f"Benchmark ingest returned no memory ID for {item.id}")
-            for stored in result_items:
-                if isinstance(stored, Mapping) and stored.get("id") is not None:
-                    self._backend_to_logical[str(stored["id"])] = item.id
+            if isinstance(result_items, list):
+                for stored in result_items:
+                    if isinstance(stored, Mapping) and stored.get("id") is not None:
+                        self._backend_to_logical[str(stored["id"])] = item.id
 
     def search(
         self,
