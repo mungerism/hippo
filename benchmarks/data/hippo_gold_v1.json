@@ -755,103 +755,123 @@
     },
     {
       "id": "mem_time_001",
-      "text": "Today 2026-09-25: Released Hippo v0.2.0 evaluation harness with 4-stage trace logging.",
+      "text": "2026-09-25: Released Hippo v0.2.0 evaluation harness with 4-stage trace logging.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "release",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-25T09:00:00Z"
+      }
     },
     {
       "id": "mem_time_002",
-      "text": "Yesterday 2026-09-24: Merged Pull Request #59 closing Issue #53 for benchmark schemas and metrics.",
+      "text": "2026-09-24: Merged Pull Request #59 closing Issue #53 for benchmark schemas and metrics.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "timeline",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-24T10:00:00Z"
+      }
     },
     {
       "id": "mem_time_003",
-      "text": "In the past 24 hours: Fixed Ruff syntax check lint error F821 in engine.py by explicitly importing _is_valid_numeric.",
+      "text": "2026-09-24 18:00 UTC: Fixed Ruff syntax check lint error F821 in engine.py by explicitly importing _is_valid_numeric.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "pitfall",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-24T18:00:00Z"
+      }
     },
     {
       "id": "mem_time_004",
-      "text": "Last week: Decided to adopt ADR 0006 establishing zero production overhead evaluation seam.",
+      "text": "2026-09-18: Decided to adopt ADR 0006 establishing zero production overhead evaluation seam.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "decision",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-18T12:00:00Z"
+      }
     },
     {
       "id": "mem_time_005",
-      "text": "Two weeks ago: Implemented Spool retry governance and worker service launchd plist for macOS.",
+      "text": "2026-09-11: Implemented Spool retry governance and worker service launchd plist for macOS.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "architecture",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-11T12:00:00Z"
+      }
     },
     {
       "id": "mem_time_006",
-      "text": "This morning: Upgraded Qdrant client to version 1.11.0 to support batch deletion of evaluation collections.",
+      "text": "2026-09-25 08:00 UTC: Upgraded Qdrant client to version 1.11.0 to support batch deletion of evaluation collections.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "upgrade",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-25T08:00:00Z"
+      }
     },
     {
       "id": "mem_time_007",
-      "text": "Yesterday afternoon: Added UntrustedContextEnvelope unit tests verifying HTML escaping and anti-breakout.",
+      "text": "2026-09-24 15:00 UTC: Added UntrustedContextEnvelope unit tests verifying HTML escaping and anti-breakout.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "security",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-24T15:00:00Z"
+      }
     },
     {
       "id": "mem_time_008",
-      "text": "Last month: Selected BAAI/bge-small-en-v1.5 after evaluating embedding latency on Apple Silicon M3.",
+      "text": "2026-08-25: Selected BAAI/bge-small-en-v1.5 after evaluating embedding latency on Apple Silicon M3.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "decision",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-08-25T12:00:00Z"
+      }
     },
     {
       "id": "mem_time_009",
-      "text": "3 days ago: Implemented ReplayFixtureAdapter allowing offline deterministic benchmark replay.",
+      "text": "2026-09-22: Implemented ReplayFixtureAdapter allowing offline deterministic benchmark replay.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "architecture",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-22T12:00:00Z"
+      }
     },
     {
       "id": "mem_time_010",
-      "text": "Earlier this week: Documented PR review taxonomy in docs/agents/triage-labels.md.",
+      "text": "2026-09-23: Documented PR review taxonomy in docs/agents/triage-labels.md.",
       "scope": "project",
       "project_id": "hippo",
       "user_id": "alice",
       "status": "active",
       "category": "documentation",
-      "metadata": {}
+      "metadata": {
+        "event_time": "2026-09-23T12:00:00Z"
+      }
     },
     {
       "id": "mem_multi_001",
@@ -1153,7 +1173,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_001"
+      ]
     },
     {
       "query_id": "q_s1_002",
@@ -1163,7 +1187,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_001"
+      ]
     },
     {
       "query_id": "q_s1_003",
@@ -1173,7 +1201,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_001"
+      ]
     },
     {
       "query_id": "q_s1_004",
@@ -1183,7 +1215,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_002"
+      ]
     },
     {
       "query_id": "q_s1_005",
@@ -1193,7 +1229,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_002"
+      ]
     },
     {
       "query_id": "q_s1_006",
@@ -1203,7 +1243,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_002"
+      ]
     },
     {
       "query_id": "q_s1_007",
@@ -1213,7 +1257,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_003"
+      ]
     },
     {
       "query_id": "q_s1_008",
@@ -1223,7 +1271,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_003"
+      ]
     },
     {
       "query_id": "q_s1_009",
@@ -1233,7 +1285,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_003"
+      ]
     },
     {
       "query_id": "q_s1_010",
@@ -1243,7 +1299,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_004"
+      ]
     },
     {
       "query_id": "q_s1_011",
@@ -1253,7 +1313,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_004"
+      ]
     },
     {
       "query_id": "q_s1_012",
@@ -1263,7 +1327,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_004"
+      ]
     },
     {
       "query_id": "q_s1_013",
@@ -1273,7 +1341,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_005"
+      ]
     },
     {
       "query_id": "q_s1_014",
@@ -1283,7 +1355,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_005"
+      ]
     },
     {
       "query_id": "q_s1_015",
@@ -1293,7 +1369,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_005"
+      ]
     },
     {
       "query_id": "q_s1_016",
@@ -1303,7 +1383,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_006"
+      ]
     },
     {
       "query_id": "q_s1_017",
@@ -1313,7 +1397,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_006"
+      ]
     },
     {
       "query_id": "q_s1_018",
@@ -1323,7 +1411,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_007"
+      ]
     },
     {
       "query_id": "q_s1_019",
@@ -1333,7 +1425,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_007"
+      ]
     },
     {
       "query_id": "q_s1_020",
@@ -1343,7 +1439,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_008"
+      ]
     },
     {
       "query_id": "q_s1_021",
@@ -1353,7 +1453,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_008"
+      ]
     },
     {
       "query_id": "q_s1_022",
@@ -1363,7 +1467,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_008"
+      ]
     },
     {
       "query_id": "q_s1_023",
@@ -1373,7 +1481,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_009"
+      ]
     },
     {
       "query_id": "q_s1_024",
@@ -1383,7 +1495,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_009"
+      ]
     },
     {
       "query_id": "q_s1_025",
@@ -1393,7 +1509,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_009"
+      ]
     },
     {
       "query_id": "q_s1_026",
@@ -1403,7 +1523,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_010"
+      ]
     },
     {
       "query_id": "q_s1_027",
@@ -1413,7 +1537,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_010"
+      ]
     },
     {
       "query_id": "q_s1_028",
@@ -1423,7 +1551,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_011"
+      ]
     },
     {
       "query_id": "q_s1_029",
@@ -1433,7 +1565,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_011"
+      ]
     },
     {
       "query_id": "q_s1_030",
@@ -1443,7 +1579,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_011"
+      ]
     },
     {
       "query_id": "q_s1_031",
@@ -1453,7 +1593,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_012"
+      ]
     },
     {
       "query_id": "q_s1_032",
@@ -1463,7 +1607,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_012"
+      ]
     },
     {
       "query_id": "q_s1_033",
@@ -1473,7 +1621,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_012"
+      ]
     },
     {
       "query_id": "q_s1_034",
@@ -1483,7 +1635,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_001"
+      ]
     },
     {
       "query_id": "q_s1_035",
@@ -1493,7 +1649,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_001"
+      ]
     },
     {
       "query_id": "q_s1_036",
@@ -1503,7 +1663,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_001"
+      ]
     },
     {
       "query_id": "q_s1_037",
@@ -1513,7 +1677,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_002"
+      ]
     },
     {
       "query_id": "q_s1_038",
@@ -1523,7 +1691,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_002"
+      ]
     },
     {
       "query_id": "q_s1_039",
@@ -1533,7 +1705,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_002"
+      ]
     },
     {
       "query_id": "q_s1_040",
@@ -1543,7 +1719,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_003"
+      ]
     },
     {
       "query_id": "q_s1_041",
@@ -1553,7 +1733,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_003"
+      ]
     },
     {
       "query_id": "q_s1_042",
@@ -1563,7 +1747,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_004"
+      ]
     },
     {
       "query_id": "q_s1_043",
@@ -1573,7 +1761,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_004"
+      ]
     },
     {
       "query_id": "q_s1_044",
@@ -1583,7 +1775,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_005"
+      ]
     },
     {
       "query_id": "q_s1_045",
@@ -1593,7 +1789,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "exact_paraphrase_term",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_005"
+      ]
     },
     {
       "query_id": "q_s2_001",
@@ -1603,7 +1803,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_005"
+      ]
     },
     {
       "query_id": "q_s2_002",
@@ -1613,7 +1817,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_001"
+      ]
     },
     {
       "query_id": "q_s2_003",
@@ -1623,7 +1831,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_002"
+      ]
     },
     {
       "query_id": "q_s2_004",
@@ -1633,7 +1845,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_003"
+      ]
     },
     {
       "query_id": "q_s2_005",
@@ -1643,7 +1859,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_004"
+      ]
     },
     {
       "query_id": "q_s2_006",
@@ -1653,7 +1873,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_006"
+      ]
     },
     {
       "query_id": "q_s2_007",
@@ -1663,7 +1887,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_007"
+      ]
     },
     {
       "query_id": "q_s2_008",
@@ -1673,7 +1901,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_008"
+      ]
     },
     {
       "query_id": "q_s2_009",
@@ -1683,7 +1915,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_009"
+      ]
     },
     {
       "query_id": "q_s2_010",
@@ -1693,7 +1929,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_010"
+      ]
     },
     {
       "query_id": "q_s2_011",
@@ -1703,7 +1943,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_014"
+      ]
     },
     {
       "query_id": "q_s2_012",
@@ -1713,7 +1957,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_015"
+      ]
     },
     {
       "query_id": "q_s2_013",
@@ -1723,7 +1971,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_006"
+      ]
     },
     {
       "query_id": "q_s2_014",
@@ -1733,7 +1985,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_007"
+      ]
     },
     {
       "query_id": "q_s2_015",
@@ -1743,7 +1999,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_008"
+      ]
     },
     {
       "query_id": "q_s2_016",
@@ -1753,7 +2013,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_009"
+      ]
     },
     {
       "query_id": "q_s2_017",
@@ -1763,7 +2027,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_010"
+      ]
     },
     {
       "query_id": "q_s2_018",
@@ -1773,7 +2041,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_013"
+      ]
     },
     {
       "query_id": "q_s2_019",
@@ -1783,7 +2055,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_001"
+      ]
     },
     {
       "query_id": "q_s2_020",
@@ -1793,7 +2069,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_002"
+      ]
     },
     {
       "query_id": "q_s2_021",
@@ -1803,7 +2083,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_002"
+      ]
     },
     {
       "query_id": "q_s2_022",
@@ -1813,7 +2097,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_001"
+      ]
     },
     {
       "query_id": "q_s2_023",
@@ -1823,7 +2111,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_003"
+      ]
     },
     {
       "query_id": "q_s2_024",
@@ -1833,7 +2125,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_007"
+      ]
     },
     {
       "query_id": "q_s2_025",
@@ -1843,7 +2139,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "scope_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_004"
+      ]
     },
     {
       "query_id": "q_s3_001",
@@ -1853,7 +2153,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_002",
@@ -1863,7 +2165,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_003",
@@ -1873,7 +2177,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_004",
@@ -1883,7 +2189,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_005",
@@ -1893,7 +2201,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_006",
@@ -1903,7 +2213,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_007",
@@ -1913,7 +2225,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_008",
@@ -1923,7 +2237,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_009",
@@ -1933,7 +2249,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_010",
@@ -1943,7 +2261,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_011",
@@ -1953,7 +2273,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_012",
@@ -1963,7 +2285,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_013",
@@ -1973,7 +2297,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_014",
@@ -1983,7 +2309,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_015",
@@ -1993,7 +2321,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_016",
@@ -2003,7 +2333,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_017",
@@ -2013,7 +2345,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_018",
@@ -2023,7 +2357,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_019",
@@ -2033,7 +2369,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_020",
@@ -2043,7 +2381,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_021",
@@ -2053,7 +2393,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_022",
@@ -2063,7 +2405,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_023",
@@ -2073,7 +2417,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_024",
@@ -2083,7 +2429,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s3_025",
@@ -2093,7 +2441,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "identity_isolation",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s4_001",
@@ -2103,7 +2453,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_001_new"
+      ]
     },
     {
       "query_id": "q_s4_002",
@@ -2113,7 +2467,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_001_new"
+      ]
     },
     {
       "query_id": "q_s4_003",
@@ -2123,7 +2481,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_001_new"
+      ]
     },
     {
       "query_id": "q_s4_004",
@@ -2133,7 +2495,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_002_new"
+      ]
     },
     {
       "query_id": "q_s4_005",
@@ -2143,7 +2509,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_002_new"
+      ]
     },
     {
       "query_id": "q_s4_006",
@@ -2153,7 +2523,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_002_new"
+      ]
     },
     {
       "query_id": "q_s4_007",
@@ -2163,7 +2537,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_003_new"
+      ]
     },
     {
       "query_id": "q_s4_008",
@@ -2173,7 +2551,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_003_new"
+      ]
     },
     {
       "query_id": "q_s4_009",
@@ -2183,7 +2565,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_004_new"
+      ]
     },
     {
       "query_id": "q_s4_010",
@@ -2193,7 +2579,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_004_new"
+      ]
     },
     {
       "query_id": "q_s4_011",
@@ -2203,7 +2593,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_005_new"
+      ]
     },
     {
       "query_id": "q_s4_012",
@@ -2213,7 +2607,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_005_new"
+      ]
     },
     {
       "query_id": "q_s4_013",
@@ -2223,7 +2621,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_006_new"
+      ]
     },
     {
       "query_id": "q_s4_014",
@@ -2233,7 +2635,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_006_new"
+      ]
     },
     {
       "query_id": "q_s4_015",
@@ -2243,7 +2649,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_007_new"
+      ]
     },
     {
       "query_id": "q_s4_016",
@@ -2253,7 +2663,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_007_new"
+      ]
     },
     {
       "query_id": "q_s4_017",
@@ -2263,7 +2677,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_008_new"
+      ]
     },
     {
       "query_id": "q_s4_018",
@@ -2273,7 +2691,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_008_new"
+      ]
     },
     {
       "query_id": "q_s4_019",
@@ -2283,7 +2705,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_009_new"
+      ]
     },
     {
       "query_id": "q_s4_020",
@@ -2293,7 +2719,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_009_new"
+      ]
     },
     {
       "query_id": "q_s4_021",
@@ -2303,7 +2733,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_010_new"
+      ]
     },
     {
       "query_id": "q_s4_022",
@@ -2313,7 +2747,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_010_new"
+      ]
     },
     {
       "query_id": "q_s4_023",
@@ -2323,7 +2761,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_001_new"
+      ]
     },
     {
       "query_id": "q_s4_024",
@@ -2333,7 +2775,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_002_new"
+      ]
     },
     {
       "query_id": "q_s4_025",
@@ -2343,7 +2789,11 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "lifecycle_conflict",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_life_007_new"
+      ]
     },
     {
       "query_id": "q_s5_001",
@@ -2355,7 +2805,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "today"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_001"
+      ]
     },
     {
       "query_id": "q_s5_002",
@@ -2367,7 +2821,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "today"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_001"
+      ]
     },
     {
       "query_id": "q_s5_003",
@@ -2379,7 +2837,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "today"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_001"
+      ]
     },
     {
       "query_id": "q_s5_004",
@@ -2391,7 +2853,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "yesterday"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_002"
+      ]
     },
     {
       "query_id": "q_s5_005",
@@ -2403,7 +2869,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "yesterday"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_002"
+      ]
     },
     {
       "query_id": "q_s5_006",
@@ -2415,7 +2885,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "past_24h"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_003"
+      ]
     },
     {
       "query_id": "q_s5_007",
@@ -2427,7 +2901,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "past_24h"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_003"
+      ]
     },
     {
       "query_id": "q_s5_008",
@@ -2439,7 +2917,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "last_week"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_004"
+      ]
     },
     {
       "query_id": "q_s5_009",
@@ -2451,7 +2933,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "last_week"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_004"
+      ]
     },
     {
       "query_id": "q_s5_010",
@@ -2463,7 +2949,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "two_weeks_ago"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_005"
+      ]
     },
     {
       "query_id": "q_s5_011",
@@ -2475,7 +2965,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "two_weeks_ago"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_005"
+      ]
     },
     {
       "query_id": "q_s5_012",
@@ -2487,7 +2981,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "this_morning"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_006"
+      ]
     },
     {
       "query_id": "q_s5_013",
@@ -2499,7 +2997,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "this_morning"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_006"
+      ]
     },
     {
       "query_id": "q_s5_014",
@@ -2511,7 +3013,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "yesterday_pm"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_007"
+      ]
     },
     {
       "query_id": "q_s5_015",
@@ -2523,7 +3029,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "yesterday_pm"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_007"
+      ]
     },
     {
       "query_id": "q_s5_016",
@@ -2535,7 +3045,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "last_month"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_008"
+      ]
     },
     {
       "query_id": "q_s5_017",
@@ -2547,7 +3061,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "last_month"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_008"
+      ]
     },
     {
       "query_id": "q_s5_018",
@@ -2559,7 +3077,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "3_days_ago"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_009"
+      ]
     },
     {
       "query_id": "q_s5_019",
@@ -2571,7 +3093,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "3_days_ago"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_009"
+      ]
     },
     {
       "query_id": "q_s5_020",
@@ -2583,7 +3109,11 @@
       "category": "temporal_intent",
       "metadata": {
         "time_marker": "earlier_this_week"
-      }
+      },
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_time_010"
+      ]
     },
     {
       "query_id": "q_s6_001",
@@ -2593,7 +3123,14 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_multi_001",
+        "mem_multi_002",
+        "mem_multi_003",
+        "mem_multi_004"
+      ]
     },
     {
       "query_id": "q_s6_002",
@@ -2603,7 +3140,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_multi_001",
+        "mem_multi_002"
+      ]
     },
     {
       "query_id": "q_s6_003",
@@ -2613,7 +3155,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_multi_003",
+        "mem_multi_004"
+      ]
     },
     {
       "query_id": "q_s6_004",
@@ -2623,7 +3170,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pitfall_001",
+        "mem_pitfall_005"
+      ]
     },
     {
       "query_id": "q_s6_005",
@@ -2633,7 +3185,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pitfall_002",
+        "mem_pitfall_003"
+      ]
     },
     {
       "query_id": "q_s6_006",
@@ -2643,7 +3200,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_008",
+        "mem_arch_009"
+      ]
     },
     {
       "query_id": "q_s6_007",
@@ -2653,7 +3215,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_002",
+        "mem_arch_003",
+        "mem_arch_004"
+      ]
     },
     {
       "query_id": "q_s6_008",
@@ -2663,7 +3231,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_dev_001",
+        "mem_dev_002",
+        "mem_dev_003"
+      ]
     },
     {
       "query_id": "q_s6_009",
@@ -2673,7 +3247,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_005",
+        "mem_arch_006",
+        "mem_arch_013"
+      ]
     },
     {
       "query_id": "q_s6_010",
@@ -2683,7 +3263,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_pref_001",
+        "mem_pref_002",
+        "mem_pref_003"
+      ]
     },
     {
       "query_id": "q_s6_011",
@@ -2693,7 +3279,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_004",
+        "mem_dev_006",
+        "mem_pitfall_004"
+      ]
     },
     {
       "query_id": "q_s6_012",
@@ -2703,7 +3295,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_001",
+        "mem_arch_014",
+        "mem_pitfall_005"
+      ]
     },
     {
       "query_id": "q_s6_013",
@@ -2713,7 +3311,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_arch_011",
+        "mem_arch_012"
+      ]
     },
     {
       "query_id": "q_s6_014",
@@ -2723,7 +3326,13 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_ext_003",
+        "mem_ext_004",
+        "mem_ext_005"
+      ]
     },
     {
       "query_id": "q_s6_015",
@@ -2733,7 +3342,12 @@
       "user_id": "alice",
       "expected_empty": false,
       "category": "multi_evidence",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": [
+        "mem_ext_007",
+        "mem_ext_008"
+      ]
     },
     {
       "query_id": "q_s7_001",
@@ -2743,7 +3357,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_002",
@@ -2753,7 +3369,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_003",
@@ -2763,7 +3381,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_004",
@@ -2773,7 +3393,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_005",
@@ -2783,7 +3405,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_006",
@@ -2793,7 +3417,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_007",
@@ -2803,7 +3429,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_008",
@@ -2813,7 +3441,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_009",
@@ -2823,7 +3453,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_010",
@@ -2833,7 +3465,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_011",
@@ -2843,7 +3477,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_012",
@@ -2853,7 +3489,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_013",
@@ -2863,7 +3501,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_014",
@@ -2873,7 +3513,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_015",
@@ -2883,7 +3525,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_016",
@@ -2893,7 +3537,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_017",
@@ -2903,7 +3549,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_018",
@@ -2913,7 +3561,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_019",
@@ -2923,7 +3573,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_020",
@@ -2933,7 +3585,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_021",
@@ -2943,7 +3597,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_022",
@@ -2953,7 +3609,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_023",
@@ -2963,7 +3621,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_024",
@@ -2973,7 +3633,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_025",
@@ -2983,7 +3645,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_026",
@@ -2993,7 +3657,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_027",
@@ -3003,7 +3669,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_028",
@@ -3013,7 +3681,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_029",
@@ -3023,7 +3693,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_030",
@@ -3033,7 +3705,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_031",
@@ -3043,7 +3717,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_032",
@@ -3053,7 +3729,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_033",
@@ -3063,7 +3741,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_034",
@@ -3073,7 +3753,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s7_035",
@@ -3083,7 +3765,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "hard_negative",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_001",
@@ -3093,7 +3777,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_002",
@@ -3103,7 +3789,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_003",
@@ -3113,7 +3801,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_004",
@@ -3123,7 +3813,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_005",
@@ -3133,7 +3825,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_006",
@@ -3143,7 +3837,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_007",
@@ -3153,7 +3849,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_008",
@@ -3163,7 +3861,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_009",
@@ -3173,7 +3873,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_010",
@@ -3183,7 +3885,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_011",
@@ -3193,7 +3897,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_012",
@@ -3203,7 +3909,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_013",
@@ -3213,7 +3921,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_014",
@@ -3223,7 +3933,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_015",
@@ -3233,7 +3945,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_016",
@@ -3243,7 +3957,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_017",
@@ -3253,7 +3969,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_018",
@@ -3263,7 +3981,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_019",
@@ -3273,7 +3993,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     },
     {
       "query_id": "q_s8_020",
@@ -3283,7 +4005,9 @@
       "user_id": "alice",
       "expected_empty": true,
       "category": "transient_injection_defense",
-      "metadata": {}
+      "metadata": {},
+      "query_time": "2026-09-25T12:00:00Z",
+      "evidence_ids": []
     }
   ],
   "qrels": {
