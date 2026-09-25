@@ -38,6 +38,7 @@ from benchmarks.schemas import (
 )
 from hippo_memory.config import HippoConfig
 from hippo_memory.gate import SearchGateConfig
+from benchmarks.gold.specification import audit_security_gates
 
 logger = logging.getLogger(__name__)
 
@@ -218,13 +219,19 @@ class BenchmarkRunner:
         self.adapter.ingest_corpus(dataset.corpus)
 
         query_results: List[QueryEvaluationResult] = []
+        latencies_ms: List[float] = []
+        cand_recalls_20: List[float] = []
+        total_injected_tokens = 0
 
         for q in dataset.queries:
+            q_start = time.perf_counter()
             retrieved_ids, trace = self.adapter.search(
                 query=q,
                 limit=self.max_injected,
                 capture_trace=capture_trace,
             )
+            q_latency = round((time.perf_counter() - q_start) * 1000.0, 3)
+            latencies_ms.append(q_latency)
 
             qrels_for_q = dataset.qrels.get(q.query_id, {})
             forbidden_for_q = dataset.forbidden.get(q.query_id, [])
@@ -237,7 +244,22 @@ class BenchmarkRunner:
                 k_values=self.k_values,
             )
 
+            # Calculate Candidate Recall@20 from Stage 1 trace if available
             relevant_ids = [cid for cid, grade in qrels_for_q.items() if grade > 0]
+            if trace is not None and trace.candidate_stage:
+                top20_cand_ids = {c.id for c in trace.candidate_stage[:20]}
+                if relevant_ids:
+                    cand_hits = sum(1 for rid in relevant_ids if rid in top20_cand_ids)
+                    cand_rec = cand_hits / float(len(relevant_ids))
+                else:
+                    cand_rec = 1.0
+                cand_recalls_20.append(cand_rec)
+                metrics_dict["candidate_recall@20"] = round(cand_rec, 4)
+
+            # Estimate injected tokens (roughly 1 token per 4 chars)
+            if retrieved_ids:
+                retrieved_chars = sum(len(c.text) for c in dataset.corpus if c.id in retrieved_ids)
+                total_injected_tokens += max(1, retrieved_chars // 4)
 
             query_results.append(
                 QueryEvaluationResult(
@@ -257,6 +279,21 @@ class BenchmarkRunner:
         # Aggregate metrics
         agg_metrics = aggregate_metrics(query_results)
         cat_metrics = aggregate_by_category(query_results)
+
+        # Append auxiliary latency and candidate recall metrics
+        if cand_recalls_20:
+            agg_metrics["candidate_recall@20"] = round(sum(cand_recalls_20) / len(cand_recalls_20), 4)
+
+        if latencies_ms:
+            sorted_lat = sorted(latencies_ms)
+            p50_idx = int(len(sorted_lat) * 0.50)
+            p95_idx = min(len(sorted_lat) - 1, int(len(sorted_lat) * 0.95))
+            agg_metrics["latency_p50_ms"] = round(sorted_lat[p50_idx], 2)
+            agg_metrics["latency_p95_ms"] = round(sorted_lat[p95_idx], 2)
+            agg_metrics["latency_avg_ms"] = round(sum(sorted_lat) / len(sorted_lat), 2)
+
+        if query_results:
+            agg_metrics["avg_injected_tokens"] = round(total_injected_tokens / float(len(query_results)), 2)
 
         # Build manifest
         gate_cfg = getattr(self.adapter, "gate_config", SearchGateConfig())
@@ -319,13 +356,30 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         f"- **Mem0 版本**: `{m.mem0_version}` | **Hippo 版本**: `{m.hippo_version}`",
         f"- **评测耗时**: `{m.duration_seconds}s` (共 {len(report.query_results)} 道题目)",
         "",
+        "## 0. 安全硬门禁审查 (Security Hard Gates)",
+        "",
+    ]
+
+    gate_audit = audit_security_gates(report)
+    audit_icon = "✅ 全部通过 (PASSED)" if gate_audit["passed"] else "❌ 门禁违规 (FAILED)"
+    lines.extend([
+        f"- **门禁判定**: **{audit_icon}**",
+        f"- **硬负样本数与占比**: `{gate_audit['negative_queries_count']}/{gate_audit['total_queries']}` (`{gate_audit['negative_ratio']:.2%}`, 最低要求 >= 25%) ",
+        "",
+        "| 安全硬门禁不变量 | 测量值 | 门禁阈值 | 判定 |",
+        "| :--- | :---: | :---: | :---: |",
+        f"| **Cross-User Leakage** (跨用户泄漏) | **{gate_audit['cross_user_leakage']}** | 0 | {'✅ 合规' if gate_audit['cross_user_leakage'] == 0 else '❌ 违规'} |",
+        f"| **Cross-Project Leakage** (跨项目泄漏) | **{gate_audit['cross_project_leakage']}** | 0 | {'✅ 合规' if gate_audit['cross_project_leakage'] == 0 else '❌ 违规'} |",
+        f"| **Superseded Leakage** (过期事实泄漏) | **{gate_audit['superseded_leakage']}** | 0 | {'✅ 合规' if gate_audit['superseded_leakage'] == 0 else '❌ 违规'} |",
+        f"| **Hard-Negative FPR** (硬负样本假阳率) | **{gate_audit['hard_negative_fpr']:.2%}** | <= 2.00% | {'✅ 合规' if gate_audit['hard_negative_fpr'] <= 0.02 else '❌ 违规'} |",
+        "",
         "## 1. 核心召回与安全指标汇总 (Primary Metrics)",
         "",
         "> 注：`@3` 为 Hippo 生产默认主报告口径（对齐 `max_injected=3`）。",
         "",
         "| 指标 | @1 | @3 (Hippo 主口径) | @5 | @10 |",
         "| :--- | :---: | :---: | :---: | :---: |",
-    ]
+    ])
 
     for metric_name, label in [
         ("recall", "Recall (召回率)"),
@@ -341,9 +395,25 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         v10 = agg.get(f"{metric_name}@10", 0.0)
         lines.append(f"| **{label}** | {v1:.4f} | **{v3:.4f}** | {v5:.4f} | {v10:.4f} |")
 
+    cand_rec = agg.get("candidate_recall@20")
+    if cand_rec is not None:
+        lines.append(f"| **Candidate Recall@20** (粗筛上限) | - | - | - | **{cand_rec:.4f}** |")
+
     mrr_val = agg.get("mrr", 0.0)
+    lines.append(f"| **MRR (平均倒数排名)** | - | **{mrr_val:.4f}** | - | - |")
+
+    # Add performance latency metrics if present
+    p50 = agg.get("latency_p50_ms")
+    p95 = agg.get("latency_p95_ms")
+    avg_tokens = agg.get("avg_injected_tokens")
+    if p50 is not None and p95 is not None:
+        lines.extend([
+            "",
+            "> **性能与吞吐概览**：",
+            f"> - P50 延迟: `{p50} ms` | P95 延迟: `{p95} ms` | 平均注入: `{avg_tokens or 0} tokens`",
+        ])
+
     lines.extend([
-        f"| **MRR (平均倒数排名)** | - | **{mrr_val:.4f}** | - | - |",
         "",
         "## 2. 分类能力评估 (Category Breakdown @3)",
         "",
@@ -478,6 +548,9 @@ def compare_reports(
             if regressed:
                 has_security_violation = True
                 has_regression = True
+        elif "latency" in k or "token" in k:
+            # Auxiliary performance metrics do not fail regression check
+            regressed = False
         else:
             regressed = delta < -tolerance
             if regressed:
@@ -644,6 +717,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Explicit isolated Qdrant collection name (engine adapter only).",
     )
 
+    parser.add_argument(
+        "--report-name",
+        type=str,
+        default=None,
+        help="Explicit base filename for generated reports (without extension).",
+    )
+
     args = parser.parse_args(argv)
 
     # 1. Load dataset
@@ -675,16 +755,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         # 4. Save report
         out_dir = Path(args.output_dir)
-        json_path, md_path = save_report(report, out_dir, base_name=f"report_{dataset.name}")
+        report_base = args.report_name or f"report_{dataset.name}"
+        json_path, md_path = save_report(report, out_dir, base_name=report_base)
         print(f"Evaluation succeeded!")
         print(f"JSON report: {json_path}")
         print(f"Markdown summary: {md_path}")
         print("-" * 50)
         print(f"Recall@3: {report.aggregate_metrics.get('recall@3', 0.0):.4f}")
         print(f"Precision@3: {report.aggregate_metrics.get('precision@3', 0.0):.4f}")
+        print(f"Candidate Recall@20: {report.aggregate_metrics.get('candidate_recall@20', 0.0):.4f}")
         print(f"Forbidden Leakage@3: {report.aggregate_metrics.get('forbidden_leakage@3', 0.0):.0f}")
         print(f"Empty Accuracy@3: {report.aggregate_metrics.get('empty_accuracy@3', 0.0):.4f}")
+        p50 = report.aggregate_metrics.get("latency_p50_ms")
+        p95 = report.aggregate_metrics.get("latency_p95_ms")
+        if p50 is not None and p95 is not None:
+            print(f"Latency P50: {p50:.2f}ms | P95: {p95:.2f}ms")
         print("-" * 50)
+
+        # Audit security gates
+        gate_audit = audit_security_gates(report)
+        print(f"Security Hard Gates: {'PASSED ✅' if gate_audit['passed'] else 'FAILED ❌'}")
+        if not gate_audit["passed"]:
+            for violation in gate_audit["violations"]:
+                print(f"  [SECURITY VIOLATION] {violation}", file=sys.stderr)
+            return 2
 
         # 5. Compare against baseline if specified
         if args.baseline:

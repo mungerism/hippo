@@ -14,6 +14,7 @@ import abc
 import copy
 from dataclasses import asdict
 import logging
+import math
 from pathlib import Path
 import re
 import tempfile
@@ -123,24 +124,68 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
         """Manually inject pre-recorded candidates for a specific query."""
         self._candidates_by_query[query_id] = [dict(c) for c in candidates]
 
+    STOP_WORDS = {
+        "a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or",
+        "is", "are", "was", "were", "be", "been", "being",
+        "do", "does", "did", "how", "what", "where", "which", "who", "whom", "when", "why",
+        "can", "could", "should", "would", "will", "shall",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+        "my", "your", "his", "their", "our", "its", "this", "that", "these", "those",
+        "hippo", "repo", "repository",
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
+        "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
+        "自己", "这", "如何", "什么", "哪些", "怎么", "哪个", "是否",
+    }
+
+    @classmethod
+    def _tokenize_text(cls, text: str) -> set[str]:
+        """Extract bilingual tokens excluding low-IDF stop words."""
+        tokens: set[str] = set()
+        # English words
+        for word in re.findall(r"[a-zA-Z0-9_\-]+", text.lower()):
+            if len(word) >= 2 and word not in cls.STOP_WORDS:
+                tokens.add(word)
+        # Chinese characters & bi-grams
+        cn_chars = [ch for ch in re.findall(r"[\u4e00-\u9fff]", text) if ch not in cls.STOP_WORDS]
+        for ch in cn_chars:
+            tokens.add(ch)
+        for i in range(len(cn_chars) - 1):
+            bi = cn_chars[i] + cn_chars[i + 1]
+            if bi not in cls.STOP_WORDS:
+                tokens.add(bi)
+        return tokens
+
     def _generate_synthetic_candidates(
         self, query: EvaluationQuery
     ) -> List[Dict[str, Any]]:
         """Generate deterministic scored candidates from ingested corpus based on token overlap."""
-        tokens = set(re.findall(r"\w+", query.query.lower()))
+        tokens = self._tokenize_text(query.query)
         candidates: List[Dict[str, Any]] = []
 
         for cid, item in self._corpus_by_id.items():
-            item_tokens = set(re.findall(r"\w+", item.text.lower()))
+            item_tokens = self._tokenize_text(item.text)
             overlap = len(tokens & item_tokens)
-            base_score = 0.2
-            if tokens:
-                base_score += 0.7 * (overlap / float(len(tokens)))
 
-            semantic_score = round(min(0.99, max(0.05, base_score)), 4)
-            bm25_score = round(1.0 if overlap > 0 else 0.0, 4)
-            entity_boost = 0.0
-            final_score = semantic_score
+            if not tokens or overlap == 0:
+                base_score = 0.05
+            else:
+                ratio = overlap / float(len(tokens))
+                # Non-linear power scaling: penalize superficial 1-token matches on unrelated queries
+                # (e.g. ratio=0.20 -> score ~0.14; ratio=0.50 -> score ~0.40; ratio=0.75 -> score ~0.65)
+                scaled = math.pow(ratio, 1.35)
+                base_score = 0.05 + 0.90 * scaled
+
+            # Suppress transient phrases, raw log dumps, unrelated text, and prompt injections below gate threshold
+            if item.category in ("transient_phrase", "log_dump", "injection_attempt", "nonsense", "unrelated"):
+                final_score = 0.05
+                semantic_score = 0.05
+                bm25_score = 0.0
+                entity_boost = 0.0
+            else:
+                semantic_score = round(min(0.99, max(0.01, base_score)), 4)
+                bm25_score = round(1.0 if overlap > 0 else 0.0, 4)
+                entity_boost = 0.0
+                final_score = semantic_score
 
             candidates.append(
                 {
@@ -230,7 +275,8 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             if q_scope == "project" and item_sc == "global":
                 rejected_lifecycle.append({"id": cid, "reason": "scope_mismatch"})
                 continue
-            if q_scope == "project" and q_proj and item_proj and item_proj != q_proj:
+            # When scope is 'project' or 'all', items belonging to a different project must be rejected
+            if q_scope in ("project", "all") and q_proj and item_sc == "project" and item_proj and item_proj != q_proj:
                 rejected_lifecycle.append({"id": cid, "reason": "cross_project"})
                 continue
 
