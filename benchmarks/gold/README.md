@@ -99,6 +99,7 @@ uv run python -m benchmarks.runner \
 - Recall@3 / nDCG@3 / MRR 任一绝对下降超过 **2 个百分点**即阻断；P95 延迟同 profile 上升超过 **10%**先告警，连续确认后升级为阻断；
 - 四大安全硬门禁必须全部保持绿色合格（Leakage 恒为 0，FPR $\le 2\%$）；
 - Baseline manifest 必须记录 `adapter=HippoEngineAdapter`、embedding profile、gate 配置、dataset hash、`max_injected`、ingest profile 与可获得的索引体积；Replay/unknown adapter 的报告不得晋升为生产 Baseline；
+- 生产 Baseline 必须从 **clean committed worktree** 生成；manifest `git_sha` 必须是精确的 40 位 commit SHA，禁止 `-dirty`，且评测 adapter 只能做 ID/trace 归一化，不得在生产结果之后追加 benchmark-only filtering/re-ranking；
 - 同一 PR 中必须同步提交生成的 Markdown 差异对比报告。
 
 ### 2. 回滚机制 (Rollback Procedure)
