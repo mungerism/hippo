@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import abc
 import copy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import logging
-import math
 from pathlib import Path
 import re
 import tempfile
@@ -102,6 +101,7 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             else {}
         )
         self.gate_config = gate_config or SearchGateConfig()
+        self._backend_to_logical: Dict[str, str] = {}
         self._embedding_profile = embedding_profile or {
             "provider": "replay",
             "model": "fixture",
@@ -170,22 +170,14 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
                 base_score = 0.05
             else:
                 ratio = overlap / float(len(tokens))
-                # Non-linear power scaling: penalize superficial 1-token matches on unrelated queries
-                # (e.g. ratio=0.20 -> score ~0.14; ratio=0.50 -> score ~0.40; ratio=0.75 -> score ~0.65)
-                scaled = math.pow(ratio, 1.35)
-                base_score = 0.05 + 0.90 * scaled
+                # Deterministic lexical proxy only. Gold labels/categories must never
+                # influence scores, otherwise the fixture can "know" the answer.
+                base_score = 0.05 + 0.90 * (ratio ** 1.35)
 
-            # Suppress transient phrases, raw log dumps, unrelated text, and prompt injections below gate threshold
-            if item.category in ("transient_phrase", "log_dump", "injection_attempt", "nonsense", "unrelated"):
-                final_score = 0.05
-                semantic_score = 0.05
-                bm25_score = 0.0
-                entity_boost = 0.0
-            else:
-                semantic_score = round(min(0.99, max(0.01, base_score)), 4)
-                bm25_score = round(1.0 if overlap > 0 else 0.0, 4)
-                entity_boost = 0.0
-                final_score = semantic_score
+            semantic_score = round(min(0.99, max(0.01, base_score)), 4)
+            bm25_score = round(1.0 if overlap > 0 else 0.0, 4)
+            entity_boost = 0.0
+            final_score = semantic_score
 
             candidates.append(
                 {
@@ -393,6 +385,7 @@ class HippoEngineAdapter(BenchmarkAdapter):
         cfg.get_mem0_config = isolated_get_mem0_config
 
         self.collection_name = isolated_coll
+        self._backend_to_logical: Dict[str, str] = {}
         self.config = cfg
         self.gate_config = (
             cfg.get_gate_config() if hasattr(cfg, "get_gate_config") else SearchGateConfig()
@@ -432,13 +425,19 @@ class HippoEngineAdapter(BenchmarkAdapter):
 
             # infer=False preserves a one-corpus-item -> one-memory relationship and
             # avoids LLM extraction rewriting/splitting benchmark facts.
-            self.engine.add(
+            result = self.engine.add(
                 text=item.text,
                 user_id=item.user_id or self.config.user_id,
                 agent_id=item.project_id if item.scope == "project" else "global",
                 metadata=meta,
                 infer=False,
             )
+            result_items = result.get("results", []) if isinstance(result, Mapping) else result
+            if not isinstance(result_items, list) or not result_items:
+                raise RuntimeError(f"Benchmark ingest returned no memory ID for {item.id}")
+            for stored in result_items:
+                if isinstance(stored, Mapping) and stored.get("id") is not None:
+                    self._backend_to_logical[str(stored["id"])] = item.id
 
     def search(
         self,
@@ -455,11 +454,46 @@ class HippoEngineAdapter(BenchmarkAdapter):
             limit=limit,
             query_id=query.query_id,
         )
-        def logical_id(item: Mapping[str, Any]) -> str:
-            meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
-            return str(meta.get("benchmark_id") or item.get("benchmark_id") or item.get("id"))
+
+        def logical_id(value: Any) -> str:
+            if isinstance(value, Mapping):
+                meta = value.get("metadata") if isinstance(value.get("metadata"), Mapping) else {}
+                raw_id = str(value.get("id"))
+                return str(
+                    meta.get("benchmark_id")
+                    or value.get("benchmark_id")
+                    or self._backend_to_logical.get(raw_id)
+                    or raw_id
+                )
+            raw_id = str(value)
+            return self._backend_to_logical.get(raw_id, raw_id)
 
         retrieved_ids = [logical_id(item) for item in accepted]
+        if trace is not None:
+            trace = EvaluationTrace(
+                query_id=trace.query_id,
+                query=trace.query,
+                candidate_stage=[
+                    replace(candidate, id=logical_id(candidate.id))
+                    for candidate in trace.candidate_stage
+                ],
+                lifecycle_scope_stage=LifecycleScopeTrace(
+                    passed_ids=[logical_id(i) for i in trace.lifecycle_scope_stage.passed_ids],
+                    rejected=[
+                        {**item, "id": logical_id(item.get("id"))}
+                        for item in trace.lifecycle_scope_stage.rejected
+                    ],
+                ),
+                gate_stage=GateTrace(
+                    passed_ids=[logical_id(i) for i in trace.gate_stage.passed_ids],
+                    rejected=[
+                        {**item, "id": logical_id(item.get("id"))}
+                        for item in trace.gate_stage.rejected
+                    ],
+                    gate_config=trace.gate_stage.gate_config,
+                ),
+                final_stage_ids=[logical_id(i) for i in trace.final_stage_ids],
+            )
         return retrieved_ids, trace if capture_trace else None
 
     def cleanup(self) -> None:
@@ -474,4 +508,5 @@ class HippoEngineAdapter(BenchmarkAdapter):
         except Exception as e:
             logger.warning("Failed to delete isolated collection %s: %s", self.collection_name, e)
         finally:
+            self._backend_to_logical.clear()
             self._temp_dir.cleanup()
