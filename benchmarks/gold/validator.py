@@ -11,6 +11,7 @@ Verifies:
 
 from __future__ import annotations
 
+from datetime import datetime
 import re
 from typing import Any, Dict, List, Sequence, Set
 
@@ -24,6 +25,17 @@ class DatasetValidationError(ValueError):
 
 
 # Patterns indicating accidental leakage of sensitive tokens or credentials
+SCENARIO_MINIMUMS = {
+    GoldScenario.EXACT_PARAPHRASE_TERM.value: 40,
+    GoldScenario.SCOPE_ISOLATION.value: 25,
+    GoldScenario.IDENTITY_ISOLATION.value: 25,
+    GoldScenario.LIFECYCLE_CONFLICT.value: 25,
+    GoldScenario.TEMPORAL_INTENT.value: 20,
+    GoldScenario.MULTI_EVIDENCE.value: 15,
+    GoldScenario.HARD_NEGATIVE.value: 35,
+    GoldScenario.TRANSIENT_INJECTION_DEFENSE.value: 20,
+}
+
 SENSITIVE_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9_\- ]*KEY-----", re.IGNORECASE),
     re.compile(r"\bghp_[A-Za-z0-9_]{36,}\b"),  # GitHub personal access token
@@ -88,6 +100,17 @@ def validate_dataset_integrity(
         if q.scope not in ("all", "project", "global"):
             errors.append(f"Query {q.query_id!r} has invalid scope {q.scope!r}")
 
+        if not q.query_time:
+            errors.append(f"Query {q.query_id!r} is missing required query_time")
+        else:
+            try:
+                datetime.fromisoformat(str(q.query_time).replace("Z", "+00:00"))
+            except ValueError:
+                errors.append(f"Query {q.query_id!r} has invalid query_time {q.query_time!r}")
+
+        if q.category == GoldScenario.TEMPORAL_INTENT.value and not q.metadata.get("time_marker"):
+            errors.append(f"Temporal query {q.query_id!r} is missing time_marker metadata")
+
         # Tally scenario
         if q.category in scenario_counts:
             scenario_counts[q.category] += 1
@@ -142,14 +165,13 @@ def validate_dataset_integrity(
                 f"Query {q.query_id!r} has expected_empty=False but has no positive qrels"
             )
 
-    # 5. Check scenario representation
+    # 5. Check scenario representation against the approved Gold v1 matrix.
     for scenario in GoldScenario:
         count = scenario_counts.get(scenario.value, 0)
-        if count == 0:
-            errors.append(f"Missing scenario coverage: no queries found for {scenario.value}")
-        elif count < 10:
-            warnings.append(
-                f"Low representation for scenario {scenario.value}: {count} queries (recommended >= 10)"
+        minimum = SCENARIO_MINIMUMS[scenario.value]
+        if count < minimum:
+            errors.append(
+                f"Insufficient scenario coverage for {scenario.value}: {count} < required {minimum}"
             )
 
     is_valid = len(errors) == 0
