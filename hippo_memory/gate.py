@@ -62,21 +62,28 @@ TRANSIENT_ONLY_PATTERN = re.compile(
 )
 
 
-def is_transient_or_injection(text: str) -> bool:
-    """Detect structural retrieval hazards without matching benchmark-specific phrases.
+def is_raw_log(text: str) -> bool:
+    """Return whether text looks like a raw operational log envelope."""
+    return bool(RAW_LOG_PATTERN.search(text.strip()))
 
-    This intentionally recognizes only raw log envelopes, control/instruction
-    structures, and acknowledgement-only utterances. A query that merely starts
-    with an acknowledgement but continues with a substantive question must still
-    be eligible for retrieval.
-    """
+
+def is_instruction_like(text: str) -> bool:
+    """Return whether text contains control-tag or instruction-override structure."""
     s = text.strip()
     return bool(
-        RAW_LOG_PATTERN.search(s)
-        or CONTEXT_CONTROL_TAG_PATTERN.search(s)
+        CONTEXT_CONTROL_TAG_PATTERN.search(s)
         or INSTRUCTION_OVERRIDE_PATTERN.search(s)
-        or TRANSIENT_ONLY_PATTERN.fullmatch(s)
     )
+
+
+def is_transient_only(text: str) -> bool:
+    """Return whether the entire utterance is only a low-information acknowledgement."""
+    return bool(TRANSIENT_ONLY_PATTERN.fullmatch(text.strip()))
+
+
+def is_transient_or_injection(text: str) -> bool:
+    """Detect structural candidate hazards without benchmark-specific phrases."""
+    return is_raw_log(text) or is_instruction_like(text) or is_transient_only(text)
 
 
 def extract_query_content_and_entities(query: str) -> tuple[set[str], set[str], set[str]]:
@@ -185,7 +192,14 @@ def filter_search_results_with_details(
         return accepted, decisions
 
     # Pre-parse query context if provided
-    query_unwanted = is_transient_or_injection(query) if query else False
+    # Query-side rejection is deliberately narrow. Users may legitimately ask
+    # about prompt injection or safety policies; instruction-like wording alone
+    # must not suppress a substantive retrieval request.
+    query_unwanted = (
+        is_raw_log(query) or is_transient_only(query)
+        if query
+        else False
+    )
     q_content, _q_entities, q_cjk = (
         extract_query_content_and_entities(query) if query else (set(), set(), set())
     )
@@ -195,7 +209,7 @@ def filter_search_results_with_details(
         for i, item in enumerate(results):
             cid = str(item.get("id", f"unknown_{i}")) if isinstance(item, Mapping) else f"unknown_{i}"
             score = float(item["score"]) if isinstance(item, Mapping) and _is_valid_numeric(item.get("score")) else None
-            decisions.append(GateDecision(memory_id=cid, accepted=False, reason="query_transient_or_injection", final_score=score))
+            decisions.append(GateDecision(memory_id=cid, accepted=False, reason="query_transient_or_log", final_score=score))
         return [], decisions
 
     # Step 1: Structure validation and signal-aware absolute pass gate
