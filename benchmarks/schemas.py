@@ -321,7 +321,7 @@ class QueryEvaluationResult:
             relevant_ids=[str(i) for i in data.get("relevant_ids", [])],
             forbidden_ids=[str(i) for i in data.get("forbidden_ids", [])],
             metrics={str(k): float(v) for k, v in data.get("metrics", {}).items()},
-            expected_empty=bool(data.get("expected_empty", False)),
+            expected_empty=bool(data.get("expected_empty", len(data.get("relevant_ids", [])) == 0)),
             scope=str(data.get("scope", "all")),
             project_id=data.get("project_id"),
             user_id=data.get("user_id"),
@@ -376,7 +376,7 @@ class RunManifest:
             index_size_bytes=(
                 int(data["index_size_bytes"]) if data.get("index_size_bytes") is not None else None
             ),
-            schema_version=str(data.get("schema_version", "1.1.0")),
+            schema_version=str(data.get("schema_version", "1.0.0")),
             host_info=dict(data.get("host_info") or {}),
         )
 
