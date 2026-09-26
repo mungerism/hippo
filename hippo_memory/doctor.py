@@ -154,19 +154,29 @@ def collect_checks() -> List[dict]:
         else:
             add("Qdrant", "collection 状态", False, f"跳过检查（{collection_error}）")
 
+        q_pid = None
         try:
             q_st = qdrant_service_status()
             q_pid = q_st.get("pid")
-            if not q_pid:
+        except Exception:
+            # LaunchAgent probing is macOS-specific; fall back to the listening
+            # socket owner so RSS remains observable when launchctl is unavailable.
+            pass
+
+        if not q_pid:
+            try:
                 q_pid = find_listening_pid(QDRANT_PORT)
-            if q_pid:
-                rss_mb = get_process_rss_mb(q_pid)
-                if rss_mb is not None:
-                    add("Qdrant", "常驻内存占用 (RSS)", True, f"{rss_mb:.1f} MB (PID={q_pid})")
-                else:
-                    add("Qdrant", "常驻内存占用 (RSS)", True, f"PID={q_pid}")
-        except Exception as e:
-            add("Qdrant", "常驻内存占用 (RSS)", False, str(e))
+            except Exception:
+                q_pid = None
+
+        if q_pid:
+            rss_mb = get_process_rss_mb(q_pid)
+            if rss_mb is not None:
+                add("Qdrant", "常驻内存占用 (RSS)", True, f"{rss_mb:.1f} MB (PID={q_pid})")
+            else:
+                add("Qdrant", "常驻内存占用 (RSS)", True, f"无法获取 RSS (PID={q_pid})")
+        else:
+            add("Qdrant", "常驻内存占用 (RSS)", True, "无法获取（未找到监听进程 PID）")
 
     try:
         phys_mb, log_mb = _dir_storage_usage(HIPPO_HOME / "storage")
