@@ -7,8 +7,12 @@ from typing import List
 
 from hippo_memory.config import DEFAULT_ENV_FILE, HIPPO_HOME, resolve_collection_name
 from hippo_memory.service import (
+    QDRANT_PORT,
+    find_listening_pid,
+    get_process_rss_mb,
     is_listening,
     is_worker_running,
+    qdrant_service_status,
     service_status,
     worker_service_status,
 )
@@ -26,15 +30,34 @@ def _client_config_checks() -> List[tuple]:
     ]
 
 
-def _dir_size_mb(path: Path) -> float:
-    total = 0
+def _dir_storage_usage(path: Path) -> tuple[float, float]:
+    """Calculate directory storage usage.
+
+    Returns:
+        (physical_mb, logical_mb)
+        where physical_mb reflects real disk blocks allocated (via st_blocks),
+        and logical_mb reflects file logical length (accounting for sparse files/preallocation).
+    """
+    physical_bytes = 0
+    logical_bytes = 0
     for f in path.rglob("*"):
         try:
             if f.is_file():
-                total += f.stat().st_size
+                st = f.stat()
+                logical_bytes += st.st_size
+                if hasattr(st, "st_blocks"):
+                    physical_bytes += st.st_blocks * 512
+                else:
+                    physical_bytes += st.st_size
         except OSError:
             continue
-    return total / 1024 / 1024
+    return physical_bytes / (1024 * 1024), logical_bytes / (1024 * 1024)
+
+
+def _dir_size_mb(path: Path) -> float:
+    """Calculate physical disk space allocated for directory in MB (backward compatibility)."""
+    phys_mb, _ = _dir_storage_usage(path)
+    return phys_mb
 
 
 def _active_provider() -> str:
@@ -131,10 +154,39 @@ def collect_checks() -> List[dict]:
         else:
             add("Qdrant", "collection 状态", False, f"跳过检查（{collection_error}）")
 
+        q_pid = None
+        try:
+            q_st = qdrant_service_status()
+            q_pid = q_st.get("pid")
+        except Exception:
+            # LaunchAgent probing is macOS-specific; fall back to the listening
+            # socket owner so RSS remains observable when launchctl is unavailable.
+            pass
+
+        if not q_pid:
+            try:
+                q_pid = find_listening_pid(QDRANT_PORT)
+            except Exception:
+                q_pid = None
+
+        if q_pid:
+            rss_mb = get_process_rss_mb(q_pid)
+            if rss_mb is not None:
+                add("Qdrant", "常驻内存占用 (RSS)", True, f"{rss_mb:.1f} MB (PID={q_pid})")
+            else:
+                add("Qdrant", "常驻内存占用 (RSS)", True, f"无法获取 RSS (PID={q_pid})")
+        else:
+            add("Qdrant", "常驻内存占用 (RSS)", True, "无法获取（未找到监听进程 PID）")
+
     try:
-        add("Qdrant", "数据目录占用", True, f"{_dir_size_mb(HIPPO_HOME / 'storage'):.1f} MB")
+        phys_mb, log_mb = _dir_storage_usage(HIPPO_HOME / "storage")
+        if log_mb > phys_mb * 1.2:
+            detail = f"{phys_mb:.1f} MB (实际物理占用) / {log_mb:.1f} MB (预分配稀疏上限)"
+        else:
+            detail = f"{phys_mb:.1f} MB"
+        add("Qdrant", "磁盘数据目录占用 (Disk)", True, detail)
     except Exception as e:
-        add("Qdrant", "数据目录占用", False, str(e))
+        add("Qdrant", "磁盘数据目录占用 (Disk)", False, str(e))
 
     # --- Configuration ---
     add(
@@ -185,11 +237,15 @@ def collect_checks() -> List[dict]:
 
     # --- Services (LaunchAgent) ---
     try:
-        st = service_status()
-        if st["loaded"]:
+        q_st = qdrant_service_status()
+        if q_st["loaded"]:
             state = "LaunchAgent 常驻中"
-            ok = st["listening"]
-        elif st["plist_exists"]:
+            ok = q_st["listening"]
+            if q_st.get("pid"):
+                q_rss = get_process_rss_mb(q_st["pid"])
+                rss_str = f", RSS: {q_rss:.1f} MB" if q_rss is not None else ""
+                state += f" (PID={q_st['pid']}{rss_str})"
+        elif q_st["plist_exists"]:
             state = "已安装但未加载"
             ok = False
         else:
@@ -211,8 +267,13 @@ def collect_checks() -> List[dict]:
                 "按需消费模式（未安装常驻 Worker）；可执行 hippo service install worker",
             )
         elif w_st["running"]:
-            pid_str = f"PID={w_st['pid']}" if w_st["pid"] else ""
-            add("服务", "dev.hippo.worker", True, f"LaunchAgent 常驻运行中 {pid_str}")
+            pid_info = ""
+            if w_st.get("pid"):
+                w_rss = get_process_rss_mb(w_st["pid"])
+                rss_str = f", RSS: {w_rss:.1f} MB" if w_rss is not None else ""
+                pid_info = f"PID={w_st['pid']}{rss_str}"
+            detail_str = f"LaunchAgent 常驻运行中 {pid_info}".strip()
+            add("服务", "dev.hippo.worker", True, detail_str)
         else:
             exit_info = f"（退出码: {w_st['last_exit_code']}）" if w_st.get("last_exit_code") else ""
             add(

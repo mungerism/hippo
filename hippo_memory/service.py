@@ -109,11 +109,11 @@ def is_loaded(label: str = QDRANT_SERVICE_LABEL) -> bool:
     return _launchctl("print", f"gui/{_uid()}/{label}").returncode == 0
 
 
-def worker_service_status(home: Path = HIPPO_HOME) -> Dict[str, Any]:
-    """Get detailed service status of dev.hippo.worker (plist_exists, loaded, running, pid, last_exit_code)."""
-    plist_file = plist_path(WORKER_SERVICE_LABEL)
+def launchd_service_status(label: str) -> Dict[str, Any]:
+    """Get detailed service status of a LaunchAgent daemon by label (plist_exists, loaded, running, pid, last_exit_code)."""
+    plist_file = plist_path(label)
     exists = plist_file.exists()
-    res = _launchctl("print", f"gui/{_uid()}/{WORKER_SERVICE_LABEL}")
+    res = _launchctl("print", f"gui/{_uid()}/{label}")
     loaded = res.returncode == 0
 
     running = False
@@ -143,6 +143,87 @@ def worker_service_status(home: Path = HIPPO_HOME) -> Dict[str, Any]:
         "pid": pid,
         "last_exit_code": last_exit_code,
     }
+
+
+def worker_service_status(home: Path = HIPPO_HOME) -> Dict[str, Any]:
+    """Get detailed service status of dev.hippo.worker (plist_exists, loaded, running, pid, last_exit_code)."""
+    return launchd_service_status(WORKER_SERVICE_LABEL)
+
+
+def qdrant_service_status(home: Path = HIPPO_HOME) -> Dict[str, Any]:
+    """Get detailed runtime status of dev.hippo.qdrant (plist_exists, loaded, running, pid, last_exit_code, listening)."""
+    st = launchd_service_status(QDRANT_SERVICE_LABEL)
+    st["listening"] = is_listening()
+    return st
+
+
+def find_listening_pid(port: int = QDRANT_PORT) -> Optional[int]:
+    """Find PID of process listening on specified TCP port using lsof or ss."""
+    # 1. Try lsof (macOS / Linux)
+    if shutil.which("lsof"):
+        try:
+            res = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return int(res.stdout.strip().split()[0])
+        except Exception:
+            pass
+
+    # 2. Try ss on Linux
+    if shutil.which("ss"):
+        try:
+            res = subprocess.run(
+                ["ss", "-lptn", f"sport = :{port}"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                import re
+
+                match = re.search(r"pid=(\d+)", res.stdout)
+                if match:
+                    return int(match.group(1))
+        except Exception:
+            pass
+
+    return None
+
+
+def get_process_rss_mb(pid: int) -> Optional[float]:
+    """Get resident set size (RSS) in MB for a given PID without external dependencies."""
+    # 1. Try POSIX ps
+    if shutil.which("ps"):
+        try:
+            res = subprocess.run(
+                ["ps", "-o", "rss=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                rss_kb = int(res.stdout.strip().split()[0])
+                return rss_kb / 1024.0
+        except Exception:
+            pass
+
+    # 2. Fallback to /proc/{pid}/status on Linux
+    try:
+        proc_status = Path(f"/proc/{pid}/status")
+        if proc_status.is_file():
+            for line in proc_status.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) / 1024.0
+    except Exception:
+        pass
+
+    return None
 
 
 def is_worker_running() -> bool:
@@ -319,6 +400,6 @@ def service_status() -> Dict[str, bool]:
 def service_status_all() -> Dict[str, Any]:
     """Retrieve runtime status for both Qdrant and Worker daemon services."""
     return {
-        "qdrant": service_status(),
+        "qdrant": qdrant_service_status(),
         "worker": worker_service_status(),
     }

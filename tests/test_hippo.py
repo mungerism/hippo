@@ -188,6 +188,80 @@ class TestHippo(unittest.TestCase):
         qdrant_check = next(c for c in checks if c["name"] == "服务监听 127.0.0.1:6333")
         self.assertFalse(qdrant_check["ok"])
 
+    def test_dir_storage_usage_and_size(self):
+        import tempfile
+        from hippo_memory.doctor import _dir_storage_usage, _dir_size_mb
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            f1 = d / "test.dat"
+            f1.write_bytes(b"x" * 1024 * 1024)  # 1 MB
+            phys_mb, log_mb = _dir_storage_usage(d)
+            self.assertGreaterEqual(log_mb, 1.0)
+            self.assertGreaterEqual(phys_mb, 0.0)
+            self.assertEqual(phys_mb, _dir_size_mb(d))
+
+    def test_dir_storage_usage_distinguishes_sparse_file(self):
+        from hippo_memory.doctor import _dir_storage_usage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            sparse = d / "sparse.dat"
+            logical_size = 64 * 1024 * 1024
+            with sparse.open("wb") as fh:
+                fh.seek(logical_size - 1)
+                fh.write(b"\0")
+
+            st = sparse.stat()
+            if not hasattr(st, "st_blocks") or st.st_blocks * 512 >= st.st_size:
+                self.skipTest("filesystem does not expose sparse physical allocation")
+
+            phys_mb, log_mb = _dir_storage_usage(d)
+            self.assertGreaterEqual(log_mb, 64.0)
+            self.assertLess(phys_mb, log_mb)
+
+    def test_doctor_rss_check_present_when_pid_unavailable(self):
+        from unittest.mock import patch
+        from hippo_memory import doctor
+
+        with patch.object(doctor, "_client_config_checks", return_value=[]), \
+             patch.object(doctor, "resolve_collection_name", side_effect=RuntimeError("test")), \
+             patch.object(doctor, "is_listening", return_value=True), \
+             patch.object(doctor, "qdrant_service_status", side_effect=OSError("launchctl unavailable")), \
+             patch.object(doctor, "find_listening_pid", return_value=None):
+            checks = doctor.collect_checks()
+
+        rss_check = next(c for c in checks if c["name"] == "常驻内存占用 (RSS)")
+        self.assertTrue(rss_check["ok"])
+        self.assertIn("未找到监听进程 PID", rss_check["detail"])
+
+    def test_get_process_rss_mb_current_process(self):
+        import os
+        from hippo_memory.service import get_process_rss_mb
+
+        rss = get_process_rss_mb(os.getpid())
+        self.assertIsNotNone(rss)
+        self.assertGreater(rss, 0.0)
+
+    def test_launchd_and_qdrant_service_status(self):
+        from unittest.mock import MagicMock, patch
+        from hippo_memory.service import qdrant_service_status
+
+        with patch("hippo_memory.service._launchctl") as mock_launchctl, \
+             patch("hippo_memory.service.plist_path") as mock_plist, \
+             patch("hippo_memory.service.is_listening", return_value=True):
+            mock_plist.return_value.exists.return_value = True
+            mock_launchctl.return_value = MagicMock(
+                returncode=0,
+                stdout="state = running\npid = 1234\nlast exit code = 0\n",
+            )
+            st = qdrant_service_status()
+            self.assertTrue(st["plist_exists"])
+            self.assertTrue(st["loaded"])
+            self.assertTrue(st["running"])
+            self.assertEqual(st["pid"], 1234)
+            self.assertTrue(st["listening"])
+
     def test_init_upsert_idempotent(self):
         import tempfile
         from hippo_memory.init import upsert_hippo_section, build_memory_section
