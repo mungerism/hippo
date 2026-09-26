@@ -1,7 +1,7 @@
 """Specification and hard gate invariants for Hippo Gold v1 evaluation dataset.
 
 Defines:
-- 8 canonical benchmark scenario categories.
+- Canonical retrieval and persistence benchmark scenario categories.
 - Dataset integrity constants (minimum size, hard negative ratio).
 - Hard security gate invariants (zero leakage for cross-user/cross-project/superseded, FPR <= 2%).
 - Hard gate auditing logic for benchmark reports.
@@ -40,7 +40,7 @@ class SecurityGateThresholds:
     max_hard_negative_fpr: float = 0.02  # False positive rate <= 2%
 
     min_total_queries: int = 200
-    min_hard_negative_ratio: float = 0.25  # At least 25% empty/negative queries
+    min_hard_negative_ratio: float = 0.25  # At least 25% retrieval-scored hard negatives
 
 
 def audit_security_gates(
