@@ -4,8 +4,8 @@ Verifies:
 1. Dataset structural integrity (no duplicate IDs, non-empty text, valid scopes).
 2. Label consistency (queries marked expected_empty must have empty qrels).
 3. Relational integrity (all qrels and forbidden IDs must exist in corpus; no orphan references).
-4. Scenario coverage (all 8 canonical scenarios represented with minimum thresholds).
-5. Hard negative ratio (at least 25% of queries must be negative / expected_empty).
+4. Scenario coverage (all canonical scenarios represented with minimum thresholds).
+5. Retrieval hard-negative ratio (at least 25% of retrieval-scored queries).
 6. Sensitive data sanitization (no private keys, tokens, or personal identifiers).
 """
 
@@ -33,7 +33,8 @@ SCENARIO_MINIMUMS = {
     GoldScenario.TEMPORAL_INTENT.value: 20,
     GoldScenario.MULTI_EVIDENCE.value: 15,
     GoldScenario.HARD_NEGATIVE.value: 35,
-    GoldScenario.TRANSIENT_INJECTION_DEFENSE.value: 20,
+    GoldScenario.RETRIEVAL_SAFETY.value: 10,
+    GoldScenario.PERSISTENCE_QUALITY.value: 10,
 }
 
 SENSITIVE_PATTERNS = [
@@ -86,6 +87,7 @@ def validate_dataset_integrity(
     query_ids: Set[str] = set()
     scenario_counts: Dict[str, int] = {s.value: 0 for s in GoldScenario}
     negative_count = 0
+    persistence_quality_count = 0
 
     for idx, q in enumerate(dataset.queries):
         if not q.query_id or not q.query_id.strip():
@@ -117,7 +119,9 @@ def validate_dataset_integrity(
         else:
             warnings.append(f"Query {q.query_id!r} has non-standard category {q.category!r}")
 
-        if q.expected_empty:
+        if q.category == GoldScenario.PERSISTENCE_QUALITY.value:
+            persistence_quality_count += 1
+        elif q.expected_empty:
             negative_count += 1
 
         # Check sanitization in query
@@ -126,10 +130,13 @@ def validate_dataset_integrity(
                 errors.append(f"Query {q.query_id!r} matches sensitive credential pattern: {pattern.pattern}")
 
     total_queries = len(dataset.queries)
-    if total_queries < cfg.min_total_queries:
-        errors.append(f"Total queries {total_queries} < required minimum {cfg.min_total_queries}")
+    retrieval_queries = total_queries - persistence_quality_count
+    if retrieval_queries < cfg.min_total_queries:
+        errors.append(
+            f"Retrieval-scored queries {retrieval_queries} < required minimum {cfg.min_total_queries}"
+        )
 
-    neg_ratio = (negative_count / total_queries) if total_queries > 0 else 0.0
+    neg_ratio = (negative_count / retrieval_queries) if retrieval_queries > 0 else 0.0
     if neg_ratio < cfg.min_hard_negative_ratio:
         errors.append(
             f"Hard negative query ratio {neg_ratio:.2%} < required minimum {cfg.min_hard_negative_ratio:.2%}"
@@ -179,6 +186,8 @@ def validate_dataset_integrity(
         "valid": is_valid,
         "total_corpus": len(dataset.corpus),
         "total_queries": total_queries,
+        "retrieval_queries": retrieval_queries,
+        "persistence_quality_queries": persistence_quality_count,
         "negative_queries": negative_count,
         "negative_ratio": round(neg_ratio, 4),
         "scenario_counts": scenario_counts,
@@ -213,7 +222,9 @@ def main() -> int:
     print(f"Dataset: {dataset.name} (v{dataset.version})")
     print(f"Corpus items: {audit['total_corpus']}")
     print(f"Total queries: {audit['total_queries']}")
-    print(f"Negative queries: {audit['negative_queries']} ({audit['negative_ratio']:.2%})")
+    print(f"Retrieval-scored queries: {audit['retrieval_queries']}")
+    print(f"Persistence-quality diagnostics: {audit['persistence_quality_queries']}")
+    print(f"Retrieval hard negatives: {audit['negative_queries']} ({audit['negative_ratio']:.2%})")
     print("Scenario distribution:")
     for sc, count in audit["scenario_counts"].items():
         print(f"  - {sc}: {count}")
