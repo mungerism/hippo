@@ -90,6 +90,56 @@ def is_transient_or_injection(text: str) -> bool:
     return is_raw_log(text) or is_instruction_like(text) or is_transient_only(text)
 
 
+def extract_explicit_identity_subjects(query: str) -> set[str]:
+    """Extract only high-confidence identity/project subjects from query grammar.
+
+    This is intentionally narrower than generic proper-noun detection. We only
+    accept explicit possessives, labelled identities (user/project/repo), or an
+    auxiliary-verb subject in a small set of factual constructions. This avoids
+    treating sentence starters such as "Current" as identities.
+    """
+    subjects: set[str] = set()
+
+    for match in re.finditer(r"\b([A-Z][A-Za-z0-9_.-]{1,})['’]s\b", query):
+        subjects.add(match.group(1).lower())
+
+    for match in re.finditer(
+        r"\b(?:user|project|repo|repository)\s+([A-Za-z0-9_.-]{2,})\b",
+        query,
+        re.IGNORECASE,
+    ):
+        subjects.add(match.group(1).lower())
+
+    for match in re.finditer(
+        r"\b(?:does|did|is|are|was|were|has|have|can|could|should|would|will)\s+"
+        r"([A-Z][A-Za-z0-9_.-]{1,})\s+"
+        r"(?:use|prefer|run|require|work|listen|store|deploy)\b",
+        query,
+        re.IGNORECASE,
+    ):
+        # Require capitalization in the original capture for this unlabeled form.
+        raw_subject = match.group(1)
+        if raw_subject[:1].isupper():
+            subjects.add(raw_subject.lower())
+
+    return subjects
+
+
+def _candidate_identity_tokens(item: Mapping[str, Any], text: str) -> set[str]:
+    """Collect identity tokens explicitly present in candidate text/metadata."""
+    tokens = set(re.findall(r"\b[A-Za-z0-9_.-]+\b", text.lower()))
+    metadata = item.get("metadata")
+    metadata_map = metadata if isinstance(metadata, Mapping) else {}
+
+    for key in ("user_id", "project_id", "agent_id"):
+        for source in (item, metadata_map):
+            value = source.get(key) if isinstance(source, Mapping) else None
+            if isinstance(value, str) and value.strip():
+                tokens.add(value.strip().lower())
+
+    return tokens
+
+
 def extract_query_content_and_entities(query: str) -> tuple[set[str], set[str], set[str]]:
     """Extract lexical content and CJK characters from a query.
 
@@ -200,20 +250,21 @@ def filter_search_results_with_details(
     # about prompt injection or safety policies; instruction-like wording alone
     # must not suppress a substantive retrieval request.
     query_unwanted = (
-        is_raw_log(query) or is_transient_only(query)
+        is_raw_log(query) or is_transient_only(query) or is_instruction_like(query)
         if query
         else False
     )
     q_content, _q_entities, q_cjk = (
         extract_query_content_and_entities(query) if query else (set(), set(), set())
     )
+    q_identity_subjects = extract_explicit_identity_subjects(query) if query else set()
 
     if query_unwanted:
         # Fast fail-closed: transient acknowledgement or injection query yields zero long-term memory recall
         for i, item in enumerate(results):
             cid = str(item.get("id", f"unknown_{i}")) if isinstance(item, Mapping) else f"unknown_{i}"
             score = float(item["score"]) if isinstance(item, Mapping) and _is_valid_numeric(item.get("score")) else None
-            decisions.append(GateDecision(memory_id=cid, accepted=False, reason="query_transient_or_log", final_score=score))
+            decisions.append(GateDecision(memory_id=cid, accepted=False, reason="query_transient_log_or_directive", final_score=score))
         return [], decisions
 
     # Step 1: Structure validation and signal-aware absolute pass gate
@@ -273,6 +324,20 @@ def filter_search_results_with_details(
         if query and is_transient_or_injection(cand_text):
             decisions.append(GateDecision(memory_id=cid, accepted=False, reason="candidate_transient_or_log_pollution", final_score=final_score, details=dict(details)))
             continue
+
+        if query and q_identity_subjects:
+            candidate_identity_tokens = _candidate_identity_tokens(item, cand_text)
+            if not (q_identity_subjects & candidate_identity_tokens):
+                decisions.append(
+                    GateDecision(
+                        memory_id=cid,
+                        accepted=False,
+                        reason="explicit_identity_subject_mismatch",
+                        final_score=final_score,
+                        details=dict(details),
+                    )
+                )
+                continue
 
         if query:
             cand_tokens = set(re.findall(r"\b[A-Za-z0-9_\.\-]+\b", cand_text.lower()))
