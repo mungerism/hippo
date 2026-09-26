@@ -91,39 +91,21 @@ def is_transient_or_injection(text: str) -> bool:
 
 
 def extract_explicit_identity_subjects(query: str) -> set[str]:
-    """Extract only high-confidence identity/project subjects from query grammar.
+    """Extract only explicitly labelled user/project subjects from query grammar.
 
-    This is intentionally narrower than generic proper-noun detection. We only
-    accept explicit possessives, labelled identities (user/project/repo), or an
-    auxiliary-verb subject in a small set of factual constructions. This avoids
-    treating sentence starters such as "Current" as identities.
+    Hard identity filtering is intentionally limited to labels that state the
+    namespace directly (user/project/repo/repository). Unlabelled proper nouns
+    are not inferred as identities because names of people, products, and
+    technologies are ambiguous without a real entity resolver.
     """
     subjects: set[str] = set()
-
-    for match in re.finditer(r"\b([A-Z][A-Za-z0-9_.-]{1,})['’]s\b", query):
-        subjects.add(match.group(1).lower())
-
     for match in re.finditer(
         r"\b(?:user|project|repo|repository)\s+([A-Za-z0-9_.-]{2,})\b",
         query,
         re.IGNORECASE,
     ):
         subjects.add(match.group(1).lower())
-
-    for match in re.finditer(
-        r"\b(?:does|did|is|are|was|were|has|have|can|could|should|would|will)\s+"
-        r"([A-Z][A-Za-z0-9_.-]{1,})\s+"
-        r"(?:use|prefer|run|require|work|listen|store|deploy)\b",
-        query,
-        re.IGNORECASE,
-    ):
-        # Require capitalization in the original capture for this unlabeled form.
-        raw_subject = match.group(1)
-        if raw_subject[:1].isupper():
-            subjects.add(raw_subject.lower())
-
     return subjects
-
 
 def _candidate_identity_tokens(item: Mapping[str, Any], text: str) -> set[str]:
     """Collect identity tokens explicitly present in candidate text/metadata."""
