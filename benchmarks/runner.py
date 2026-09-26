@@ -316,7 +316,7 @@ class BenchmarkRunner:
         gate_cfg = getattr(self.adapter, "gate_config", SearchGateConfig())
         gate_thresholds = {
             "final_threshold": getattr(gate_cfg, "final_threshold", 0.32),
-            "dense_only_threshold": getattr(gate_cfg, "dense_only_threshold", 0.62),
+            "dense_only_threshold": getattr(gate_cfg, "dense_only_threshold", 0.70),
             "relative_threshold_ratio": getattr(gate_cfg, "relative_threshold_ratio", 0.50),
             "lexical_min_coverage": getattr(gate_cfg, "lexical_min_coverage", 0.35),
             "lexical_bm25_threshold": getattr(gate_cfg, "lexical_bm25_threshold", 0.15),
