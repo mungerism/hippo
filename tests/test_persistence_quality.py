@@ -302,6 +302,13 @@ class TestEngineMutationSeamHook(unittest.TestCase):
 
     def test_warm_path_update_blocks_injection(self):
         """Warm Path update blocks prompt injection replacement and suppresses history."""
+        # Present a stable existing record so stale-mutation protection does not
+        # short-circuit before the persistence quality audit under test.
+        self.mock_vs.get.return_value = {
+            "data": "existing durable fact",
+            "status": "active",
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }
         holder = _LazyWriteLockHolder(
             self.engine,
             user_id="test_user",
@@ -328,6 +335,13 @@ class TestEngineMutationSeamHook(unittest.TestCase):
 
     def test_rejected_payload_is_not_written_to_logs(self):
         """Audit diagnostics must not copy rejected untrusted content into application logs."""
+        # Avoid the unrelated stale-update guard so this test reaches the audit
+        # logging branch deterministically.
+        self.mock_vs.get.return_value = {
+            "data": "existing durable fact",
+            "status": "active",
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }
         holder = _LazyWriteLockHolder(
             self.engine,
             user_id="test_user",
