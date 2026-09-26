@@ -695,8 +695,14 @@ def main() -> None:
     print(f"Successfully generated Hippo Gold v1 dataset: {out_path}")
     print(f"Total corpus items: {len(dataset.corpus)}")
     print(f"Total queries: {len(dataset.queries)}")
-    neg_count = sum(1 for q in dataset.queries if q.expected_empty)
-    print(f"Hard negative queries: {neg_count} ({neg_count / len(dataset.queries):.2%})")
+    retrieval_queries = [
+        q for q in dataset.queries if q.category != GoldScenario.PERSISTENCE_QUALITY.value
+    ]
+    neg_count = sum(1 for q in retrieval_queries if q.expected_empty)
+    print(
+        f"Retrieval hard negatives: {neg_count} "
+        f"({neg_count / len(retrieval_queries):.2%})"
+    )
     print(f"Dataset SHA-256: {dataset.compute_hash()}")
 
 
