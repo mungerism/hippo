@@ -182,7 +182,7 @@ class TestSessionLevelPreCheck(unittest.TestCase):
         ]
         skip, reason = should_skip_session(turns, last_user_goal="检查服务端口", last_assistant_final="服务已在 8080 端口启动。")
         self.assertFalse(skip)
-        self.assertEqual(reason, "substantive_user_goal")
+        self.assertEqual(reason, "has_substantive_content")
 
     def test_raw_log_goal_with_stable_config_fails_open(self):
         """A realistic adapter last_user_goal containing a config-bearing log must reach the LLM."""
