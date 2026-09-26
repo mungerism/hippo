@@ -353,9 +353,9 @@ class TestEngineSearchWiring(unittest.TestCase):
                 {
                     "id": "1",
                     "memory": "有效记忆",
-                    "score": 0.65,
+                    "score": 0.75,
                     "score_details": {
-                        "semantic_score": 0.65,
+                        "semantic_score": 0.75,
                         "bm25_score": 0.0,
                         "entity_boost": 0.0,
                         "raw_score": 0.65,
