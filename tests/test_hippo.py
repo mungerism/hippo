@@ -188,6 +188,46 @@ class TestHippo(unittest.TestCase):
         qdrant_check = next(c for c in checks if c["name"] == "服务监听 127.0.0.1:6333")
         self.assertFalse(qdrant_check["ok"])
 
+    def test_dir_storage_usage_and_size(self):
+        import tempfile
+        from hippo_memory.doctor import _dir_storage_usage, _dir_size_mb
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            f1 = d / "test.dat"
+            f1.write_bytes(b"x" * 1024 * 1024)  # 1 MB
+            phys_mb, log_mb = _dir_storage_usage(d)
+            self.assertGreaterEqual(log_mb, 1.0)
+            self.assertGreaterEqual(phys_mb, 0.0)
+            self.assertEqual(phys_mb, _dir_size_mb(d))
+
+    def test_get_process_rss_mb_current_process(self):
+        import os
+        from hippo_memory.service import get_process_rss_mb
+
+        rss = get_process_rss_mb(os.getpid())
+        self.assertIsNotNone(rss)
+        self.assertGreater(rss, 0.0)
+
+    def test_launchd_and_qdrant_service_status(self):
+        from unittest.mock import MagicMock, patch
+        from hippo_memory.service import qdrant_service_status
+
+        with patch("hippo_memory.service._launchctl") as mock_launchctl, \
+             patch("hippo_memory.service.plist_path") as mock_plist, \
+             patch("hippo_memory.service.is_listening", return_value=True):
+            mock_plist.return_value.exists.return_value = True
+            mock_launchctl.return_value = MagicMock(
+                returncode=0,
+                stdout="state = running\npid = 1234\nlast exit code = 0\n",
+            )
+            st = qdrant_service_status()
+            self.assertTrue(st["plist_exists"])
+            self.assertTrue(st["loaded"])
+            self.assertTrue(st["running"])
+            self.assertEqual(st["pid"], 1234)
+            self.assertTrue(st["listening"])
+
     def test_init_upsert_idempotent(self):
         import tempfile
         from hippo_memory.init import upsert_hippo_section, build_memory_section

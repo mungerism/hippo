@@ -14,7 +14,7 @@ hippo doctor
 
 巡检器将依次检查以下五大维度：
 1. **环境与配置**：`~/.hippo/.env` 存在性、Google/OpenAI API 密钥格式、ADC 凭据合法性；
-2. **Qdrant 服务**：端口 `127.0.0.1:6333` 监听状态、LaunchAgent 托管状态、Collection 连通性；
+2. **Qdrant 服务**：端口 `127.0.0.1:6333` 监听状态、常驻内存占用 (RSS)、磁盘数据目录物理实际占用 (Disk) 与预分配稀疏上限、LaunchAgent 托管状态、Collection 连通性；
 3. **Worker 服务**：`dev.hippo.worker` LaunchAgent 运行状态，区分三态健康语义：
    - ✅ 未安装：正常（按需消费模式）
    - ✅ 已安装且 running：正常（常驻保活）
