@@ -243,6 +243,7 @@ class TestSearchGate(unittest.TestCase):
             SearchGateConfig(lexical_min_coverage=1.1)
 
         cfg = SearchGateConfig()
+        self.assertEqual(cfg.dense_only_threshold, 0.70)
         self.assertEqual(cfg.lexical_min_coverage, 0.35)
         self.assertEqual(cfg.lexical_bm25_threshold, 0.15)
         self.assertEqual(cfg.lexical_semantic_threshold, 0.48)
