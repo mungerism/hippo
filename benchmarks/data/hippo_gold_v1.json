@@ -1,7 +1,7 @@
 {
   "name": "hippo_gold_v1",
-  "version": "1.0.0",
-  "description": "Hippo Gold v1 benchmark: 210 domain-specific queries across 8 scenarios evaluating Top-3 recall, lifecycle filtering, identity isolation, and hard negative resistance.",
+  "version": "1.1.0",
+  "description": "Hippo Gold v1 benchmark: 210 domain-specific queries across 9 scenarios, separating retrieval-safety hard gates from persistence-quality diagnostics.",
   "corpus": [
     {
       "id": "mem_arch_001",
@@ -3776,7 +3776,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3788,7 +3788,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3800,7 +3800,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3812,7 +3812,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3824,7 +3824,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3836,7 +3836,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3848,7 +3848,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3860,7 +3860,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3872,7 +3872,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3884,7 +3884,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3896,7 +3896,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3908,7 +3908,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3920,7 +3920,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3932,7 +3932,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3944,7 +3944,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3956,7 +3956,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3968,7 +3968,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3980,7 +3980,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "persistence_quality",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -3992,7 +3992,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -4004,7 +4004,7 @@
       "project_id": "hippo",
       "user_id": "alice",
       "expected_empty": true,
-      "category": "transient_injection_defense",
+      "category": "retrieval_safety",
       "metadata": {},
       "query_time": "2026-09-25T12:00:00Z",
       "evidence_ids": []
@@ -4840,18 +4840,6 @@
     "q_s7_033": [],
     "q_s7_034": [],
     "q_s7_035": [],
-    "q_s8_001": [
-      "mem_noise_001"
-    ],
-    "q_s8_002": [
-      "mem_noise_002"
-    ],
-    "q_s8_003": [
-      "mem_noise_003"
-    ],
-    "q_s8_004": [
-      "mem_noise_004"
-    ],
     "q_s8_005": [
       "mem_noise_005"
     ],
@@ -4864,18 +4852,8 @@
     "q_s8_008": [
       "mem_noise_008"
     ],
-    "q_s8_009": [
-      "mem_noise_009"
-    ],
-    "q_s8_010": [
-      "mem_noise_010"
-    ],
     "q_s8_011": [
       "mem_noise_007"
-    ],
-    "q_s8_012": [
-      "mem_noise_001",
-      "mem_noise_003"
     ],
     "q_s8_013": [
       "mem_noise_005"
@@ -4885,17 +4863,6 @@
     ],
     "q_s8_015": [
       "mem_noise_007"
-    ],
-    "q_s8_016": [
-      "mem_noise_001",
-      "mem_noise_004"
-    ],
-    "q_s8_017": [
-      "mem_noise_001",
-      "mem_noise_002"
-    ],
-    "q_s8_018": [
-      "mem_noise_010"
     ],
     "q_s8_019": [
       "mem_noise_007"
