@@ -26,7 +26,8 @@ class GoldScenario(str, Enum):
     TEMPORAL_INTENT = "temporal_intent"
     MULTI_EVIDENCE = "multi_evidence"
     HARD_NEGATIVE = "hard_negative"
-    TRANSIENT_INJECTION_DEFENSE = "transient_injection_defense"
+    RETRIEVAL_SAFETY = "retrieval_safety"
+    PERSISTENCE_QUALITY = "persistence_quality"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,22 +57,34 @@ def audit_security_gates(
     violations: List[str] = []
 
     total_queries = len(report.query_results)
-    if total_queries < cfg.min_total_queries:
+    retrieval_results = [
+        q
+        for q in report.query_results
+        if q.category != GoldScenario.PERSISTENCE_QUALITY.value
+    ]
+    retrieval_queries_count = len(retrieval_results)
+    if retrieval_queries_count < cfg.min_total_queries:
         violations.append(
-            f"Insufficient query count: {total_queries} < minimum required {cfg.min_total_queries}"
+            "Insufficient retrieval query count: "
+            f"{retrieval_queries_count} < minimum required {cfg.min_total_queries}"
         )
 
     cross_user_leak_count = 0
     cross_project_leak_count = 0
     superseded_leak_count = 0
     total_forbidden_leaked = 0
+    persistence_quality_forbidden_hits = 0
     negative_queries_count = 0
     negative_false_positives = 0
 
     for q in report.query_results:
         retrieved_set = set(q.retrieved_ids)
         forbidden_set = set(q.forbidden_ids)
-        total_forbidden_leaked += len(retrieved_set & forbidden_set)
+        forbidden_hits = len(retrieved_set & forbidden_set)
+        if q.category == GoldScenario.PERSISTENCE_QUALITY.value:
+            persistence_quality_forbidden_hits += forbidden_hits
+        else:
+            total_forbidden_leaked += forbidden_hits
 
         candidate_by_id = {}
         if q.trace is not None:
@@ -100,8 +113,11 @@ def audit_security_gates(
             if candidate.status == "superseded":
                 superseded_leak_count += 1
 
-        is_negative = q.expected_empty or len(q.relevant_ids) == 0
-        if is_negative:
+        is_retrieval_negative = (
+            q.category != GoldScenario.PERSISTENCE_QUALITY.value
+            and (q.expected_empty or len(q.relevant_ids) == 0)
+        )
+        if is_retrieval_negative:
             negative_queries_count += 1
             if q.retrieved_ids:
                 negative_false_positives += 1
@@ -126,7 +142,11 @@ def audit_security_gates(
             f"Hard gate failed: total forbidden leakage = {total_forbidden_leaked} (must be 0)"
         )
 
-    neg_ratio = (negative_queries_count / total_queries) if total_queries > 0 else 0.0
+    neg_ratio = (
+        negative_queries_count / retrieval_queries_count
+        if retrieval_queries_count > 0
+        else 0.0
+    )
     if neg_ratio < cfg.min_hard_negative_ratio:
         violations.append(
             f"Insufficient hard negative ratio: {neg_ratio:.2%} < required {cfg.min_hard_negative_ratio:.2%}"
@@ -146,6 +166,7 @@ def audit_security_gates(
     return {
         "passed": len(violations) == 0,
         "total_queries": total_queries,
+        "retrieval_queries_count": retrieval_queries_count,
         "negative_queries_count": negative_queries_count,
         "negative_ratio": round(neg_ratio, 4),
         "hard_negative_fpr": round(hard_negative_fpr, 4),
@@ -153,5 +174,6 @@ def audit_security_gates(
         "cross_project_leakage": cross_project_leak_count,
         "superseded_leakage": superseded_leak_count,
         "total_forbidden_leakage": total_forbidden_leaked,
+        "persistence_quality_forbidden_hits": persistence_quality_forbidden_hits,
         "violations": violations,
     }
