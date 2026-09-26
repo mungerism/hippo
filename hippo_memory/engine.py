@@ -530,7 +530,7 @@ def _dedup_before_insert(
                 holder.skipped_ids.add(curr_id)
             continue
         if p_text and p_text in existing_texts:
-            logger.info("Re-validation skipped duplicate fact by text: %s", p_text[:40])
+            logger.info("Re-validation skipped duplicate fact by text (text_len=%d)", len(p_text))
             if curr_id and holder is not None:
                 holder.skipped_ids.add(curr_id)
             continue
