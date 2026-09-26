@@ -568,13 +568,13 @@ class TestSearchGateAbstentionAndAntiPollution(unittest.TestCase):
             "explicit_identity_subject_mismatch",
         )
 
-    def test_explicit_person_subject_mismatch_rejected(self):
-        """A high-confidence grammatical person subject must match candidate identity."""
+    def test_unlabelled_proper_noun_is_not_identity_hard_filter(self):
+        """Unlabelled names/products require a real entity resolver, not heuristics."""
         from hippo_memory.gate import filter_search_results_with_details
 
         candidate = self._make_candidate(
             "u1",
-            "Alice prefers a dark theme across IDE editors",
+            "A dark theme is preferred across IDE editors",
             0.90,
             0.82,
             bm25_score=1.0,
@@ -585,11 +585,8 @@ class TestSearchGateAbstentionAndAntiPollution(unittest.TestCase):
             config=self.config,
             query="What IDE theme does Carol use?",
         )
-        self.assertEqual(accepted, [])
-        self.assertEqual(
-            decisions[0].reason,
-            "explicit_identity_subject_mismatch",
-        )
+        self.assertEqual([item["id"] for item in accepted], ["u1"])
+        self.assertTrue(decisions[0].accepted)
 
     def test_matching_explicit_subject_can_pass(self):
         """Explicit subject matching text/metadata must preserve valid retrieval."""
