@@ -47,11 +47,15 @@ CONTEXT_CONTROL_TAG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 INSTRUCTION_OVERRIDE_PATTERN = re.compile(
-    r"\b(?:ignore|disregard|override|bypass)\b.{0,80}"
+    # Imperative override directives. Anchor the action near the beginning so
+    # descriptive facts such as "the sandbox blocks attempts to bypass safety"
+    # remain valid memories.
+    r"^\s*(?:please\s+)?(?:ignore|disregard|override|bypass)\b.{0,80}"
     r"\b(?:instruction|instructions|command|commands|prompt|prompts|policy|policies|rule|rules|safety)\b"
-    r"|\b(?:system|developer)\s+(?:instruction|instructions|prompt|message)\s*:"
-    r"|\b(?:reveal|show|print|expose)\b.{0,80}"
-    r"\b(?:system|developer)\s+(?:instruction|instructions|prompt|prompts|message|messages)\b",
+    r"|^\s*(?:system|developer)\s+(?:instruction|instructions|prompt|message)\s*:"
+    r"|^\s*(?:please\s+)?(?:reveal|show|print|expose|dump)\b.{0,80}"
+    r"\b(?:system|developer|instruction|instructions|prompt|prompts|secret|secrets|credential|credentials)\b"
+    r"|(?:^|[.!?]\s+)(?:now\s+)?(?:act|behave|respond)\s+as\b",
     re.IGNORECASE | re.DOTALL,
 )
 TRANSIENT_ONLY_PATTERN = re.compile(
