@@ -799,10 +799,11 @@ class HippoEngine:
                                         id_accepted.append(cur_id)
                                 else:
                                     logger.info(
-                                        "Warm Path persistence quality gate dropped insert candidate (reason=%s, id=%s): %r",
+                                        "Warm Path persistence quality gate dropped insert candidate "
+                                        "(reason=%s, id=%s, text_len=%d)",
                                         audit_res.reason,
                                         cur_id,
-                                        cur_text,
+                                        len(cur_text),
                                     )
                                     if cur_id:
                                         holder.skipped_ids.add(str(cur_id))
@@ -865,10 +866,11 @@ class HippoEngine:
                             )
                             if not audit_res.accepted:
                                 logger.info(
-                                    "Warm Path persistence quality gate dropped update candidate (reason=%s, id=%s): %r",
+                                    "Warm Path persistence quality gate dropped update candidate "
+                                    "(reason=%s, id=%s, text_len=%d)",
                                     audit_res.reason,
                                     v_id,
-                                    cur_text,
+                                    len(cur_text),
                                 )
                                 if v_id:
                                     holder.skipped_ids.add(str(v_id))
