@@ -38,7 +38,7 @@ from benchmarks.schemas import (
 )
 from hippo_memory.config import HippoConfig
 from hippo_memory.gate import SearchGateConfig
-from benchmarks.gold.specification import audit_security_gates
+from benchmarks.gold.specification import GoldScenario, audit_security_gates
 
 logger = logging.getLogger(__name__)
 
@@ -277,8 +277,19 @@ class BenchmarkRunner:
 
         duration = round(time.perf_counter() - start_time, 4)
 
-        # Aggregate metrics
-        agg_metrics = aggregate_metrics(query_results)
+        # Aggregate retrieval metrics only over the retrieval-scored contract.
+        # Persistence-quality diagnostics intentionally remain in category_metrics
+        # but do not penalize direct-facts retrieval, which bypasses ingest policy.
+        primary_results = [
+            result
+            for result in query_results
+            if result.category != GoldScenario.PERSISTENCE_QUALITY.value
+        ]
+        agg_metrics = aggregate_metrics(primary_results)
+        agg_metrics["primary_query_count"] = float(len(primary_results))
+        agg_metrics["persistence_quality_query_count"] = float(
+            len(query_results) - len(primary_results)
+        )
         cat_metrics = aggregate_by_category(query_results)
 
         # Append auxiliary latency and candidate recall metrics
@@ -374,6 +385,7 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         f"- **Mem0 版本**: `{m.mem0_version}` | **Hippo 版本**: `{m.hippo_version}`",
         f"- **Adapter / Ingest**: `{m.adapter}` / `{m.ingest_profile}`",
         f"- **评测耗时**: `{m.duration_seconds}s` (共 {len(report.query_results)} 道题目)",
+        f"- **主检索口径 / Persistence 诊断**: `{int(agg.get('primary_query_count', len(report.query_results)))} / {int(agg.get('persistence_quality_query_count', 0))}`",
         "",
         "## 0. 安全硬门禁审查 (Security Hard Gates)",
         "",
@@ -383,7 +395,7 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
     audit_icon = "✅ 全部通过 (PASSED)" if gate_audit["passed"] else "❌ 门禁违规 (FAILED)"
     lines.extend([
         f"- **门禁判定**: **{audit_icon}**",
-        f"- **硬负样本数与占比**: `{gate_audit['negative_queries_count']}/{gate_audit['total_queries']}` (`{gate_audit['negative_ratio']:.2%}`, 最低要求 >= 25%) ",
+        f"- **检索硬负样本数与占比**: `{gate_audit['negative_queries_count']}/{gate_audit['retrieval_queries_count']}` (`{gate_audit['negative_ratio']:.2%}`, 最低要求 >= 25%) ",
         "",
         "| 安全硬门禁不变量 | 测量值 | 门禁阈值 | 判定 |",
         "| :--- | :---: | :---: | :---: |",
