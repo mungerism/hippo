@@ -236,7 +236,7 @@ class TestSessionLevelPreCheck(unittest.TestCase):
             touched_files=[],
         )
         self.assertFalse(skip)
-        self.assertEqual(reason, "substantive_user_goal")
+        self.assertEqual(reason, "has_substantive_content")
 
 
 class TestEngineMutationSeamHook(unittest.TestCase):
