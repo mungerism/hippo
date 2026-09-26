@@ -154,7 +154,7 @@ class SearchGateConfig:
     """Configuration for search relevance gating."""
 
     final_threshold: float = 0.32
-    dense_only_threshold: float = 0.62
+    dense_only_threshold: float = 0.70
     relative_threshold_ratio: float = 0.50
     lexical_min_coverage: float = 0.35
     lexical_bm25_threshold: float = 0.15
