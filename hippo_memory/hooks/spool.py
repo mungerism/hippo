@@ -26,60 +26,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Pure transient short phrases for Delta Skip filtering (normalized, case-insensitive)
-TRANSIENT_PHRASES: set[str] = {
-    # Acknowledgement phrases
-    "好的",
-    "收到",
-    "明白了",
-    "稍等",
-    "正在处理",
-    "继续",
-    "ok",
-    "okay",
-    "sure",
-    "got it",
-    "done",
-    "working on it",
-    # Ephemeral probing phrases
-    "运行测试",
-    "跑测试",
-    "跑下测试",
-    "查看代码",
-    "检查文件",
-    "查看状态",
-    "running tests",
-    "checking files",
-    "analyzing codebase",
-    "fetching docs",
-}
+from hippo_memory.persistence_quality import (
+    TRANSIENT_PHRASES,
+    clean_transient_text,
+    should_skip_session,
+)
 
 # Backward compatibility alias
 TRANSIENT_PATTERNS = [
     re.compile(r"^(好的|收到|明白了|稍等|正在处理|继续|ok|okay|sure|got it|working on it|done)[.。!！~]?$", re.IGNORECASE),
     re.compile(r"^(running tests|checking files|analyzing codebase|fetching docs|运行测试|跑测试|跑下测试|查看代码|检查文件|查看状态)[.。!！~]?$", re.IGNORECASE),
 ]
-
-_TRANSIENT_WRAPPERS = "*_`\"'“”‘’「」『』()（）[]【】#~～ \t\r\n"
-
-
-def clean_transient_text(text: str) -> str:
-    """Normalize and clean transient interaction text.
-
-    Strips Markdown wrapping characters (e.g. *, _, `), quotes, and brackets from ends,
-    and strips trailing non-alphanumeric symbols (continuous punctuation, ellipses,
-    emojis, emoticons, and spaces) to yield the pure core phrase.
-    """
-    if not text:
-        return ""
-    s = text.strip()
-    prev = None
-    while prev != s:
-        prev = s
-        s = s.strip(_TRANSIENT_WRAPPERS)
-        while s and not s[-1].isalnum():
-            s = s[:-1]
-    return s.strip()
 
 
 
@@ -650,32 +607,18 @@ class SpoolWorker:
             self._lock_fd = None
 
     def is_delta_transient(self, payload: CapturedPayload) -> bool:
-        """Check if assistant final reply is a trivial transient confirmation without file modifications.
+        """Check if session is transient or noise without durable memory value.
 
-        Preserves acknowledged user decisions and preferences even when no files are touched.
+        Merges and delegates to should_skip_session() to preserve safety baselines
+        and prevent dual-policy drift.
         """
-        if payload.touched_files:
-            return False
-
-        reply = payload.last_assistant_final.strip()
-        user_goal = payload.last_user_goal.strip()
-
-        # If user provided a substantive goal/decision (not just transient ping-pong/empty),
-        # never skip; leave memory extraction and deduplication to Mem0.
-        if user_goal:
-            cleaned_user = clean_transient_text(user_goal).lower()
-            is_user_transient = len(user_goal) < 40 and (cleaned_user in TRANSIENT_PHRASES)
-            if not is_user_transient:
-                return False
-
-        if not reply:
-            return True
-
-        cleaned_reply = clean_transient_text(reply).lower()
-        if not cleaned_reply:
-            return True
-
-        return len(reply) < 40 and cleaned_reply in TRANSIENT_PHRASES
+        skip, _ = should_skip_session(
+            turns=payload.turns,
+            last_user_goal=payload.last_user_goal,
+            last_assistant_final=payload.last_assistant_final,
+            touched_files=payload.touched_files,
+        )
+        return skip
 
     def process_one_job(self, payload: CapturedPayload) -> bool:
         """Execute distillation for a single claimed job. Returns True if handled."""
@@ -712,12 +655,19 @@ class SpoolWorker:
                 )
                 return True
 
-            # 2. Delta Skip filter: ignore transient replies with no file changes
-            if self.is_delta_transient(extracted):
+            # 2. Pre-distillation Quality Gate: skip pure noise/acknowledgements before calling LLM
+            should_skip, skip_reason = should_skip_session(
+                turns=extracted.turns,
+                last_user_goal=extracted.last_user_goal,
+                last_assistant_final=extracted.last_assistant_final,
+                touched_files=extracted.touched_files,
+            )
+            if should_skip:
                 self.storage.skip_job(
                     extracted.job_id,
-                    "Delta skip: transient acknowledgment without file mutations",
+                    skip_reason,
                 )
+                logger.info(f"Skipped job {extracted.job_id} due to pre-distillation filter: {skip_reason}")
                 return True
 
             # 3. Call Mem0 distillation pipeline

@@ -38,13 +38,15 @@ flowchart TD
 
 ---
 
-## 2. Warm Path：会话记忆异步蒸馏
+## 2. Warm Path：会话记忆异步蒸馏与持久化门禁
 
-- **核心目标**：在用户不进行显式总结的情况下，从完整的长对话历史中提炼未被言明的偏好与踩坑教训。
+- **核心目标**：在用户不进行显式总结的情况下，从完整的长对话历史中提炼未被言明的偏好与踩坑教训，同时建立严格的持久化质量门禁与防污染过滤（Issue #73）。
 - **机制与实现**：
   - 双事件触发：会话结束（Session End）与单轮响应完成（Turn Complete）；
   - 宿主通过 `hippo hook capture` 管道将原始会话转储至本地 Spool 队列（SQLite），耗时 <50ms 即退出；
-  - 独立的 `SpoolWorker` 异步批量消费，使用配置的 LLM 执行多轮抽取并沉淀为记忆；
+  - **Pre-check（蒸馏前预审）**：在调用 LLM 蒸馏前，`SpoolWorker` 审查会话是否为纯口头禅确认或纯运行时流水日志。无文件修改且无实质性目标的纯噪音会话被提前判定并跳过，节省 LLM Token；有任何实质性用户意图、修改文件或不确定的内容均保守 Fail-Open 放行；
+  - **Prompt Hardening（防注入加固）**：基于 `SESSION_DISTILLATION_PROMPT_V2`，明确将会话转录作为不可信输入，严禁将 Transcript 中的 Prompt Injection / 指令覆盖持久化为规则；明确区分日志中的稳定架构配置（提取为干净事实）与运行时流水（忽略）；
+  - **Post-audit（落库前质检）**：挂载在真实持久化调用入口（`HippoEngine._hook_memory_persistence` 拦截的 `vector_store.insert` 与 `update`）。只对 `source == "session_distillation"` 的后台写入生效，对提取后的记忆执行 `ACCEPT / DROP` 审查。被拒绝的项直接从批量写入中剔除或阻断更新，并记录到 `skipped_ids` 阻断 History 与 Entity 副作用，绝不篡改已生成向量的文本，且 Hot Path（`infer=False` / `add_explicit()`）零开销绕过；
   - 记忆带有完整的 provenance（宿主来源、会话 ID、确认时间戳），便于后续追溯。
 
 ---

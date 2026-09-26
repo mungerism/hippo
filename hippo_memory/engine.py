@@ -19,6 +19,7 @@ from hippo_memory.lifecycle import (
 from hippo_memory.config import HippoConfig
 from hippo_memory.decision import resolve_identity
 from hippo_memory.exceptions import HippoLockTimeoutError, HippoValidationError
+from hippo_memory.persistence_quality import audit_distilled_memory
 from hippo_memory.recent import fetch_recent_memories
 from hippo_memory.router import ScopeRouter
 
@@ -45,12 +46,14 @@ class _LazyWriteLockHolder:
         agent_id: str,
         dedup_enabled: bool = False,
         run_id: Optional[str] = None,
+        persistence_quality_enabled: bool = False,
     ):
         self.engine = engine
         self.user_id = str(user_id)
         self.agent_id = str(agent_id)
         self.dedup_enabled = dedup_enabled
         self.run_id = run_id
+        self.persistence_quality_enabled = persistence_quality_enabled
         self.start_iso: str = datetime.now(timezone.utc).isoformat()
         self._lock_ctx: Optional[Iterator[None]] = None
         self._lock = threading.Lock()
@@ -729,10 +732,12 @@ class HippoEngine:
             if orig_insert is not None:
                 def _locked_insert(*args: Any, **kwargs: Any) -> Any:
                     holder = _current_write_lock_holder.get()
+                    v_new: Optional[list[Any]] = None
                     id_new: Optional[list[str]] = None
                     p_new: Optional[list[dict[str, Any]]] = None
                     i_ids: Optional[list[str]] = None
                     pays: Optional[list[dict[str, Any]]] = None
+                    vecs: Optional[list[Any]] = None
                     if holder is not None:
                         holder.vector_store = vector_store
                         holder.ensure_locked()
@@ -765,6 +770,51 @@ class HippoEngine:
                                     holder.release_if_locked()
                                     return []
                                 args, kwargs = _rebuild_insert_call(args, kwargs, v_new, p_new, id_new)
+
+                        # Post-distillation persistence quality gate (Warm Path only)
+                        cand_pays = p_new if p_new is not None else pays
+                        cand_ids = id_new if id_new is not None else i_ids
+                        cand_vecs = v_new if v_new is not None else vecs
+                        if holder.persistence_quality_enabled and cand_pays:
+                            v_accepted = []
+                            id_accepted = []
+                            p_accepted = []
+                            for idx, p in enumerate(cand_pays):
+                                cur_id = cand_ids[idx] if cand_ids is not None and idx < len(cand_ids) else None
+                                cur_vec = cand_vecs[idx] if cand_vecs is not None and idx < len(cand_vecs) else None
+                                cur_text = ""
+                                if isinstance(p, Mapping):
+                                    cur_text = p.get("data") or p.get("text") or ""
+                                meta = p.get("metadata") if isinstance(p, Mapping) else None
+
+                                audit_res = audit_distilled_memory(
+                                    str(cur_text),
+                                    metadata=meta if isinstance(meta, Mapping) else p,
+                                )
+                                if audit_res.accepted:
+                                    p_accepted.append(p)
+                                    if cand_vecs is not None:
+                                        v_accepted.append(cur_vec)
+                                    if cand_ids is not None:
+                                        id_accepted.append(cur_id)
+                                else:
+                                    logger.info(
+                                        "Warm Path persistence quality gate dropped insert candidate (reason=%s, id=%s): %r",
+                                        audit_res.reason,
+                                        cur_id,
+                                        cur_text,
+                                    )
+                                    if cur_id:
+                                        holder.skipped_ids.add(str(cur_id))
+
+                            v_new = v_accepted if cand_vecs is not None else None
+                            id_new = id_accepted if cand_ids is not None else None
+                            p_new = p_accepted
+                            if not p_new:
+                                holder.primary_completed = True
+                                holder.release_if_locked()
+                                return []
+                            args, kwargs = _rebuild_insert_call(args, kwargs, v_new, p_new, id_new)
                     res = orig_insert(*args, **kwargs)
                     if holder is not None:
                         # Record committed primary memory versions for entity linking re-validation (#42)
@@ -796,6 +846,30 @@ class HippoEngine:
                                 holder.check_observed_context_stale(vector_store)
                                 or (v_id and _is_stale_mutation(vector_store, str(v_id), holder))
                             ):
+                                if v_id:
+                                    holder.skipped_ids.add(str(v_id))
+                                holder.primary_completed = True
+                                holder.entity_linking_aborted = True
+                                holder.release_if_locked()
+                                return None
+
+                        if holder.persistence_quality_enabled:
+                            v_id, p = _extract_update_args(args, kwargs)
+                            cur_text = ""
+                            if isinstance(p, Mapping):
+                                cur_text = p.get("data") or p.get("text") or ""
+                            meta = p.get("metadata") if isinstance(p, Mapping) else None
+                            audit_res = audit_distilled_memory(
+                                str(cur_text),
+                                metadata=meta if isinstance(meta, Mapping) else p,
+                            )
+                            if not audit_res.accepted:
+                                logger.info(
+                                    "Warm Path persistence quality gate dropped update candidate (reason=%s, id=%s): %r",
+                                    audit_res.reason,
+                                    v_id,
+                                    cur_text,
+                                )
                                 if v_id:
                                     holder.skipped_ids.add(str(v_id))
                                 holder.primary_completed = True
@@ -1225,6 +1299,12 @@ class HippoEngine:
         # persistence (vector_store.insert), keeping slow remote LLM extraction network calls
         # outside the critical section without breaking TOCTOU safety with ConsolidationApplier.
         self._hook_memory_persistence(self.memory)
+        meta = params.get("metadata")
+        is_warm_path_distillation = (
+            infer is True
+            and isinstance(meta, Mapping)
+            and meta.get("source") == "session_distillation"
+        )
         holder = _LazyWriteLockHolder(
             self,
             params["user_id"],
@@ -1232,6 +1312,8 @@ class HippoEngine:
             dedup_enabled=infer,
             run_id=run_id,
         )
+        if is_warm_path_distillation:
+            holder.persistence_quality_enabled = True
         if not infer:
             holder.ensure_locked()
 
