@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import abc
 import copy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import logging
 from pathlib import Path
 import re
@@ -29,7 +29,6 @@ from benchmarks.schemas import (
     LifecycleScopeTrace,
 )
 from hippo_memory.gate import (
-    GateDecision,
     SearchGateConfig,
     filter_search_results_with_details,
 )
@@ -41,7 +40,6 @@ from hippo_memory.lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 class BenchmarkAdapter(abc.ABC):
     """Abstract interface for memory retrieval benchmark adapters."""
@@ -101,6 +99,7 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             else {}
         )
         self.gate_config = gate_config or SearchGateConfig()
+        self._backend_to_logical: Dict[str, str] = {}
         self._embedding_profile = embedding_profile or {
             "provider": "replay",
             "model": "fixture",
@@ -111,6 +110,10 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
     def get_embedding_profile(self) -> Dict[str, Any]:
         """Return embedding profile for replay."""
         return dict(self._embedding_profile)
+
+    def get_index_size_bytes(self) -> Optional[int]:
+        """Replay has no persisted vector index."""
+        return None
 
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Store corpus items in memory for fixture replay."""
@@ -123,21 +126,57 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
         """Manually inject pre-recorded candidates for a specific query."""
         self._candidates_by_query[query_id] = [dict(c) for c in candidates]
 
+    STOP_WORDS = {
+        "a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or",
+        "is", "are", "was", "were", "be", "been", "being",
+        "do", "does", "did", "how", "what", "where", "which", "who", "whom", "when", "why",
+        "can", "could", "should", "would", "will", "shall",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+        "my", "your", "his", "their", "our", "its", "this", "that", "these", "those",
+        "hippo", "repo", "repository",
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
+        "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
+        "自己", "这", "如何", "什么", "哪些", "怎么", "哪个", "是否",
+    }
+
+    @classmethod
+    def _tokenize_text(cls, text: str) -> set[str]:
+        """Extract bilingual tokens excluding low-IDF stop words."""
+        tokens: set[str] = set()
+        # English words
+        for word in re.findall(r"[a-zA-Z0-9_\-]+", text.lower()):
+            if len(word) >= 2 and word not in cls.STOP_WORDS:
+                tokens.add(word)
+        # Chinese characters & bi-grams
+        cn_chars = [ch for ch in re.findall(r"[\u4e00-\u9fff]", text) if ch not in cls.STOP_WORDS]
+        for ch in cn_chars:
+            tokens.add(ch)
+        for i in range(len(cn_chars) - 1):
+            bi = cn_chars[i] + cn_chars[i + 1]
+            if bi not in cls.STOP_WORDS:
+                tokens.add(bi)
+        return tokens
+
     def _generate_synthetic_candidates(
         self, query: EvaluationQuery
     ) -> List[Dict[str, Any]]:
         """Generate deterministic scored candidates from ingested corpus based on token overlap."""
-        tokens = set(re.findall(r"\w+", query.query.lower()))
+        tokens = self._tokenize_text(query.query)
         candidates: List[Dict[str, Any]] = []
 
         for cid, item in self._corpus_by_id.items():
-            item_tokens = set(re.findall(r"\w+", item.text.lower()))
+            item_tokens = self._tokenize_text(item.text)
             overlap = len(tokens & item_tokens)
-            base_score = 0.2
-            if tokens:
-                base_score += 0.7 * (overlap / float(len(tokens)))
 
-            semantic_score = round(min(0.99, max(0.05, base_score)), 4)
+            if not tokens or overlap == 0:
+                base_score = 0.05
+            else:
+                ratio = overlap / float(len(tokens))
+                # Deterministic lexical proxy only. Gold labels/categories must never
+                # influence scores, otherwise the fixture can "know" the answer.
+                base_score = 0.05 + 0.90 * (ratio ** 1.35)
+
+            semantic_score = round(min(0.99, max(0.01, base_score)), 4)
             bm25_score = round(1.0 if overlap > 0 else 0.0, 4)
             entity_boost = 0.0
             final_score = semantic_score
@@ -230,7 +269,8 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             if q_scope == "project" and item_sc == "global":
                 rejected_lifecycle.append({"id": cid, "reason": "scope_mismatch"})
                 continue
-            if q_scope == "project" and q_proj and item_proj and item_proj != q_proj:
+            # When scope is 'project' or 'all', items belonging to a different project must be rejected
+            if q_scope in ("project", "all") and q_proj and item_sc == "project" and item_proj and item_proj != q_proj:
                 rejected_lifecycle.append({"id": cid, "reason": "cross_project"})
                 continue
 
@@ -241,9 +281,10 @@ class ReplayFixtureAdapter(BenchmarkAdapter):
             rejected=rejected_lifecycle,
         )
 
-        # Stage 3: Relevance gate filtering
+        # Stage 3: Relevance gate filtering. Replay uses the same generic gate
+        # contract as production; Gold labels/categories never participate in scoring.
         accepted, decisions = filter_search_results_with_details(
-            passed_lifecycle, config=self.gate_config, limit=limit
+            passed_lifecycle, config=self.gate_config, limit=limit, query=query.query
         )
 
         gate_trace = GateTrace(
@@ -297,10 +338,10 @@ class HippoEngineAdapter(BenchmarkAdapter):
         collection_name: Optional[str] = None,
         config: Optional[Any] = None,
     ):
-        from hippo_memory.config import HippoConfig
+        from hippo_memory.config import get_config
         from hippo_memory.engine import HippoEngine
 
-        base_cfg = config or HippoConfig.from_env()
+        base_cfg = config or get_config()
         cfg = copy.copy(base_cfg)
 
         # Generate or validate isolated collection name.
@@ -347,11 +388,29 @@ class HippoEngineAdapter(BenchmarkAdapter):
         cfg.get_mem0_config = isolated_get_mem0_config
 
         self.collection_name = isolated_coll
+        self._backend_to_logical: Dict[str, str] = {}
+        self._corpus_by_logical: Dict[str, CorpusItem] = {}
         self.config = cfg
         self.gate_config = (
             cfg.get_gate_config() if hasattr(cfg, "get_gate_config") else SearchGateConfig()
         )
         self.engine = HippoEngine(config=cfg)
+
+    def get_index_size_bytes(self) -> Optional[int]:
+        """Measure vector index bytes only for filesystem-backed vector stores."""
+        vector_cfg = (
+            self.config.get_mem0_config()
+            .get("vector_store", {})
+            .get("config", {})
+        )
+        raw_path = vector_cfg.get("path") or vector_cfg.get("location")
+        if not raw_path:
+            return None
+        root = Path(str(raw_path)).expanduser()
+        try:
+            return sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
+        except OSError:
+            return None
 
     def get_embedding_profile(self) -> Dict[str, Any]:
         """Extract the effective embedding profile from the actual Mem0 config."""
@@ -375,24 +434,28 @@ class HippoEngineAdapter(BenchmarkAdapter):
     def ingest_corpus(self, corpus: Sequence[CorpusItem]) -> None:
         """Ingest corpus deterministically into the isolated benchmark collection."""
         for item in corpus:
+            self._corpus_by_logical[item.id] = item
             meta = dict(item.metadata)
             meta["status"] = item.status
             meta["scope"] = item.scope
             meta["benchmark_id"] = item.id
-            if item.category is not None:
-                meta["category"] = item.category
             if item.project_id:
                 meta["project"] = item.project_id
 
             # infer=False preserves a one-corpus-item -> one-memory relationship and
             # avoids LLM extraction rewriting/splitting benchmark facts.
-            self.engine.add(
+            result = self.engine.add(
                 text=item.text,
                 user_id=item.user_id or self.config.user_id,
                 agent_id=item.project_id if item.scope == "project" else "global",
                 metadata=meta,
                 infer=False,
             )
+            result_items = result.get("results", []) if isinstance(result, Mapping) else result
+            if isinstance(result_items, list):
+                for stored in result_items:
+                    if isinstance(stored, Mapping) and stored.get("id") is not None:
+                        self._backend_to_logical[str(stored["id"])] = item.id
 
     def search(
         self,
@@ -409,12 +472,69 @@ class HippoEngineAdapter(BenchmarkAdapter):
             limit=limit,
             query_id=query.query_id,
         )
-        def logical_id(item: Mapping[str, Any]) -> str:
-            meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
-            return str(meta.get("benchmark_id") or item.get("benchmark_id") or item.get("id"))
+
+        def logical_id(value: Any) -> str:
+            if isinstance(value, Mapping):
+                meta = value.get("metadata") if isinstance(value.get("metadata"), Mapping) else {}
+                raw_id = str(value.get("id"))
+                return str(
+                    meta.get("benchmark_id")
+                    or value.get("benchmark_id")
+                    or self._backend_to_logical.get(raw_id)
+                    or raw_id
+                )
+            raw_id = str(value)
+            return self._backend_to_logical.get(raw_id, raw_id)
 
         retrieved_ids = [logical_id(item) for item in accepted]
-        return retrieved_ids, trace if capture_trace else None
+        if trace is None:
+            return retrieved_ids, None
+
+        def corpus_item_for(candidate_id: str) -> Optional[CorpusItem]:
+            return self._corpus_by_logical.get(logical_id(candidate_id))
+
+        normalized_candidates = []
+        for candidate in trace.candidate_stage:
+            logical_candidate_id = logical_id(candidate.id)
+            corpus_item = corpus_item_for(candidate.id)
+            normalized_candidates.append(
+                replace(
+                    candidate,
+                    id=logical_candidate_id,
+                    status=corpus_item.status if corpus_item is not None else candidate.status,
+                    scope=corpus_item.scope if corpus_item is not None else candidate.scope,
+                    project_id=(
+                        corpus_item.project_id if corpus_item is not None else candidate.project_id
+                    ),
+                    user_id=corpus_item.user_id if corpus_item is not None else candidate.user_id,
+                )
+            )
+
+        normalized_trace = EvaluationTrace(
+            query_id=trace.query_id,
+            query=trace.query,
+            candidate_stage=normalized_candidates,
+            lifecycle_scope_stage=LifecycleScopeTrace(
+                passed_ids=[logical_id(i) for i in trace.lifecycle_scope_stage.passed_ids],
+                rejected=[
+                    {**item, "id": logical_id(item.get("id"))}
+                    for item in trace.lifecycle_scope_stage.rejected
+                ],
+            ),
+            gate_stage=GateTrace(
+                passed_ids=[logical_id(i) for i in trace.gate_stage.passed_ids],
+                rejected=[
+                    {**item, "id": logical_id(item.get("id"))}
+                    for item in trace.gate_stage.rejected
+                ],
+                gate_config=trace.gate_stage.gate_config,
+            ),
+            final_stage_ids=[logical_id(i) for i in trace.final_stage_ids],
+        )
+
+        # The adapter is an observer, not an alternate retrieval policy. The IDs
+        # returned here must correspond exactly to HippoEngine.search_with_trace().
+        return retrieved_ids, normalized_trace if capture_trace else None
 
     def cleanup(self) -> None:
         """Delete the isolated collection without lazily opening production-adjacent resources."""
@@ -428,4 +548,6 @@ class HippoEngineAdapter(BenchmarkAdapter):
         except Exception as e:
             logger.warning("Failed to delete isolated collection %s: %s", self.collection_name, e)
         finally:
+            self._backend_to_logical.clear()
+            self._corpus_by_logical.clear()
             self._temp_dir.cleanup()

@@ -33,7 +33,8 @@ env/
 
 # Local Data & Storage (Qdrant, SQLite, cache)
 storage/
-data/
+/data/
+!benchmarks/data/
 *.db
 *.sqlite
 *.sqlite3

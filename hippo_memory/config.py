@@ -279,8 +279,13 @@ class HippoConfig:
         # Relevance gate & retrieval thresholds
         self.semantic_threshold = float(os.getenv("HIPPO_SEMANTIC_THRESHOLD", "0.1"))
         self.final_threshold = float(os.getenv("HIPPO_FINAL_THRESHOLD", "0.32"))
-        self.dense_only_threshold = float(os.getenv("HIPPO_DENSE_ONLY_THRESHOLD", "0.62"))
+        self.dense_only_threshold = float(os.getenv("HIPPO_DENSE_ONLY_THRESHOLD", "0.70"))
         self.relative_threshold_ratio = float(os.getenv("HIPPO_RELATIVE_RATIO", "0.50"))
+        self.lexical_min_coverage = float(os.getenv("HIPPO_LEXICAL_MIN_COVERAGE", "0.35"))
+        self.lexical_bm25_threshold = float(os.getenv("HIPPO_LEXICAL_BM25_THRESHOLD", "0.15"))
+        self.lexical_semantic_threshold = float(
+            os.getenv("HIPPO_LEXICAL_SEMANTIC_THRESHOLD", "0.48")
+        )
         self.max_injected = int(os.getenv("HIPPO_MAX_INJECTED", "3"))
         self.gate_enabled = os.getenv("HIPPO_GATE_ENABLED", "1").lower() in ("1", "true", "yes")
 
@@ -290,6 +295,9 @@ class HippoConfig:
             final_threshold=self.final_threshold,
             dense_only_threshold=self.dense_only_threshold,
             relative_threshold_ratio=self.relative_threshold_ratio,
+            lexical_min_coverage=self.lexical_min_coverage,
+            lexical_bm25_threshold=self.lexical_bm25_threshold,
+            lexical_semantic_threshold=self.lexical_semantic_threshold,
             enabled=self.gate_enabled,
         )
 

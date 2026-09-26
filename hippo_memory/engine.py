@@ -1446,7 +1446,7 @@ class HippoEngine:
             else None
         )
         try:
-            return filter_search_results(raw_list, config=gate_cfg, limit=limit)
+            return filter_search_results(raw_list, config=gate_cfg, limit=limit, query=query)
         except Exception as e:
             logger.error("Error applying relevance gate to search results: %s", e)
             return []
@@ -1590,7 +1590,7 @@ class HippoEngine:
         gate_dict = dataclasses.asdict(gate_cfg) if (gate_cfg and dataclasses.is_dataclass(gate_cfg)) else {}
 
         accepted, decisions = filter_search_results_with_details(
-            passed_lifecycle_items, config=gate_cfg, limit=limit
+            passed_lifecycle_items, config=gate_cfg, limit=limit, query=query
         )
 
         gate_trace = GateTrace(

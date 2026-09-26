@@ -244,14 +244,26 @@ def aggregate_metrics(
     metric_sums: Dict[str, float] = defaultdict(float)
     metric_counts: Dict[str, int] = defaultdict(int)
 
+    positive_only_prefixes = ("hit_rate@", "precision@", "recall@", "ndcg@")
+    positive_only_exact = {"mrr", "candidate_recall@20"}
+
     for qr in query_results:
         for metric_name, value in qr.metrics.items():
+            # Retrieval-quality metrics are undefined for expected-empty queries.
+            # Score abstention separately via empty_accuracy / hard-negative FPR
+            # instead of letting correct negatives inflate Recall/nDCG.
+            if qr.expected_empty and (
+                metric_name.startswith(positive_only_prefixes)
+                or metric_name in positive_only_exact
+            ):
+                continue
             metric_sums[metric_name] += value
             metric_counts[metric_name] += 1
 
     return {
         name: round(metric_sums[name] / float(metric_counts[name]), 4)
         for name in sorted(metric_sums.keys())
+        if metric_counts[name] > 0
     }
 
 
