@@ -43,7 +43,7 @@ class TestHippoGoldV1Dataset(unittest.TestCase):
         dataset = BenchmarkDataset.from_json(self.data_path.read_text(encoding="utf-8"))
 
         self.assertEqual(dataset.name, "hippo_gold_v1")
-        self.assertEqual(dataset.version, "1.0.0")
+        self.assertEqual(dataset.version, "1.1.0")
 
         # Run full integrity audit
         audit = validate_dataset_integrity(dataset)
@@ -51,6 +51,8 @@ class TestHippoGoldV1Dataset(unittest.TestCase):
 
         # Scale requirements
         self.assertGreaterEqual(audit["total_queries"], 200)
+        self.assertGreaterEqual(audit["retrieval_queries"], 200)
+        self.assertEqual(audit["persistence_quality_queries"], 10)
         self.assertGreaterEqual(audit["negative_ratio"], 0.25)
 
         self.assertTrue(all(q.query_time for q in dataset.queries))
@@ -60,7 +62,7 @@ class TestHippoGoldV1Dataset(unittest.TestCase):
             }
             self.assertEqual(set(q.evidence_ids), expected_evidence)
 
-        # Verify all 8 scenarios are covered
+        # Verify every approved scenario is covered
         for scenario in GoldScenario:
             self.assertIn(scenario.value, audit["scenario_counts"])
             self.assertGreater(audit["scenario_counts"][scenario.value], 0)
@@ -350,6 +352,159 @@ class TestHippoGoldV1Dataset(unittest.TestCase):
         self.assertEqual(audit["cross_project_leakage"], 2)
         self.assertEqual(audit["superseded_leakage"], 1)
         self.assertFalse(audit["passed"])
+
+    def test_persistence_quality_is_diagnostic_not_retrieval_hard_gate(self):
+        """Persistence-quality misses are reported separately from retrieval hard gates."""
+        persistence_trace = EvaluationTrace(
+            query_id="p1",
+            query="acknowledgement text",
+            candidate_stage=[
+                CandidateTraceItem(
+                    id="persisted-noise",
+                    user_id="alice",
+                    scope="project",
+                    project_id="hippo",
+                )
+            ],
+            lifecycle_scope_stage=LifecycleScopeTrace(
+                passed_ids=["persisted-noise"], rejected=[]
+            ),
+            gate_stage=GateTrace(passed_ids=["persisted-noise"], rejected=[]),
+            final_stage_ids=["persisted-noise"],
+        )
+        persistence_result = QueryEvaluationResult(
+            query_id="p1",
+            query="acknowledgement text",
+            category=GoldScenario.PERSISTENCE_QUALITY.value,
+            retrieved_ids=["persisted-noise"],
+            relevant_ids=[],
+            forbidden_ids=["persisted-noise"],
+            metrics={},
+            expected_empty=True,
+            scope="project",
+            project_id="hippo",
+            user_id="alice",
+            trace=persistence_trace,
+        )
+        retrieval_result = QueryEvaluationResult(
+            query_id="r1",
+            query="unconfigured service endpoint",
+            category=GoldScenario.HARD_NEGATIVE.value,
+            retrieved_ids=[],
+            relevant_ids=[],
+            forbidden_ids=[],
+            metrics={},
+            expected_empty=True,
+            scope="project",
+            project_id="hippo",
+            user_id="alice",
+            trace=EvaluationTrace(
+                query_id="r1",
+                query="unconfigured service endpoint",
+                candidate_stage=[],
+                lifecycle_scope_stage=LifecycleScopeTrace(
+                    passed_ids=[], rejected=[]
+                ),
+                gate_stage=GateTrace(passed_ids=[], rejected=[]),
+                final_stage_ids=[],
+            ),
+        )
+        report = BenchmarkReport(
+            manifest=RunManifest(
+                run_id="test",
+                timestamp="2026-09-25T12:00:00Z",
+                git_sha="test",
+                dataset_name="test",
+                dataset_hash="test",
+                mem0_version="test",
+                hippo_version="test",
+                embedding_profile={},
+                gate_thresholds={},
+                max_injected=3,
+                k_values=[1, 3],
+                seed=42,
+                duration_seconds=0.0,
+            ),
+            aggregate_metrics={},
+            category_metrics={},
+            query_results=[persistence_result, retrieval_result],
+        )
+        audit = audit_security_gates(
+            report,
+            thresholds=SecurityGateThresholds(
+                min_total_queries=1,
+                min_hard_negative_ratio=0.0,
+            ),
+        )
+        self.assertTrue(audit["passed"], audit["violations"])
+        self.assertEqual(audit["retrieval_queries_count"], 1)
+        self.assertEqual(audit["negative_queries_count"], 1)
+        self.assertEqual(audit["total_forbidden_leakage"], 0)
+        self.assertEqual(audit["persistence_quality_forbidden_hits"], 1)
+
+    def test_retrieval_safety_remains_hard_gated(self):
+        """Retrieval-safety false positives still fail FPR and forbidden leakage."""
+        unsafe_trace = EvaluationTrace(
+            query_id="r1",
+            query="control payload",
+            candidate_stage=[
+                CandidateTraceItem(
+                    id="unsafe",
+                    user_id="alice",
+                    scope="project",
+                    project_id="hippo",
+                )
+            ],
+            lifecycle_scope_stage=LifecycleScopeTrace(
+                passed_ids=["unsafe"], rejected=[]
+            ),
+            gate_stage=GateTrace(passed_ids=["unsafe"], rejected=[]),
+            final_stage_ids=["unsafe"],
+        )
+        result = QueryEvaluationResult(
+            query_id="r1",
+            query="control payload",
+            category=GoldScenario.RETRIEVAL_SAFETY.value,
+            retrieved_ids=["unsafe"],
+            relevant_ids=[],
+            forbidden_ids=["unsafe"],
+            metrics={},
+            expected_empty=True,
+            scope="project",
+            project_id="hippo",
+            user_id="alice",
+            trace=unsafe_trace,
+        )
+        report = BenchmarkReport(
+            manifest=RunManifest(
+                run_id="test",
+                timestamp="2026-09-25T12:00:00Z",
+                git_sha="test",
+                dataset_name="test",
+                dataset_hash="test",
+                mem0_version="test",
+                hippo_version="test",
+                embedding_profile={},
+                gate_thresholds={},
+                max_injected=3,
+                k_values=[1, 3],
+                seed=42,
+                duration_seconds=0.0,
+            ),
+            aggregate_metrics={},
+            category_metrics={},
+            query_results=[result],
+        )
+        audit = audit_security_gates(
+            report,
+            thresholds=SecurityGateThresholds(
+                min_total_queries=1,
+                min_hard_negative_ratio=0.0,
+            ),
+        )
+        self.assertFalse(audit["passed"])
+        self.assertEqual(audit["hard_negative_fpr"], 1.0)
+        self.assertEqual(audit["total_forbidden_leakage"], 1)
 
     def test_baseline_self_comparison_has_no_regression(self):
         """Comparing baseline report against itself must yield zero regressions."""
