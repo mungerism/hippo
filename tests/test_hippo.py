@@ -201,6 +201,40 @@ class TestHippo(unittest.TestCase):
             self.assertGreaterEqual(phys_mb, 0.0)
             self.assertEqual(phys_mb, _dir_size_mb(d))
 
+    def test_dir_storage_usage_distinguishes_sparse_file(self):
+        from hippo_memory.doctor import _dir_storage_usage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            sparse = d / "sparse.dat"
+            logical_size = 64 * 1024 * 1024
+            with sparse.open("wb") as fh:
+                fh.seek(logical_size - 1)
+                fh.write(b"\0")
+
+            st = sparse.stat()
+            if not hasattr(st, "st_blocks") or st.st_blocks * 512 >= st.st_size:
+                self.skipTest("filesystem does not expose sparse physical allocation")
+
+            phys_mb, log_mb = _dir_storage_usage(d)
+            self.assertGreaterEqual(log_mb, 64.0)
+            self.assertLess(phys_mb, log_mb)
+
+    def test_doctor_rss_check_present_when_pid_unavailable(self):
+        from unittest.mock import patch
+        from hippo_memory import doctor
+
+        with patch.object(doctor, "_client_config_checks", return_value=[]), \
+             patch.object(doctor, "resolve_collection_name", side_effect=RuntimeError("test")), \
+             patch.object(doctor, "is_listening", return_value=True), \
+             patch.object(doctor, "qdrant_service_status", side_effect=OSError("launchctl unavailable")), \
+             patch.object(doctor, "find_listening_pid", return_value=None):
+            checks = doctor.collect_checks()
+
+        rss_check = next(c for c in checks if c["name"] == "常驻内存占用 (RSS)")
+        self.assertTrue(rss_check["ok"])
+        self.assertIn("未找到监听进程 PID", rss_check["detail"])
+
     def test_get_process_rss_mb_current_process(self):
         import os
         from hippo_memory.service import get_process_rss_mb
