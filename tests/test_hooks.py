@@ -206,6 +206,92 @@ class TestHookSpool(unittest.TestCase):
         # Crucial invariant: engine.add was NOT called a second time
         self.assertEqual(mock_engine.add.call_count, 1)
 
+    def test_persistence_quality_real_warm_path_chain(self):
+        """CapturedPayload -> SpoolWorker -> HippoEngine.add -> mutation audit uses session_distillation context."""
+        from hippo_memory.engine import HippoEngine
+
+        engine = HippoEngine()
+        mock_memory = MagicMock()
+        mock_vs = MagicMock()
+        underlying_insert = MagicMock(return_value=["stored"])
+        mock_vs.insert = underlying_insert
+        mock_vs.update = MagicMock()
+        mock_vs.list.return_value = []
+        mock_vs.get.return_value = None
+        mock_memory.vector_store = mock_vs
+        mock_memory.db = MagicMock()
+        mock_memory.enable_graph = False
+
+        def fake_mem0_add(_conversation, **_params):
+            # Simulate a bad distilled output that survived the LLM layer.
+            mock_vs.insert(
+                vectors=[[0.2, 0.3]],
+                payloads=[{"data": "好的"}],
+                ids=["polluted_id"],
+            )
+            return {"results": [{"id": "polluted_id", "memory": "好的", "event": "ADD"}]}
+
+        mock_memory.add.side_effect = fake_mem0_add
+        engine._memory = mock_memory
+        worker = SpoolWorker(storage=self.storage, engine=engine)
+
+        payload = CapturedPayload(
+            job_id="job-real-persistence-gate",
+            host="pi",
+            event="Stop",
+            session_id="sess-real-gate",
+            project_dir="/tmp/repo",
+            project_id="test_repo",
+            turns=[
+                {"role": "user", "content": "项目以后统一使用 uv 管理 Python 依赖"},
+                {"role": "assistant", "content": "我会按这个规则执行"},
+            ],
+            last_user_goal="项目以后统一使用 uv 管理 Python 依赖",
+            last_assistant_final="我会按这个规则执行",
+            touched_files=[],
+        )
+        self.storage.enqueue(payload)
+        worker.drain()
+
+        state = self.storage.load_state(payload.job_id)
+        self.assertEqual(state.get("state"), JobState.COMPLETED.value)
+        underlying_insert.assert_not_called()
+
+        # The worker must have supplied the exact Warm Path metadata that turns
+        # the engine-level persistence audit on.
+        _, kwargs = mock_memory.add.call_args
+        self.assertTrue(kwargs.get("infer", True))
+        self.assertEqual(kwargs["metadata"]["source"], "session_distillation")
+
+    def test_raw_log_only_real_adapter_shape_skips_before_engine(self):
+        """Raw log stored as last_user_goal/last_assistant_final must still be pre-skipped."""
+        mock_engine = MagicMock()
+        worker = SpoolWorker(storage=self.storage, engine=mock_engine)
+        user_log = "2026-03-29 10:00:00 [INFO] Connection pool reset"
+        assistant_log = "2026-03-29 10:00:01 [DEBUG] Reconnected to redis in 5ms"
+        payload = CapturedPayload(
+            job_id="job-raw-log-real-shape",
+            host="pi",
+            event="Stop",
+            session_id="sess-raw-log",
+            project_dir="/tmp/repo",
+            project_id="test_repo",
+            turns=[
+                {"role": "user", "content": user_log},
+                {"role": "assistant", "content": assistant_log},
+            ],
+            last_user_goal=user_log,
+            last_assistant_final=assistant_log,
+            touched_files=[],
+        )
+        self.storage.enqueue(payload)
+        worker.drain()
+
+        state = self.storage.load_state(payload.job_id)
+        self.assertEqual(state.get("state"), JobState.SKIPPED.value)
+        self.assertIn("pre_raw_log_only", state.get("skip_reason", ""))
+        mock_engine.add.assert_not_called()
+
     def test_delta_skip_transient(self):
         mock_engine = MagicMock()
         worker = SpoolWorker(storage=self.storage, engine=mock_engine)
