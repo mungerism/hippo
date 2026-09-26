@@ -88,8 +88,20 @@ def is_acknowledgement_text(text: str) -> bool:
         return False
     if is_transient_only(s) or EXTENDED_ACKNOWLEDGEMENT_PATTERN.fullmatch(s):
         return True
+
     cleaned = clean_transient_text(s).lower()
-    return len(s) < 60 and bool(cleaned) and cleaned in TRANSIENT_PHRASES
+    if len(s) < 60 and bool(cleaned) and cleaned in TRANSIENT_PHRASES:
+        return True
+
+    # Status replies are often composed from multiple transient atoms, e.g.
+    # "好的，正在运行测试。" or "收到，这就去办".  Accept the composition
+    # only when every non-empty segment is independently transient.
+    parts = [
+        clean_transient_text(part).lower()
+        for part in re.split(r"[，,。.!！；;]+", s)
+        if clean_transient_text(part)
+    ]
+    return bool(parts) and all(part in TRANSIENT_PHRASES for part in parts)
 
 
 def is_placeholder_noise(text: str) -> bool:
