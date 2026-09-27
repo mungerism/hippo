@@ -1,11 +1,15 @@
 from benchmarks.longmemeval.evaluator import (
     BaseJudge,
     BaseReader,
+    GeminiJudge,
+    GeminiReader,
     LongMemEvalEvaluator,
     LossQuantification,
     RuleBasedJudge,
     RuleBasedMockReader,
     TierEvaluationResult,
+    export_official_hypotheses,
+    official_judge_prompt,
 )
 from benchmarks.longmemeval.ingest import (
     DirectFactsIngestStrategy,
@@ -14,20 +18,33 @@ from benchmarks.longmemeval.ingest import (
     resolve_ingest_strategy,
 )
 from benchmarks.longmemeval.loader import (
+    BUILTIN_FIXTURE_PATH,
     LONGMEMEVAL_CATEGORIES,
+    OFFICIAL_DATASET_FILENAME,
+    OFFICIAL_DATASET_REVISION,
+    OFFICIAL_DATASET_SHA256,
+    OFFICIAL_DATA_URL,
     HaystackSession,
     LongMemEvalItem,
     SessionTurn,
     convert_to_direct_facts_benchmark,
     convert_to_sessions_benchmark,
+    load_longmemeval_fixture_items,
     load_longmemeval_items,
 )
 
 __all__ = [
+    "BUILTIN_FIXTURE_PATH",
     "LONGMEMEVAL_CATEGORIES",
+    "OFFICIAL_DATASET_FILENAME",
+    "OFFICIAL_DATASET_REVISION",
+    "OFFICIAL_DATASET_SHA256",
+    "OFFICIAL_DATA_URL",
     "BaseJudge",
     "BaseReader",
     "DirectFactsIngestStrategy",
+    "GeminiJudge",
+    "GeminiReader",
     "HaystackSession",
     "LongMemEvalEvaluator",
     "LongMemEvalIngestStrategy",
@@ -40,6 +57,9 @@ __all__ = [
     "TierEvaluationResult",
     "convert_to_direct_facts_benchmark",
     "convert_to_sessions_benchmark",
+    "export_official_hypotheses",
+    "load_longmemeval_fixture_items",
     "load_longmemeval_items",
+    "official_judge_prompt",
     "resolve_ingest_strategy",
 ]
