@@ -77,20 +77,26 @@ class Mem0SessionIngestStrategy(LongMemEvalIngestStrategy):
     ) -> Dict[str, Any]:
         logger.info(f"Ingesting {len(corpus)} sessions with mem0-session profile...")
 
-        # If adapter is a live HippoEngineAdapter, we can leverage session distillation
+        # If adapter is a live HippoEngineAdapter, leverage the real infer=True
+        # distillation path while preserving logical session IDs for evaluation.
         if isinstance(adapter, HippoEngineAdapter):
             ingested_sessions = 0
             extracted_memories = 0
+            failures = []
+
             for item in corpus:
                 turns = item.metadata.get("turns")
                 session_id = item.metadata.get("session_id") or item.id
                 meta = dict(item.metadata)
                 meta["benchmark_session_id"] = session_id
+                meta["benchmark_id"] = item.id
                 meta["source"] = "session_distillation"
 
-                if turns and isinstance(turns, list):
-                    # Ingest multi-turn session with inference
-                    try:
+                # search() uses this logical corpus map when normalizing traces.
+                adapter._corpus_by_logical[item.id] = item
+
+                try:
+                    if turns and isinstance(turns, list):
                         res = adapter.engine.add(
                             messages=turns,
                             user_id=item.user_id or adapter.config.user_id,
@@ -103,19 +109,39 @@ class Mem0SessionIngestStrategy(LongMemEvalIngestStrategy):
                             extracted_memories += len(results)
                             for mem in results:
                                 if isinstance(mem, Mapping) and mem.get("id"):
-                                    # Map backend memory id back to this session logical id
                                     adapter._backend_to_logical[str(mem["id"])] = item.id
-                    except Exception as e:
-                        logger.warning(f"Error during mem0-session distillation for session {session_id}: {e}")
-                else:
-                    # Fallback to direct text ingest if no turn breakdown
-                    adapter.ingest_corpus([item])
-                ingested_sessions += 1
+                    else:
+                        adapter.ingest_corpus([item])
+                    ingested_sessions += 1
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "session_id": str(session_id),
+                            "logical_id": item.id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    logger.exception(
+                        "LongMemEval mem0-session ingestion failed for session %s",
+                        session_id,
+                    )
+
+            if failures:
+                sample = "; ".join(
+                    f"{failure['session_id']}: {failure['error']}"
+                    for failure in failures[:3]
+                )
+                raise RuntimeError(
+                    f"LongMemEval mem0-session ingestion failed for "
+                    f"{len(failures)}/{len(corpus)} sessions. "
+                    f"First failures: {sample}"
+                )
 
             return {
                 "profile": self.profile_name,
                 "sessions_count": ingested_sessions,
                 "extracted_memories": extracted_memories,
+                "failed_sessions": 0,
                 "status": "success",
             }
         else:
