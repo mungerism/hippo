@@ -97,8 +97,16 @@ class Mem0SessionIngestStrategy(LongMemEvalIngestStrategy):
 
                 try:
                     if turns and isinstance(turns, list):
+                        messages = [
+                            {
+                                "role": str(turn.get("role", "user")),
+                                "content": str(turn.get("content", "")),
+                            }
+                            for turn in turns
+                            if isinstance(turn, Mapping)
+                        ]
                         res = adapter.engine.add(
-                            messages=turns,
+                            messages=messages,
                             user_id=item.user_id or adapter.config.user_id,
                             agent_id=item.project_id if item.scope == "project" else "global",
                             metadata=meta,
