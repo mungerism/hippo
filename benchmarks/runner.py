@@ -229,6 +229,7 @@ class BenchmarkRunner:
         self.max_injected = max_injected
         self.seed = seed
         self.ingest_profile = ingest_profile
+        self.evaluation_depth = max([self.max_injected] + self.k_values)
 
     def run(
         self,
@@ -254,7 +255,7 @@ class BenchmarkRunner:
             q_start = time.perf_counter()
             retrieved_ids, trace = self.adapter.search(
                 query=q,
-                limit=self.max_injected,
+                limit=self.evaluation_depth,
                 capture_trace=capture_trace,
             )
             q_latency = round((time.perf_counter() - q_start) * 1000.0, 3)
@@ -281,8 +282,11 @@ class BenchmarkRunner:
                 metrics_dict["candidate_recall@20"] = round(cand_rec, 4)
 
             # Estimate injected tokens (roughly 1 token per 4 chars)
-            if retrieved_ids:
-                retrieved_chars = sum(len(c.text) for c in dataset.corpus if c.id in retrieved_ids)
+            injected_ids = retrieved_ids[: self.max_injected]
+            if injected_ids:
+                retrieved_chars = sum(
+                    len(c.text) for c in dataset.corpus if c.id in injected_ids
+                )
                 total_injected_tokens += max(1, retrieved_chars // 4)
 
             query_results.append(
@@ -386,6 +390,10 @@ class BenchmarkRunner:
             adapter=type(self.adapter).__name__,
             ingest_profile=self.ingest_profile,
             index_size_bytes=index_size_bytes,
+            benchmark_config={
+                "evaluation_depth": self.evaluation_depth,
+                **(extra_manifest or {}),
+            },
             host_info={"platform": sys.platform, "python_version": sys.version.split()[0]},
         )
 
