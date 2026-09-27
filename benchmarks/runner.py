@@ -836,14 +836,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--dataset",
         type=str,
         default=None,
-        help="Path to benchmark dataset JSON file or name ('longmemeval-s', 'smoke').",
+        help=(
+            "Benchmark JSON path or alias: 'longmemeval-s' downloads the pinned "
+            "official cleaned release; 'longmemeval-fixture' uses the zero-network CI fixture."
+        ),
     )
     parser.add_argument(
         "--profile",
         type=str,
         choices=["direct-facts", "mem0-session"],
         default="direct-facts",
-        help="Ingestion profile for benchmark dataset (default: direct-facts).",
+        help="Ingestion profile (default: direct-facts).",
     )
     parser.add_argument(
         "--tier",
@@ -857,7 +860,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         type=str,
         choices=["replay", "engine"],
         default="replay",
-        help="Evaluation adapter to use (replay: offline mock; engine: isolated live Qdrant).",
+        help="Adapter: replay is deterministic CI smoke; engine runs isolated real Hippo.",
+    )
+    parser.add_argument(
+        "--qa-backend",
+        type=str,
+        choices=["mock", "gemini"],
+        default="mock",
+        help="Reader/judge backend for QA tiers. mock is CI-only; official runs must use a real backend.",
+    )
+    parser.add_argument(
+        "--reader-model",
+        type=str,
+        default=os.getenv("LONGMEMEVAL_READER_MODEL", "gemini-3.5-flash-lite"),
+        help="Reader model for --qa-backend gemini.",
+    )
+    parser.add_argument(
+        "--judge-model",
+        type=str,
+        default=os.getenv("LONGMEMEVAL_JUDGE_MODEL", "gemini-3.5-flash-lite"),
+        help="Judge model for --qa-backend gemini.",
+    )
+    parser.add_argument(
+        "--qa-temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for reader/judge generation (default 0).",
+    )
+    parser.add_argument(
+        "--reader-token-budget",
+        type=int,
+        default=256,
+        help="Maximum reader output tokens.",
+    )
+    parser.add_argument(
+        "--judge-token-budget",
+        type=int,
+        default=10,
+        help="Maximum judge output tokens.",
     )
     parser.add_argument(
         "--output-dir",
@@ -875,7 +915,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--max-injected",
         type=int,
         default=3,
-        help="Maximum memories to retrieve per query (default 3).",
+        help="Production memory injection budget for @3 and QA context (default 3).",
     )
     parser.add_argument(
         "--seed",
@@ -898,46 +938,103 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # 1. Load dataset
     is_longmemeval = False
+    official_named_dataset = False
     longmemeval_items = None
+    benchmark_source: Dict[str, Any] = {}
 
-    if args.dataset:
-        ds_raw = args.dataset.strip()
-        ds_lower = ds_raw.lower()
-        if ds_lower in ("longmemeval", "longmemeval-s", "longmemeval_s"):
-            is_longmemeval = True
-            longmemeval_items = load_longmemeval_items()
-        else:
-            dataset_path = Path(ds_raw)
-            if not dataset_path.is_file():
-                print(f"Error: dataset file not found: {dataset_path}", file=sys.stderr)
-                return 1
-            content = dataset_path.read_text(encoding="utf-8")
-            try:
+    try:
+        if args.dataset:
+            ds_raw = args.dataset.strip()
+            ds_lower = ds_raw.lower()
+
+            if ds_lower in ("longmemeval", "longmemeval-s", "longmemeval_s"):
+                is_longmemeval = True
+                official_named_dataset = True
+                longmemeval_items = load_longmemeval_items()
+                benchmark_source = {
+                    "dataset_source": OFFICIAL_DATA_URL,
+                    "dataset_revision": OFFICIAL_DATASET_REVISION,
+                    "dataset_source_sha256": OFFICIAL_DATASET_SHA256,
+                    "dataset_release": "longmemeval-cleaned",
+                }
+            elif ds_lower in (
+                "longmemeval-fixture",
+                "longmemeval_fixture",
+                "longmemeval-smoke",
+            ):
+                is_longmemeval = True
+                longmemeval_items = load_longmemeval_fixture_items()
+                benchmark_source = {
+                    "dataset_source": str(BUILTIN_FIXTURE_PATH),
+                    "dataset_release": "ci-fixture",
+                }
+            else:
+                dataset_path = Path(ds_raw)
+                if not dataset_path.is_file():
+                    print(
+                        f"Error: dataset file not found: {dataset_path}",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                content = dataset_path.read_text(encoding="utf-8")
                 parsed = json.loads(content)
-                if isinstance(parsed, list) and len(parsed) > 0 and (
-                    "haystack_sessions" in parsed[0] or "question_id" in parsed[0]
+                if (
+                    isinstance(parsed, list)
+                    and parsed
+                    and isinstance(parsed[0], Mapping)
+                    and "question_id" in parsed[0]
+                    and "haystack_sessions" in parsed[0]
+                ) or (
+                    isinstance(parsed, dict)
+                    and ("questions" in parsed or "data" in parsed)
                 ):
                     is_longmemeval = True
                     longmemeval_items = load_longmemeval_items(dataset_path)
-                elif isinstance(parsed, dict) and ("questions" in parsed or "data" in parsed):
-                    is_longmemeval = True
-                    longmemeval_items = load_longmemeval_items(dataset_path)
+                    benchmark_source = {
+                        "dataset_source": str(dataset_path.resolve()),
+                        "dataset_release": "local-longmemeval",
+                    }
                 else:
                     dataset = BenchmarkDataset.from_dict(parsed)
-            except Exception:
-                dataset = BenchmarkDataset.from_json(content)
-    else:
-        dataset = create_smoke_fixture_dataset()
-
-    if is_longmemeval and longmemeval_items is not None:
-        if args.profile == "mem0-session":
-            dataset = convert_to_sessions_benchmark(longmemeval_items)
+                    benchmark_source = {
+                        "dataset_source": str(dataset_path.resolve()),
+                        "dataset_release": "local-benchmark",
+                    }
         else:
-            dataset = convert_to_direct_facts_benchmark(longmemeval_items)
+            dataset = create_smoke_fixture_dataset()
+            benchmark_source = {"dataset_release": "hippo-smoke-fixture"}
 
-    # 2. Instantiate adapter
+        if is_longmemeval and longmemeval_items is not None:
+            if args.profile == "mem0-session":
+                dataset = convert_to_sessions_benchmark(longmemeval_items)
+            else:
+                dataset = convert_to_direct_facts_benchmark(longmemeval_items)
+    except Exception as exc:
+        print(
+            f"Error loading benchmark dataset: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if official_named_dataset and args.adapter != "engine":
+        print(
+            "Error: the named official LongMemEval-S benchmark must use "
+            "--adapter engine. Use --dataset longmemeval-fixture for replay/CI smoke tests.",
+            file=sys.stderr,
+        )
+        return 1
+
+    qa_requested = args.tier in ("oracle-reader", "end-to-end", "all")
+    if official_named_dataset and qa_requested and args.qa_backend == "mock":
+        print(
+            "Error: mock reader/judge are CI smoke helpers and cannot score the "
+            "official LongMemEval-S dataset. Select --qa-backend gemini and pin models.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.adapter == "replay":
         adapter: BenchmarkAdapter = ReplayFixtureAdapter()
     elif args.adapter == "engine":
@@ -950,7 +1047,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         raise ValueError(f"Unknown adapter {args.adapter}")
 
-    # 3. Run benchmark
+    evaluator: Optional[LongMemEvalEvaluator] = None
+    if qa_requested:
+        if args.qa_backend == "gemini":
+            evaluator = LongMemEvalEvaluator(
+                reader=GeminiReader(
+                    args.reader_model,
+                    temperature=args.qa_temperature,
+                    max_output_tokens=args.reader_token_budget,
+                ),
+                judge=GeminiJudge(
+                    args.judge_model,
+                    temperature=args.qa_temperature,
+                    max_output_tokens=args.judge_token_budget,
+                ),
+            )
+        else:
+            evaluator = LongMemEvalEvaluator(
+                reader=RuleBasedMockReader(),
+                judge=RuleBasedJudge(),
+            )
+
+    manifest_extra: Dict[str, Any] = {
+        **benchmark_source,
+        "tier": args.tier,
+        "qa_backend": args.qa_backend if qa_requested else None,
+        "qa": evaluator.manifest_config() if evaluator is not None else None,
+    }
+
     try:
         runner = BenchmarkRunner(
             adapter=adapter,
@@ -958,19 +1082,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             seed=args.seed,
             ingest_profile=args.profile,
         )
-        report = runner.run(dataset, capture_trace=True)
+        report = runner.run(
+            dataset,
+            capture_trace=True,
+            extra_manifest=manifest_extra,
+        )
 
-        # 4. Multi-tier evaluation if requested
         tier_results: Dict[str, Any] = {}
         loss_quant: Optional[LossQuantification] = None
 
-        if args.tier in ("oracle-reader", "end-to-end", "all"):
-            evaluator = LongMemEvalEvaluator()
-            corpus_lookup = {c.id: c.text for c in dataset.corpus}
+        if qa_requested:
+            assert evaluator is not None
+            corpus_lookup = {item.id: item.text for item in dataset.corpus}
 
             if args.tier in ("oracle-reader", "all"):
                 tier_results["oracle-reader"] = evaluator.evaluate_oracle_reader_tier(
-                    dataset=dataset, corpus_lookup=corpus_lookup
+                    dataset=dataset,
+                    corpus_lookup=corpus_lookup,
                 )
 
             if args.tier in ("end-to-end", "all"):
@@ -982,21 +1110,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
             if args.tier == "all":
-                oracle_acc = tier_results["oracle-reader"].overall_metrics.get("accuracy", 0.0)
-                e2e_acc = tier_results["end-to-end"].overall_metrics.get("accuracy", 0.0)
-                r3 = report.aggregate_metrics.get("recall@3", 0.0)
-
+                oracle_acc = tier_results["oracle-reader"].overall_metrics.get(
+                    "accuracy", 0.0
+                )
+                e2e_acc = tier_results["end-to-end"].overall_metrics.get(
+                    "accuracy", 0.0
+                )
+                recall_at_3 = report.aggregate_metrics.get("recall@3", 0.0)
                 loss_quant = LossQuantification(
-                    direct_facts_recall_at_3=r3 if args.profile == "direct-facts" else 1.0,
-                    sessions_recall_at_3=r3 if args.profile == "mem0-session" else None,
+                    direct_facts_recall_at_3=(
+                        recall_at_3 if args.profile == "direct-facts" else None
+                    ),
+                    sessions_recall_at_3=(
+                        recall_at_3 if args.profile == "mem0-session" else None
+                    ),
                     oracle_reader_accuracy=oracle_acc,
                     end_to_end_accuracy=e2e_acc,
                 )
                 loss_quant.compute()
 
-        # 5. Save report
         out_dir = Path(args.output_dir)
-        report_base = args.report_name or f"report_{dataset.name}_{args.profile}"
+        report_base = args.report_name or f"report_{dataset.name}"
         json_path, md_path = save_report(
             report=report,
             output_dir=out_dir,
@@ -1004,62 +1138,111 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tier_results=tier_results if tier_results else None,
             loss_quant=loss_quant,
         )
+
+        hypothesis_paths: List[Path] = []
+        for tier_name in ("oracle-reader", "end-to-end"):
+            if tier_name in tier_results:
+                hypothesis_paths.append(
+                    export_official_hypotheses(
+                        tier_results[tier_name],
+                        out_dir / f"{report_base}_{tier_name}_official.jsonl",
+                    )
+                )
+
         print("Evaluation succeeded!")
         print(f"JSON report: {json_path}")
         print(f"Markdown summary: {md_path}")
+        for path in hypothesis_paths:
+            print(f"Official-evaluator hypotheses: {path}")
         print("-" * 50)
         print(f"Recall@3: {report.aggregate_metrics.get('recall@3', 0.0):.4f}")
+        print(f"Recall@5: {report.aggregate_metrics.get('recall@5', 0.0):.4f}")
+        print(f"Recall@10: {report.aggregate_metrics.get('recall@10', 0.0):.4f}")
+        print(f"nDCG@10: {report.aggregate_metrics.get('ndcg@10', 0.0):.4f}")
         print(f"Precision@3: {report.aggregate_metrics.get('precision@3', 0.0):.4f}")
-        print(f"Candidate Recall@20: {report.aggregate_metrics.get('candidate_recall@20', 0.0):.4f}")
-        print(f"Forbidden Leakage@3: {report.aggregate_metrics.get('forbidden_leakage@3', 0.0):.0f}")
-        print(f"Empty Accuracy@3: {report.aggregate_metrics.get('empty_accuracy@3', 0.0):.4f}")
+        print(
+            f"Candidate Recall@20: "
+            f"{report.aggregate_metrics.get('candidate_recall@20', 0.0):.4f}"
+        )
+        print(
+            f"Forbidden Leakage@3: "
+            f"{report.aggregate_metrics.get('forbidden_leakage@3', 0.0):.0f}"
+        )
+        print(
+            f"Empty Accuracy@3: "
+            f"{report.aggregate_metrics.get('empty_accuracy@3', 0.0):.4f}"
+        )
         p50 = report.aggregate_metrics.get("latency_p50_ms")
         p95 = report.aggregate_metrics.get("latency_p95_ms")
         if p50 is not None and p95 is not None:
             print(f"Latency P50: {p50:.2f}ms | P95: {p95:.2f}ms")
         print("-" * 50)
 
-        # Print tier results if evaluated
         if tier_results:
             print("Multi-Tier Summary:")
-            print(f"  Tier 1 (Retrieval Recall@3): {report.aggregate_metrics.get('recall@3', 0.0):.4f}")
+            print(
+                "  Tier 1 (Retrieval Recall@3): "
+                f"{report.aggregate_metrics.get('recall@3', 0.0):.4f}"
+            )
             if "oracle-reader" in tier_results:
-                print(f"  Tier 2 (Oracle Reader Acc): {tier_results['oracle-reader'].overall_metrics.get('accuracy', 0.0):.4f}")
+                print(
+                    "  Tier 2 (Oracle Reader Acc): "
+                    f"{tier_results['oracle-reader'].overall_metrics.get('accuracy', 0.0):.4f}"
+                )
             if "end-to-end" in tier_results:
-                print(f"  Tier 3 (End-to-End Acc):    {tier_results['end-to-end'].overall_metrics.get('accuracy', 0.0):.4f}")
+                print(
+                    "  Tier 3 (End-to-End Acc):    "
+                    f"{tier_results['end-to-end'].overall_metrics.get('accuracy', 0.0):.4f}"
+                )
             if loss_quant:
-                print("Loss Quantification:")
+                print("Loss Diagnostics (non-additive):")
                 if loss_quant.ingest_loss is not None:
-                    print(f"  Ingest Loss:    {loss_quant.ingest_loss:.4f}")
+                    print(f"  Ingest Loss:       {loss_quant.ingest_loss:.4f}")
                 if loss_quant.retrieval_loss is not None:
-                    print(f"  Retrieval Loss: {loss_quant.retrieval_loss:.4f}")
+                    print(f"  Retrieval→QA Gap:  {loss_quant.retrieval_loss:.4f}")
                 if loss_quant.reader_loss is not None:
-                    print(f"  Reader Loss:    {loss_quant.reader_loss:.4f}")
+                    print(f"  Reader Loss:       {loss_quant.reader_loss:.4f}")
                 if loss_quant.total_loss is not None:
-                    print(f"  Total Loss:     {loss_quant.total_loss:.4f}")
+                    print(f"  Total Loss:        {loss_quant.total_loss:.4f}")
             print("-" * 50)
 
-        # Audit security gates
         is_strict_gold = "gold" in report.manifest.dataset_name.lower()
-        gate_thresh = None if is_strict_gold else SecurityGateThresholds(min_total_queries=0, min_hard_negative_ratio=0.0)
+        gate_thresh = (
+            None
+            if is_strict_gold
+            else SecurityGateThresholds(
+                min_total_queries=0,
+                min_hard_negative_ratio=0.0,
+            )
+        )
         gate_audit = audit_security_gates(report, thresholds=gate_thresh)
-        print(f"Security Hard Gates: {'PASSED ✅' if gate_audit['passed'] else 'FAILED ❌'}")
+        print(
+            f"Security Hard Gates: "
+            f"{'PASSED ✅' if gate_audit['passed'] else 'FAILED ❌'}"
+        )
         if not gate_audit["passed"]:
             for violation in gate_audit["violations"]:
-                print(f"  [SECURITY VIOLATION] {violation}", file=sys.stderr)
+                print(
+                    f"  [SECURITY VIOLATION] {violation}",
+                    file=sys.stderr,
+                )
             return 2
 
-        # 6. Compare against baseline if specified
         if args.baseline:
             baseline_path = Path(args.baseline)
             if not baseline_path.is_file():
-                print(f"Warning: Baseline file not found: {baseline_path}", file=sys.stderr)
+                print(
+                    f"Warning: Baseline file not found: {baseline_path}",
+                    file=sys.stderr,
+                )
             else:
-                baseline_report = BenchmarkReport.from_json(baseline_path.read_text(encoding="utf-8"))
+                baseline_report = BenchmarkReport.from_json(
+                    baseline_path.read_text(encoding="utf-8")
+                )
                 try:
                     diff = compare_reports(report, baseline_report)
-                except ValueError as e:
-                    print(f"Error: {e}", file=sys.stderr)
+                except ValueError as exc:
+                    print(f"Error: {exc}", file=sys.stderr)
                     return 1
                 diff_md = generate_diff_markdown(diff)
                 diff_path = out_dir / f"diff_{dataset.name}.md"
