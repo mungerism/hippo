@@ -70,22 +70,58 @@ uv run python -m benchmarks.runner --baseline benchmarks/reports/report_hippo_sm
 
 ### 3. 运行 LongMemEval-S 双 Profile 基准评测 (ICLR 2025)
 
-支持官方 5 大任务类别（Information Extraction, Multi-Session, Temporal Reasoning, Knowledge Update, Abstention）与双 Ingest Profile：
+正式运行使用官方 **longmemeval-cleaned / LongMemEval-S**。数据源固定到 revision
+`98d7416c24c778c2fee6e6f3006e7a073259d48f`，并校验 SHA-256
+`d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`。
+首次使用 `--dataset longmemeval-s` 会下载约 277 MB 数据到
+`~/.hippo/benchmarks/data/`；hash 不匹配时拒绝运行。
 
-- **Direct-Facts Profile**（默认，写入提炼后的事实，快速评测纯检索与门禁性能）：
+支持官方五类能力（Information Extraction、Multi-Session、Temporal Reasoning、Knowledge Update、Abstention）和两个 ingest profile。正式 benchmark 必须使用隔离的真实 Hippo engine：
+
+- **Direct-Facts Profile**：按 gold evidence session 写入提炼后的事实，评测 retrieval/gate，不把 gold answer 偷渡成 evidence。
   ```bash
-  uv run python -m benchmarks.runner --dataset longmemeval-s --profile direct-facts
+  uv run python -m benchmarks.runner \
+    --dataset longmemeval-s \
+    --adapter engine \
+    --profile direct-facts \
+    --tier retrieval
   ```
 
-- **Mem0-Session Profile**（全会话摄入，评测多会话记忆推断与摄入损耗）：
+- **Mem0-Session Profile**：将完整 timestamped sessions 通过 `infer=True` 摄入，评测真实记忆提炼与检索。
   ```bash
-  uv run python -m benchmarks.runner --dataset longmemeval-s --profile mem0-session
+  uv run python -m benchmarks.runner \
+    --dataset longmemeval-s \
+    --adapter engine \
+    --profile mem0-session \
+    --tier retrieval
   ```
 
-- **三级评测闭环与误差归因**（`--tier all`，运行 Retrieval -> Oracle Reader -> End-to-End 并计算 Ingest/Retrieval/Reader Loss 归因）：
+Retrieval 会至少取到 Top-10 用于正确计算 Recall/nDCG@5/10，但 Hippo 主口径和 End-to-End reader context 仍严格遵循 `max_injected=3`。
+
+- **真实 QA / 三级评测**：正式数据禁止使用 CI mock reader/judge。以下示例固定 reader、judge、temperature 与 token budget，并记录到 report manifest。
   ```bash
-  uv run python -m benchmarks.runner --dataset longmemeval-s --tier all
+  uv run python -m benchmarks.runner \
+    --dataset longmemeval-s \
+    --adapter engine \
+    --profile direct-facts \
+    --tier all \
+    --qa-backend gemini \
+    --reader-model gemini-3.5-flash-lite \
+    --judge-model gemini-3.5-flash-lite \
+    --qa-temperature 0 \
+    --reader-token-budget 256 \
+    --judge-token-budget 10
   ```
+
+QA 运行会额外生成 `*_official.jsonl`（`question_id` + `hypothesis`），可直接交给 LongMemEval 官方 `src/evaluation/evaluate_qa.py` 做交叉验证。
+
+> `Ingest Loss`、`Retrieval→QA Gap`、`Reader Loss` 是跨阶段的诊断差值，量纲/交互不同，**不可相加**；`Total Loss` 单独定义为 `1 - End-to-End Accuracy`。单次只跑一个 ingest profile 时不会伪造另一个 profile 的 baseline。
+
+PR/CI 的零网络 smoke 使用与官方 schema 相同形状的 5 题 fixture：
+
+```bash
+uv run python -m benchmarks.runner --dataset longmemeval-fixture --tier all --qa-backend mock
+```
 
 ### 4. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
