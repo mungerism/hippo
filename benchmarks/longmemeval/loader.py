@@ -1,8 +1,9 @@
 """Data loading and schema adaptation for LongMemEval-S benchmark.
 
-Provides loaders, models, and converters to transform LongMemEval-S
-(ICLR 2025) into Hippo standardized BenchmarkDataset schemas supporting both
-'direct-facts' and 'mem0-session' ingest profiles.
+The official cleaned LongMemEval-S release uses three parallel arrays for each
+question's history: haystack_session_ids, haystack_dates, and haystack_sessions.
+This module keeps that upstream representation faithful while converting it to
+Hippo's benchmark schemas.
 """
 
 from __future__ import annotations
@@ -12,18 +13,14 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import tempfile
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 import urllib.request
 
-from benchmarks.schemas import (
-    BenchmarkDataset,
-    CorpusItem,
-    EvaluationQuery,
-)
+from benchmarks.schemas import BenchmarkDataset, CorpusItem, EvaluationQuery
 
 logger = logging.getLogger(__name__)
 
-# Standard categories defined in LongMemEval
 LONGMEMEVAL_CATEGORIES = {
     "information_extraction",
     "multi_session",
@@ -32,21 +29,29 @@ LONGMEMEVAL_CATEGORIES = {
     "abstention",
 }
 
-# Default cache path for downloaded benchmark files
-DEFAULT_CACHE_DIR = Path.home() / ".hippo" / "benchmarks" / "data"
+OFFICIAL_QUESTION_TYPE_TO_CATEGORY = {
+    "single-session-user": "information_extraction",
+    "single-session-assistant": "information_extraction",
+    "single-session-preference": "information_extraction",
+    "multi-session": "multi_session",
+    "temporal-reasoning": "temporal_reasoning",
+    "knowledge-update": "knowledge_update",
+}
 
-# Primary and mirror URLs for official LongMemEval-S data
-OFFICIAL_DATA_URLS = [
-    "https://raw.githubusercontent.com/xiaowu0162/LongMemEval/main/data/longmemeval_s.json",
-    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s.json",
-]
+DEFAULT_CACHE_DIR = Path.home() / ".hippo" / "benchmarks" / "data"
+OFFICIAL_DATASET_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
+OFFICIAL_DATASET_FILENAME = "longmemeval_s_cleaned.json"
+OFFICIAL_DATASET_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+OFFICIAL_DATA_URL = (
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/"
+    f"{OFFICIAL_DATASET_REVISION}/{OFFICIAL_DATASET_FILENAME}"
+)
+BUILTIN_FIXTURE_PATH = Path(__file__).parent.parent / "data" / "longmemeval_s_fixture.json"
 
 
 @dataclass(frozen=True, slots=True)
 class SessionTurn:
-    """A single turn inside a conversational session."""
-
-    role: str  # 'user' or 'assistant'
+    role: str
     content: str
     has_answer: bool = False
 
@@ -54,7 +59,7 @@ class SessionTurn:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> SessionTurn:
+    def from_dict(cls, data: Mapping[str, Any]) -> "SessionTurn":
         return cls(
             role=str(data.get("role", "user")),
             content=str(data.get("content", "")),
@@ -64,8 +69,6 @@ class SessionTurn:
 
 @dataclass(frozen=True, slots=True)
 class HaystackSession:
-    """A session inside the multi-session conversational history."""
-
     session_id: str
     date: Optional[str] = None
     turns: List[SessionTurn] = field(default_factory=list)
@@ -74,23 +77,21 @@ class HaystackSession:
         return {
             "session_id": self.session_id,
             "date": self.date,
-            "turns": [t.to_dict() for t in self.turns],
+            "turns": [turn.to_dict() for turn in self.turns],
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> HaystackSession:
+    def from_dict(cls, data: Mapping[str, Any]) -> "HaystackSession":
         raw_turns = data.get("turns") or data.get("messages") or []
         return cls(
             session_id=str(data.get("session_id", "")),
-            date=data.get("date") or data.get("session_date"),
-            turns=[SessionTurn.from_dict(t) for t in raw_turns],
+            date=str(data.get("date") or data.get("session_date") or "") or None,
+            turns=[SessionTurn.from_dict(turn) for turn in raw_turns],
         )
 
 
 @dataclass(frozen=True, slots=True)
 class LongMemEvalItem:
-    """A single test question with full conversational history in LongMemEval-S."""
-
     question_id: str
     question: str
     answer: str
@@ -109,48 +110,145 @@ class LongMemEvalItem:
             "answer_session_ids": self.answer_session_ids,
             "evidence": self.evidence,
             "metadata": self.metadata,
-            "haystack_sessions": [s.to_dict() for s in self.haystack_sessions],
+            "haystack_sessions": [session.to_dict() for session in self.haystack_sessions],
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> LongMemEvalItem:
-        q_type = str(data.get("question_type") or data.get("category") or "information_extraction")
-        # Normalize category names to standard 5 categories
-        norm_type = q_type.lower().replace("-", "_").replace(" ", "_")
-        if norm_type not in LONGMEMEVAL_CATEGORIES:
-            for cat in LONGMEMEVAL_CATEGORIES:
-                if cat in norm_type or norm_type in cat:
-                    norm_type = cat
-                    break
+    def from_dict(cls, data: Mapping[str, Any]) -> "LongMemEvalItem":
+        question_id = str(data["question_id"])
+        official_type = str(data.get("question_type") or "").strip().lower()
 
-        sessions = [
-            HaystackSession.from_dict(s)
-            for s in data.get("haystack_sessions", [])
+        if question_id.endswith("_abs"):
+            category = "abstention"
+        elif official_type in OFFICIAL_QUESTION_TYPE_TO_CATEGORY:
+            category = OFFICIAL_QUESTION_TYPE_TO_CATEGORY[official_type]
+        else:
+            # Keep compatibility with Hippo's explicit-category light fixture format,
+            # but reject unknown types instead of silently mis-bucketing real data.
+            normalized = official_type.replace("-", "_").replace(" ", "_")
+            if normalized not in LONGMEMEVAL_CATEGORIES:
+                raise ValueError(
+                    f"Unsupported LongMemEval question_type {official_type!r} "
+                    f"for question {question_id!r}"
+                )
+            category = normalized
+
+        raw_sessions = data.get("haystack_sessions") or []
+        sessions: List[HaystackSession]
+
+        if raw_sessions and isinstance(raw_sessions[0], list):
+            # Official schema: session ids, dates, and contents are parallel arrays.
+            session_ids = [str(value) for value in data.get("haystack_session_ids", [])]
+            dates = list(data.get("haystack_dates", []))
+            if len(session_ids) != len(raw_sessions) or len(dates) != len(raw_sessions):
+                raise ValueError(
+                    f"Malformed LongMemEval item {question_id!r}: "
+                    "haystack_session_ids, haystack_dates, and haystack_sessions "
+                    "must have identical lengths"
+                )
+            sessions = [
+                HaystackSession(
+                    session_id=session_ids[index],
+                    date=str(dates[index]) if dates[index] is not None else None,
+                    turns=[SessionTurn.from_dict(turn) for turn in raw_session],
+                )
+                for index, raw_session in enumerate(raw_sessions)
+            ]
+        else:
+            # Compatibility path for explicit object-based local fixtures.
+            sessions = [
+                HaystackSession.from_dict(session)
+                for session in raw_sessions
+                if isinstance(session, Mapping)
+            ]
+
+        answer_session_ids = [
+            str(session_id) for session_id in data.get("answer_session_ids", [])
         ]
-        ans_sessions = [str(sid) for sid in data.get("answer_session_ids", [])]
 
-        # Extract gold evidence if present or reconstruct from turns with has_answer=True
-        evidence = data.get("evidence")
-        if not evidence and sessions:
-            evidence_pieces = []
-            for s in sessions:
-                if not ans_sessions or s.session_id in ans_sessions:
-                    for turn in s.turns:
-                        if turn.has_answer:
-                            evidence_pieces.append(turn.content.strip())
-            if evidence_pieces:
-                evidence = "\n".join(evidence_pieces)
+        evidence_pieces: List[str] = []
+        for session in sessions:
+            if answer_session_ids and session.session_id not in answer_session_ids:
+                continue
+            for turn in session.turns:
+                if turn.has_answer and turn.content.strip():
+                    evidence_pieces.append(turn.content.strip())
+
+        explicit_evidence = data.get("evidence")
+        evidence = (
+            "\n".join(evidence_pieces)
+            if evidence_pieces
+            else str(explicit_evidence).strip()
+            if explicit_evidence
+            else None
+        )
+
+        metadata = dict(data.get("metadata") or {})
+        metadata.update(
+            {
+                "official_question_type": official_type,
+                "question_date": data.get("question_date"),
+            }
+        )
 
         return cls(
-            question_id=str(data["question_id"]),
+            question_id=question_id,
             question=str(data["question"]),
             answer=str(data.get("answer", "")),
-            question_type=norm_type,
+            question_type=category,
             haystack_sessions=sessions,
-            answer_session_ids=ans_sessions,
+            answer_session_ids=answer_session_ids,
             evidence=evidence,
-            metadata=dict(data.get("metadata") or {}),
+            metadata=metadata,
         )
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_and_verify(path: Path, expected_hash: Optional[str]) -> str:
+    payload = path.read_bytes()
+    if expected_hash:
+        actual_hash = _sha256_bytes(payload)
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"Dataset hash mismatch for {path}: "
+                f"expected {expected_hash}, got {actual_hash}"
+            )
+    return payload.decode("utf-8")
+
+
+def _download_official_dataset(cache: Path) -> Path:
+    cache.mkdir(parents=True, exist_ok=True)
+    destination = cache / OFFICIAL_DATASET_FILENAME
+
+    if destination.exists():
+        try:
+            _read_and_verify(destination, OFFICIAL_DATASET_SHA256)
+            return destination
+        except ValueError:
+            logger.warning("Cached LongMemEval-S hash mismatch; downloading pinned copy again")
+
+    logger.info(
+        "Downloading pinned LongMemEval-S cleaned dataset revision %s to %s",
+        OFFICIAL_DATASET_REVISION,
+        destination,
+    )
+    with tempfile.NamedTemporaryFile(
+        prefix="longmemeval_s_", suffix=".json", dir=cache, delete=False
+    ) as tmp:
+        temp_path = Path(tmp.name)
+
+    try:
+        urllib.request.urlretrieve(OFFICIAL_DATA_URL, temp_path)
+        _read_and_verify(temp_path, OFFICIAL_DATASET_SHA256)
+        temp_path.replace(destination)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+    return destination
 
 
 def load_longmemeval_items(
@@ -158,50 +256,33 @@ def load_longmemeval_items(
     cache_dir: Optional[Path] = None,
     expected_hash: Optional[str] = None,
 ) -> List[LongMemEvalItem]:
-    """Load and parse LongMemEval-S items from file, cache, or official remote URL."""
+    """Load LongMemEval-S.
+
+    With no source, download/use the pinned official cleaned 500-question release
+    and always verify its SHA-256. Local paths and custom URLs are supported for
+    fixtures or experiments; pass expected_hash when those should also be pinned.
+    """
+
     cache = cache_dir or DEFAULT_CACHE_DIR
     cache.mkdir(parents=True, exist_ok=True)
 
-    target_file: Optional[Path] = None
-
-    if source_path_or_url:
-        p = Path(source_path_or_url).expanduser()
-        if p.exists() and p.is_file():
-            target_file = p
-        elif str(source_path_or_url).startswith("http://") or str(source_path_or_url).startswith("https://"):
-            # Download URL to cache
-            dest = cache / "longmemeval_s.json"
-            if not dest.exists():
-                logger.info(f"Downloading LongMemEval-S from {source_path_or_url} to {dest}...")
-                urllib.request.urlretrieve(str(source_path_or_url), dest)
-            target_file = dest
-        else:
-            raise FileNotFoundError(f"Specified LongMemEval source does not exist: {source_path_or_url}")
+    if source_path_or_url is None:
+        target_file = _download_official_dataset(cache)
+        effective_hash = OFFICIAL_DATASET_SHA256
     else:
-        # Check default cache location or try built-in fixture
-        dest = cache / "longmemeval_s.json"
-        if dest.exists():
-            target_file = dest
+        source = str(source_path_or_url)
+        path = Path(source).expanduser()
+        if path.exists() and path.is_file():
+            target_file = path
+        elif source.startswith(("http://", "https://")):
+            destination = cache / OFFICIAL_DATASET_FILENAME
+            urllib.request.urlretrieve(source, destination)
+            target_file = destination
         else:
-            # Fall back to built-in light fixture
-            fixture_path = Path(__file__).parent.parent / "data" / "longmemeval_s_fixture.json"
-            if fixture_path.exists():
-                logger.info(f"Using built-in LongMemEval fixture from {fixture_path}")
-                target_file = fixture_path
-            else:
-                raise FileNotFoundError(
-                    f"No LongMemEval dataset found at {dest} and fixture missing at {fixture_path}."
-                )
+            raise FileNotFoundError(f"Specified LongMemEval source does not exist: {source}")
+        effective_hash = expected_hash
 
-    raw_data = target_file.read_text(encoding="utf-8")
-
-    if expected_hash:
-        file_hash = hashlib.sha256(raw_data.encode("utf-8")).hexdigest()
-        if file_hash != expected_hash:
-            raise ValueError(
-                f"Dataset hash mismatch for {target_file}! Expected {expected_hash}, got {file_hash}"
-            )
-
+    raw_data = _read_and_verify(target_file, effective_hash)
     parsed = json.loads(raw_data)
     if isinstance(parsed, dict) and "questions" in parsed:
         parsed = parsed["questions"]
@@ -209,25 +290,53 @@ def load_longmemeval_items(
         parsed = parsed["data"]
 
     if not isinstance(parsed, list):
-        raise ValueError(f"Invalid LongMemEval JSON format; expected list of objects, got {type(parsed)}")
+        raise ValueError(
+            f"Invalid LongMemEval JSON format; expected a list, got {type(parsed).__name__}"
+        )
 
     items = [LongMemEvalItem.from_dict(item) for item in parsed]
-    logger.info(f"Successfully loaded {len(items)} LongMemEval items from {target_file}")
+    logger.info("Loaded %d LongMemEval items from %s", len(items), target_file)
     return items
+
+
+def load_longmemeval_fixture_items() -> List[LongMemEvalItem]:
+    """Load the committed zero-network fixture used only by unit tests/CI."""
+    return load_longmemeval_items(BUILTIN_FIXTURE_PATH)
+
+
+def _evidence_by_session(item: LongMemEvalItem) -> Dict[str, str]:
+    evidence: Dict[str, str] = {}
+    for session in item.haystack_sessions:
+        if item.answer_session_ids and session.session_id not in item.answer_session_ids:
+            continue
+        pieces = [
+            turn.content.strip()
+            for turn in session.turns
+            if turn.has_answer and turn.content.strip()
+        ]
+        if pieces:
+            evidence[session.session_id] = "\n".join(pieces)
+
+    # Compatibility for tiny fixtures that provide only a pre-distilled evidence field.
+    if not evidence and item.evidence and item.answer_session_ids:
+        if len(item.answer_session_ids) == 1:
+            evidence[item.answer_session_ids[0]] = item.evidence.strip()
+
+    return evidence
 
 
 def convert_to_direct_facts_benchmark(
     items: Sequence[LongMemEvalItem],
     name: str = "longmemeval-s-direct-facts",
-    version: str = "1.0.0",
+    version: str = "cleaned-2025-09",
 ) -> BenchmarkDataset:
-    """Convert LongMemEval items into a BenchmarkDataset with 'direct-facts' profile.
+    """Convert gold evidence turns into atomic retrieval facts.
 
-    In this profile:
-    - Gold evidence facts are stored as already-distilled CorpusItem facts.
-    - Abstention queries have no relevant evidence (expected_empty=True).
-    - Tests the pure retrieval, scoring, and gate layer without distillation distortion.
+    Multi-session questions retain one fact per evidence session instead of
+    collapsing all evidence into one synthetic memory, preserving the benchmark's
+    multi-evidence retrieval difficulty.
     """
+
     corpus_items: List[CorpusItem] = []
     queries: List[EvaluationQuery] = []
     qrels: Dict[str, Dict[str, int]] = {}
@@ -236,34 +345,41 @@ def convert_to_direct_facts_benchmark(
     for item in items:
         qid = item.question_id
         is_abstention = item.question_type == "abstention"
-        ev_text = item.evidence or item.answer if not is_abstention else None
-
         evidence_ids: List[str] = []
-        if ev_text and not is_abstention:
-            # Create a dedicated corpus item for the evidence fact
-            cid = f"fact_{qid}"
-            evidence_ids.append(cid)
-            corpus_items.append(
-                CorpusItem(
-                    id=cid,
-                    text=ev_text.strip(),
-                    scope="project",
-                    project_id=f"eval_proj_{qid}",
-                    user_id=f"eval_user_{qid}",
-                    status="active",
-                    category=item.question_type,
-                    metadata={
-                        "benchmark": "longmemeval",
-                        "question_id": qid,
-                        "question_type": item.question_type,
-                        "answer_session_ids": item.answer_session_ids,
-                    },
-                )
-            )
-            qrels[qid] = {cid: 1}
-        else:
-            qrels[qid] = {}
 
+        if not is_abstention:
+            session_evidence = _evidence_by_session(item)
+            if not session_evidence:
+                raise ValueError(
+                    f"LongMemEval question {qid!r} has no gold evidence turns; "
+                    "refusing to substitute the gold answer as retrieval evidence"
+                )
+
+            for session_id, evidence_text in session_evidence.items():
+                cid = f"fact_{qid}_{session_id}"
+                evidence_ids.append(cid)
+                corpus_items.append(
+                    CorpusItem(
+                        id=cid,
+                        text=evidence_text,
+                        scope="project",
+                        project_id=f"eval_proj_{qid}",
+                        user_id=f"eval_user_{qid}",
+                        status="active",
+                        category=item.question_type,
+                        metadata={
+                            "benchmark": "longmemeval",
+                            "question_id": qid,
+                            "question_type": item.question_type,
+                            "official_question_type": item.metadata.get(
+                                "official_question_type"
+                            ),
+                            "answer_session_id": session_id,
+                        },
+                    )
+                )
+
+        qrels[qid] = {cid: 1 for cid in evidence_ids}
         queries.append(
             EvaluationQuery(
                 query_id=qid,
@@ -273,11 +389,15 @@ def convert_to_direct_facts_benchmark(
                 user_id=f"eval_user_{qid}",
                 expected_empty=is_abstention,
                 category=item.question_type,
+                query_time=item.metadata.get("question_date"),
                 reference_answer=item.answer,
                 evidence_ids=evidence_ids,
                 metadata={
                     "benchmark": "longmemeval",
                     "question_type": item.question_type,
+                    "official_question_type": item.metadata.get(
+                        "official_question_type"
+                    ),
                     "answer_session_ids": item.answer_session_ids,
                 },
             )
@@ -286,7 +406,10 @@ def convert_to_direct_facts_benchmark(
     return BenchmarkDataset(
         name=name,
         version=version,
-        description=f"LongMemEval-S direct-facts profile ({len(queries)} queries, {len(corpus_items)} evidence facts)",
+        description=(
+            f"LongMemEval-S direct-facts profile "
+            f"({len(queries)} queries, {len(corpus_items)} evidence facts)"
+        ),
         corpus=corpus_items,
         queries=queries,
         qrels=qrels,
@@ -297,15 +420,10 @@ def convert_to_direct_facts_benchmark(
 def convert_to_sessions_benchmark(
     items: Sequence[LongMemEvalItem],
     name: str = "longmemeval-s-mem0-sessions",
-    version: str = "1.0.0",
+    version: str = "cleaned-2025-09",
 ) -> BenchmarkDataset:
-    """Convert LongMemEval items into a BenchmarkDataset with 'mem0-session' profile.
+    """Convert complete timestamped sessions for end-to-end ingestion."""
 
-    In this profile:
-    - Entire sessions from haystack_sessions are converted into CorpusItem units.
-    - Each session contains timestamps and full conversation turns.
-    - Allows evaluating full multi-session ingestion, distillation, and temporal reasoning.
-    """
     corpus_items: List[CorpusItem] = []
     queries: List[EvaluationQuery] = []
     qrels: Dict[str, Dict[str, int]] = {}
@@ -314,25 +432,22 @@ def convert_to_sessions_benchmark(
     for item in items:
         qid = item.question_id
         is_abstention = item.question_type == "abstention"
-
         relevant_session_cids: List[str] = []
 
-        for sess in item.haystack_sessions:
-            cid = f"sess_{qid}_{sess.session_id}"
-            # Render session turns into readable transcript text
-            transcript_lines = []
-            if sess.date:
-                transcript_lines.append(f"Date: {sess.date}")
-            for t in sess.turns:
-                transcript_lines.append(f"{t.role.capitalize()}: {t.content}")
-            sess_text = "\n".join(transcript_lines)
+        for session in item.haystack_sessions:
+            cid = f"sess_{qid}_{session.session_id}"
+            transcript_lines: List[str] = []
+            if session.date:
+                transcript_lines.append(f"Date: {session.date}")
+            for turn in session.turns:
+                transcript_lines.append(f"{turn.role.capitalize()}: {turn.content}")
+            session_text = "\n".join(transcript_lines)
 
-            is_gold_session = sess.session_id in item.answer_session_ids
-
+            is_gold_session = session.session_id in item.answer_session_ids
             corpus_items.append(
                 CorpusItem(
                     id=cid,
-                    text=sess_text,
+                    text=session_text,
                     scope="project",
                     project_id=f"eval_proj_{qid}",
                     user_id=f"eval_user_{qid}",
@@ -341,22 +456,17 @@ def convert_to_sessions_benchmark(
                     metadata={
                         "benchmark": "longmemeval",
                         "question_id": qid,
-                        "session_id": sess.session_id,
-                        "session_date": sess.date,
+                        "session_id": session.session_id,
+                        "session_date": session.date,
                         "is_gold": is_gold_session,
-                        "turns": [t.to_dict() for t in sess.turns],
+                        "turns": [turn.to_dict() for turn in session.turns],
                     },
                 )
             )
-
             if is_gold_session and not is_abstention:
                 relevant_session_cids.append(cid)
 
-        if relevant_session_cids:
-            qrels[qid] = {cid: 1 for cid in relevant_session_cids}
-        else:
-            qrels[qid] = {}
-
+        qrels[qid] = {cid: 1 for cid in relevant_session_cids}
         queries.append(
             EvaluationQuery(
                 query_id=qid,
@@ -366,11 +476,15 @@ def convert_to_sessions_benchmark(
                 user_id=f"eval_user_{qid}",
                 expected_empty=is_abstention,
                 category=item.question_type,
+                query_time=item.metadata.get("question_date"),
                 reference_answer=item.answer,
                 evidence_ids=relevant_session_cids,
                 metadata={
                     "benchmark": "longmemeval",
                     "question_type": item.question_type,
+                    "official_question_type": item.metadata.get(
+                        "official_question_type"
+                    ),
                     "answer_session_ids": item.answer_session_ids,
                 },
             )
@@ -379,7 +493,10 @@ def convert_to_sessions_benchmark(
     return BenchmarkDataset(
         name=name,
         version=version,
-        description=f"LongMemEval-S mem0-session profile ({len(queries)} queries, {len(corpus_items)} sessions)",
+        description=(
+            f"LongMemEval-S mem0-session profile "
+            f"({len(queries)} queries, {len(corpus_items)} sessions)"
+        ),
         corpus=corpus_items,
         queries=queries,
         qrels=qrels,
