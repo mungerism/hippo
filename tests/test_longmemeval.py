@@ -1,13 +1,8 @@
-"""Unit and integration tests for LongMemEval-S benchmark integration (#55).
+"""Tests for LongMemEval-S benchmark integration (#55).
 
-Verifies:
-- Data loader, schema normalization, and dataset hash determinism.
-- Dual ingest profile conversion (direct-facts and mem0-session).
-- Ingest strategy resolution and execution.
-- Three-tier evaluation (Retrieval, Oracle Reader, End-to-End).
-- Abstention judgment semantics and rule-based reader/judge.
-- Loss quantification attribution formulas.
-- Runner CLI integration with --profile and --tier arguments.
+The committed fixture intentionally mirrors the upstream LongMemEval schema:
+parallel haystack_session_ids / haystack_dates / haystack_sessions arrays and
+abstention encoded by a question_id ending in "_abs".
 """
 
 from __future__ import annotations
@@ -19,6 +14,7 @@ import unittest
 
 from benchmarks.adapter import ReplayFixtureAdapter
 from benchmarks.longmemeval import (
+    BUILTIN_FIXTURE_PATH,
     LONGMEMEVAL_CATEGORIES,
     DirectFactsIngestStrategy,
     LongMemEvalEvaluator,
@@ -29,111 +25,125 @@ from benchmarks.longmemeval import (
     TierEvaluationResult,
     convert_to_direct_facts_benchmark,
     convert_to_sessions_benchmark,
+    export_official_hypotheses,
+    load_longmemeval_fixture_items,
     load_longmemeval_items,
+    official_judge_prompt,
     resolve_ingest_strategy,
 )
-from benchmarks.runner import (
-    main as runner_main,
-)
-from benchmarks.schemas import (
-    BenchmarkDataset,
-)
+from benchmarks.runner import BenchmarkRunner, main as runner_main
+from benchmarks.schemas import BenchmarkDataset, CorpusItem, EvaluationQuery
 
 
 class TestLongMemEvalLoader(unittest.TestCase):
-    """Test loading and profile transformation of LongMemEval dataset."""
-
-    def test_load_builtin_fixture(self):
-        items = load_longmemeval_items()
+    def test_load_official_shape_fixture(self):
+        items = load_longmemeval_fixture_items()
         self.assertEqual(len(items), 5)
+        self.assertEqual({item.question_type for item in items}, LONGMEMEVAL_CATEGORIES)
 
-        categories = {item.question_type for item in items}
-        self.assertEqual(categories, LONGMEMEVAL_CATEGORIES)
+        first = items[0]
+        self.assertEqual(first.metadata["official_question_type"], "single-session-user")
+        self.assertEqual(first.haystack_sessions[0].session_id, "sess_01")
+        self.assertEqual(first.haystack_sessions[0].date, "2024-03-10")
 
-        # Verify abstention item
-        abstention_items = [i for i in items if i.question_type == "abstention"]
-        self.assertEqual(len(abstention_items), 1)
-        abs_item = abstention_items[0]
-        self.assertIsNone(abs_item.evidence)
-        self.assertEqual(len(abs_item.answer_session_ids), 0)
+        abstention = next(item for item in items if item.question_type == "abstention")
+        self.assertTrue(abstention.question_id.endswith("_abs"))
+        self.assertEqual(
+            abstention.metadata["official_question_type"],
+            "single-session-preference",
+        )
+        self.assertIsNone(abstention.evidence)
+        self.assertEqual(abstention.answer_session_ids, [])
 
-    def test_convert_to_direct_facts_benchmark(self):
-        items = load_longmemeval_items()
-        dataset = convert_to_direct_facts_benchmark(items)
+    def test_parallel_arrays_must_align(self):
+        broken = [
+            {
+                "question_id": "broken",
+                "question_type": "single-session-user",
+                "question": "Q?",
+                "answer": "A",
+                "haystack_session_ids": ["s1"],
+                "haystack_dates": [],
+                "haystack_sessions": [[{"role": "user", "content": "A"}]],
+                "answer_session_ids": ["s1"],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "broken.json"
+            path.write_text(json.dumps(broken), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_longmemeval_items(path)
+
+    def test_hash_verification_fails_closed(self):
+        with self.assertRaises(ValueError):
+            load_longmemeval_items(
+                BUILTIN_FIXTURE_PATH,
+                expected_hash="0" * 64,
+            )
+
+    def test_convert_to_direct_facts_preserves_multi_evidence(self):
+        dataset = convert_to_direct_facts_benchmark(load_longmemeval_fixture_items())
 
         self.assertIsInstance(dataset, BenchmarkDataset)
         self.assertEqual(dataset.name, "longmemeval-s-direct-facts")
         self.assertEqual(len(dataset.queries), 5)
-        # 4 facts because 1 item is abstention with no evidence
-        self.assertEqual(len(dataset.corpus), 4)
+        # 1 + 2 + 2 + 1 evidence sessions; abstention contributes no gold fact.
+        self.assertEqual(len(dataset.corpus), 6)
 
-        # Check abstention query semantics
-        abs_query = next(q for q in dataset.queries if q.category == "abstention")
-        self.assertTrue(abs_query.expected_empty)
-        self.assertEqual(dataset.qrels.get(abs_query.query_id), {})
+        multi = next(q for q in dataset.queries if q.category == "multi_session")
+        self.assertEqual(len(dataset.qrels[multi.query_id]), 2)
 
-        # Check positive queries have qrels
-        pos_query = next(q for q in dataset.queries if q.category != "abstention")
-        self.assertFalse(pos_query.expected_empty)
-        self.assertGreaterEqual(len(dataset.qrels.get(pos_query.query_id, {})), 1)
+        abstention = next(q for q in dataset.queries if q.category == "abstention")
+        self.assertTrue(abstention.expected_empty)
+        self.assertEqual(dataset.qrels[abstention.query_id], {})
 
     def test_convert_to_sessions_benchmark(self):
-        items = load_longmemeval_items()
-        dataset = convert_to_sessions_benchmark(items)
+        dataset = convert_to_sessions_benchmark(load_longmemeval_fixture_items())
 
-        self.assertIsInstance(dataset, BenchmarkDataset)
         self.assertEqual(dataset.name, "longmemeval-s-mem0-sessions")
         self.assertEqual(len(dataset.queries), 5)
-        # 5 items * 2 sessions each = 10 sessions in corpus
         self.assertEqual(len(dataset.corpus), 10)
 
-        # All sessions should have transcript text with turn info
-        for c in dataset.corpus:
-            self.assertTrue(c.text.startswith("Date:") or c.text.startswith("User:"))
-            self.assertIn("turns", c.metadata)
+        for item in dataset.corpus:
+            self.assertTrue(item.text.startswith("Date:") or item.text.startswith("User:"))
+            self.assertIn("turns", item.metadata)
+
+        temporal = next(q for q in dataset.queries if q.category == "temporal_reasoning")
+        self.assertEqual(temporal.query_time, "2024-06-01")
 
     def test_deterministic_dataset_hash(self):
-        items1 = load_longmemeval_items()
-        items2 = load_longmemeval_items()
-
+        items1 = load_longmemeval_fixture_items()
+        items2 = load_longmemeval_fixture_items()
         ds1 = convert_to_direct_facts_benchmark(items1)
         ds2 = convert_to_direct_facts_benchmark(items2)
         self.assertEqual(ds1.compute_hash(), ds2.compute_hash())
 
 
 class TestLongMemEvalIngest(unittest.TestCase):
-    """Test dual-profile ingestion strategies."""
-
     def test_resolve_ingest_strategy(self):
-        s1 = resolve_ingest_strategy("direct-facts")
-        self.assertIsInstance(s1, DirectFactsIngestStrategy)
-        self.assertEqual(s1.profile_name, "direct-facts")
+        direct = resolve_ingest_strategy("direct-facts")
+        self.assertIsInstance(direct, DirectFactsIngestStrategy)
+        self.assertEqual(direct.profile_name, "direct-facts")
 
-        s2 = resolve_ingest_strategy("mem0-session")
-        self.assertIsInstance(s2, Mem0SessionIngestStrategy)
-        self.assertEqual(s2.profile_name, "mem0-session")
+        sessions = resolve_ingest_strategy("mem0-session")
+        self.assertIsInstance(sessions, Mem0SessionIngestStrategy)
+        self.assertEqual(sessions.profile_name, "mem0-session")
 
         with self.assertRaises(ValueError):
             resolve_ingest_strategy("invalid-profile")
 
     def test_direct_facts_ingestion(self):
-        items = load_longmemeval_items()
-        dataset = convert_to_direct_facts_benchmark(items)
+        dataset = convert_to_direct_facts_benchmark(load_longmemeval_fixture_items())
         adapter = ReplayFixtureAdapter()
-
-        strategy = DirectFactsIngestStrategy()
-        stat = strategy.ingest(adapter, dataset.corpus)
+        stat = DirectFactsIngestStrategy().ingest(adapter, dataset.corpus)
         self.assertEqual(stat["profile"], "direct-facts")
         self.assertEqual(stat["facts_count"], len(dataset.corpus))
 
 
 class TestLongMemEvalEvaluator(unittest.TestCase):
-    """Test 3-tier evaluation and loss quantification."""
-
     def setUp(self):
-        self.items = load_longmemeval_items()
+        self.items = load_longmemeval_fixture_items()
         self.df_dataset = convert_to_direct_facts_benchmark(self.items)
-        self.sess_dataset = convert_to_sessions_benchmark(self.items)
         self.adapter = ReplayFixtureAdapter()
         self.adapter.ingest_corpus(self.df_dataset.corpus)
 
@@ -141,31 +151,27 @@ class TestLongMemEvalEvaluator(unittest.TestCase):
         reader = RuleBasedMockReader()
         judge = RuleBasedJudge()
 
-        # Normal question with answer
         context = "User mentioned having a golden retriever named Barnaby."
-        ans = reader.answer("What is my dog's name?", context)
-        self.assertIn("Barnaby", ans)
+        answer = reader.answer("What is my dog's name?", context)
+        self.assertIn("Barnaby", answer)
 
-        score, expl = judge.judge(
+        score, _ = judge.judge(
             question="What is my dog's name?",
             reference_answer="Barnaby",
-            candidate_answer=ans,
-            is_abstention=False,
+            candidate_answer=answer,
         )
         self.assertEqual(score, 1.0)
 
-        # Abstention question
-        abs_ans = reader.answer("What is my favorite flavor of ice cream?", "")
-        score_abs, expl_abs = judge.judge(
+        abstained = reader.answer("What is my favorite flavor of ice cream?", "")
+        score, explanation = judge.judge(
             question="What is my favorite flavor of ice cream?",
             reference_answer="Unknown",
-            candidate_answer=abs_ans,
+            candidate_answer=abstained,
             is_abstention=True,
         )
-        self.assertEqual(score_abs, 1.0)
-        self.assertIn("Correctly abstained", expl_abs)
+        self.assertEqual(score, 1.0)
+        self.assertIn("Correctly abstained", explanation)
 
-        # Failed abstention
         fail_score, _ = judge.judge(
             question="What is my favorite ice cream?",
             reference_answer="Unknown",
@@ -174,7 +180,18 @@ class TestLongMemEvalEvaluator(unittest.TestCase):
         )
         self.assertEqual(fail_score, 0.0)
 
-    def test_evaluate_retrieval_tier(self):
+    def test_official_judge_prompt_abstention(self):
+        prompt = official_judge_prompt(
+            question_type="single-session-user",
+            question="What is my PIN?",
+            reference_answer="Not in history",
+            candidate_answer="I don't know.",
+            is_abstention=True,
+        )
+        self.assertIn("unanswerable question", prompt)
+        self.assertIn("Answer yes or no only", prompt)
+
+    def test_evaluate_retrieval_tier_uses_real_evaluation_depth(self):
         evaluator = LongMemEvalEvaluator()
         result = evaluator.evaluate_retrieval_tier(
             adapter=self.adapter,
@@ -183,23 +200,22 @@ class TestLongMemEvalEvaluator(unittest.TestCase):
         )
         self.assertIsInstance(result, TierEvaluationResult)
         self.assertEqual(result.tier_name, "retrieval")
-        self.assertIn("recall@3", result.overall_metrics)
+        self.assertIn("recall@10", result.overall_metrics)
         self.assertEqual(len(result.query_details), 5)
 
     def test_evaluate_oracle_reader_tier(self):
         evaluator = LongMemEvalEvaluator()
-        corpus_lookup = {c.id: c.text for c in self.df_dataset.corpus}
+        corpus_lookup = {item.id: item.text for item in self.df_dataset.corpus}
         result = evaluator.evaluate_oracle_reader_tier(
             dataset=self.df_dataset,
             corpus_lookup=corpus_lookup,
         )
         self.assertEqual(result.tier_name, "oracle-reader")
-        self.assertIn("accuracy", result.overall_metrics)
         self.assertGreaterEqual(result.overall_metrics["accuracy"], 0.8)
 
     def test_evaluate_end_to_end_tier(self):
         evaluator = LongMemEvalEvaluator()
-        corpus_lookup = {c.id: c.text for c in self.df_dataset.corpus}
+        corpus_lookup = {item.id: item.text for item in self.df_dataset.corpus}
         result = evaluator.evaluate_end_to_end_tier(
             adapter=self.adapter,
             dataset=self.df_dataset,
@@ -209,88 +225,193 @@ class TestLongMemEvalEvaluator(unittest.TestCase):
         self.assertEqual(result.tier_name, "end-to-end")
         self.assertIn("accuracy", result.overall_metrics)
 
-    def test_loss_quantification(self):
+    def test_loss_quantification_is_non_additive(self):
         loss = LossQuantification(
             direct_facts_recall_at_3=0.85,
             sessions_recall_at_3=0.75,
             oracle_reader_accuracy=0.95,
             end_to_end_accuracy=0.80,
         )
-        loss.compute()
+        data = loss.to_dict()
 
-        # Ingest loss = 0.85 - 0.75 = 0.10
         self.assertAlmostEqual(loss.ingest_loss, 0.10, places=4)
-        # Reader loss = 1.0 - 0.95 = 0.05
         self.assertAlmostEqual(loss.reader_loss, 0.05, places=4)
-        # Retrieval loss = 0.95 - 0.80 = 0.15
         self.assertAlmostEqual(loss.retrieval_loss, 0.15, places=4)
-        # Total loss = 1.0 - 0.80 = 0.20
         self.assertAlmostEqual(loss.total_loss, 0.20, places=4)
+        self.assertFalse(data["components_are_additive"])
+        self.assertNotAlmostEqual(
+            loss.ingest_loss + loss.reader_loss + loss.retrieval_loss,
+            loss.total_loss,
+        )
 
-        d = loss.to_dict()
-        self.assertEqual(d["ingest_loss"], 0.10)
-        self.assertEqual(d["reader_loss"], 0.05)
-        self.assertEqual(d["retrieval_loss"], 0.15)
-        self.assertEqual(d["total_loss"], 0.20)
+    def test_single_profile_does_not_invent_ingest_baseline(self):
+        loss = LossQuantification(
+            sessions_recall_at_3=0.75,
+            oracle_reader_accuracy=0.95,
+            end_to_end_accuracy=0.80,
+        )
+        loss.compute()
+        self.assertIsNone(loss.ingest_loss)
+        self.assertIsNone(loss.direct_facts_recall_at_3)
+
+    def test_export_official_hypotheses(self):
+        evaluator = LongMemEvalEvaluator()
+        corpus_lookup = {item.id: item.text for item in self.df_dataset.corpus}
+        result = evaluator.evaluate_oracle_reader_tier(
+            dataset=self.df_dataset,
+            corpus_lookup=corpus_lookup,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = export_official_hypotheses(
+                result,
+                Path(tmpdir) / "hypotheses.jsonl",
+            )
+            rows = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(rows), 5)
+            self.assertEqual(set(rows[0]), {"question_id", "hypothesis"})
+
+
+class TestBenchmarkRunnerDepth(unittest.TestCase):
+    def test_top5_metrics_are_not_truncated_by_top3_injection_budget(self):
+        corpus = [
+            CorpusItem(
+                id=f"m{i}",
+                text=f"alpha benchmark relevant fact {i}",
+                scope="project",
+                project_id="p",
+                user_id="u",
+            )
+            for i in range(5)
+        ]
+        query = EvaluationQuery(
+            query_id="q",
+            query="alpha benchmark relevant fact",
+            scope="project",
+            project_id="p",
+            user_id="u",
+        )
+        dataset = BenchmarkDataset(
+            name="depth-fixture",
+            version="1",
+            corpus=corpus,
+            queries=[query],
+            qrels={"q": {f"m{i}": 1 for i in range(5)}},
+        )
+        candidates = [
+            {
+                "id": f"m{i}",
+                "memory": f"alpha benchmark relevant fact {i}",
+                "score": 0.99 - i * 0.01,
+                "score_details": {
+                    "final_score": 0.99 - i * 0.01,
+                    "semantic_score": 0.99 - i * 0.01,
+                    "bm25_score": 1.0,
+                    "entity_boost": 0.0,
+                },
+                "metadata": {
+                    "status": "active",
+                    "scope": "project",
+                    "project": "p",
+                },
+                "user_id": "u",
+                "agent_id": "p",
+            }
+            for i in range(5)
+        ]
+        adapter = ReplayFixtureAdapter(candidates_by_query={"q": candidates})
+        report = BenchmarkRunner(
+            adapter=adapter,
+            k_values=(1, 3, 5),
+            max_injected=3,
+        ).run(dataset)
+
+        self.assertAlmostEqual(report.aggregate_metrics["recall@3"], 0.6)
+        self.assertAlmostEqual(report.aggregate_metrics["recall@5"], 1.0)
+        self.assertEqual(len(report.query_results[0].retrieved_ids), 5)
+        self.assertEqual(report.manifest.max_injected, 3)
+        self.assertEqual(report.manifest.benchmark_config["evaluation_depth"], 5)
 
 
 class TestLongMemEvalRunnerIntegration(unittest.TestCase):
-    """Integration test verifying runner CLI execution on LongMemEval."""
-
     def test_cli_direct_facts_retrieval(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            exit_code = runner_main([
-                "--dataset", "longmemeval-s",
-                "--profile", "direct-facts",
-                "--tier", "retrieval",
-                "--output-dir", tmpdir,
-            ])
+            exit_code = runner_main(
+                [
+                    "--dataset",
+                    "longmemeval-fixture",
+                    "--profile",
+                    "direct-facts",
+                    "--tier",
+                    "retrieval",
+                    "--output-dir",
+                    tmpdir,
+                ]
+            )
             self.assertEqual(exit_code, 0)
-            rep_files = list(Path(tmpdir).glob("*.json"))
-            self.assertEqual(len(rep_files), 1)
-
-            report_data = json.loads(rep_files[0].read_text(encoding="utf-8"))
-            self.assertEqual(report_data["manifest"]["ingest_profile"], "direct-facts")
-            self.assertIn("recall@3", report_data["aggregate_metrics"])
+            report_path = next(Path(tmpdir).glob("*.json"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["manifest"]["ingest_profile"], "direct-facts")
+            self.assertEqual(report["manifest"]["benchmark_config"]["evaluation_depth"], 10)
+            self.assertIn("recall@10", report["aggregate_metrics"])
 
     def test_cli_mem0_session_retrieval(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            exit_code = runner_main([
-                "--dataset", "longmemeval-s",
-                "--profile", "mem0-session",
-                "--tier", "retrieval",
-                "--output-dir", tmpdir,
-            ])
+            exit_code = runner_main(
+                [
+                    "--dataset",
+                    "longmemeval-fixture",
+                    "--profile",
+                    "mem0-session",
+                    "--tier",
+                    "retrieval",
+                    "--output-dir",
+                    tmpdir,
+                ]
+            )
             self.assertEqual(exit_code, 0)
-            rep_files = list(Path(tmpdir).glob("*.json"))
-            self.assertEqual(len(rep_files), 1)
+            report_path = next(Path(tmpdir).glob("*.json"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["manifest"]["ingest_profile"], "mem0-session")
 
-            report_data = json.loads(rep_files[0].read_text(encoding="utf-8"))
-            self.assertEqual(report_data["manifest"]["ingest_profile"], "mem0-session")
-
-    def test_cli_all_tiers_and_loss_quantification(self):
+    def test_cli_all_tiers_and_loss_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            exit_code = runner_main([
-                "--dataset", "longmemeval-s",
-                "--tier", "all",
-                "--output-dir", tmpdir,
-            ])
+            exit_code = runner_main(
+                [
+                    "--dataset",
+                    "longmemeval-fixture",
+                    "--tier",
+                    "all",
+                    "--qa-backend",
+                    "mock",
+                    "--output-dir",
+                    tmpdir,
+                ]
+            )
             self.assertEqual(exit_code, 0)
 
-            rep_json = next(Path(tmpdir).glob("*.json"))
-            rep_md = next(Path(tmpdir).glob("*.md"))
+            report_json = next(Path(tmpdir).glob("*.json"))
+            report_md = next(Path(tmpdir).glob("*.md"))
+            data = json.loads(report_json.read_text(encoding="utf-8"))
 
-            json_data = json.loads(rep_json.read_text(encoding="utf-8"))
-            self.assertIn("tier_results", json_data)
-            self.assertIn("oracle-reader", json_data["tier_results"])
-            self.assertIn("end-to-end", json_data["tier_results"])
-            self.assertIn("loss_quantification", json_data)
+            self.assertIn("tier_results", data)
+            self.assertIn("oracle-reader", data["tier_results"])
+            self.assertIn("end-to-end", data["tier_results"])
+            self.assertIn("loss_quantification", data)
+            self.assertFalse(
+                data["loss_quantification"]["components_are_additive"]
+            )
+            self.assertEqual(data["manifest"]["benchmark_config"]["qa_backend"], "mock")
 
-            md_text = rep_md.read_text(encoding="utf-8")
-            self.assertIn("多层评测与误差归因", md_text)
+            md_text = report_md.read_text(encoding="utf-8")
             self.assertIn("Tier 2: Oracle Reader", md_text)
             self.assertIn("Tier 3: End-to-End", md_text)
-            self.assertIn("Loss Quantification", md_text)
+            self.assertIn("Loss Diagnostics", md_text)
+
+            official_jsonl = list(Path(tmpdir).glob("*_official.jsonl"))
+            self.assertEqual(len(official_jsonl), 2)
 
 
 if __name__ == "__main__":
