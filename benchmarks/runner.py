@@ -759,9 +759,11 @@ def format_tier_markdown(
         loss_quant.compute()
         lines.extend([
             "",
-            "### 4.2 分层误差归因 (Loss Quantification)",
+            "### 4.2 分层误差诊断 (Loss Diagnostics)",
             "",
-            "| 误差层级 (Loss Component) | 损耗值 (Loss) | 归因说明 |",
+            "> 注意：这些字段来自不同阶段/指标尺度，是诊断性差值，**不能相加得到 Total Loss**。",
+            "",
+            "| 误差层级 (Loss Component) | 差值 (Delta) | 诊断说明 |",
             "| :--- | :---: | :--- |",
             (
                 f"| **Ingest Loss** (提炼摄入损耗) | {loss_quant.ingest_loss:.4f} | 多会话提取对话转记忆时的信息损失 |"
@@ -769,7 +771,7 @@ def format_tier_markdown(
                 else "| **Ingest Loss** (提炼摄入损耗) | - | 仅在跨 profile 对比或包含会话评测时提供 |"
             ),
             (
-                f"| **Retrieval Loss** (检索门禁损耗) | {loss_quant.retrieval_loss:.4f} | 检索阶段未命中或被错误过滤导致的问答失败 |"
+                f"| **Retrieval→QA Gap** | {loss_quant.retrieval_loss:.4f} | Oracle QA 与检索上下文 QA 的准确率差值；可能包含阶段交互 |"
                 if loss_quant.retrieval_loss is not None
                 else "| **Retrieval Loss** (检索门禁损耗) | - | -"
             ),
@@ -779,7 +781,7 @@ def format_tier_markdown(
                 else "| **Reader Loss** (生成推理损耗) | - | -"
             ),
             (
-                f"| **Total Loss** (端到端总损耗) | {loss_quant.total_loss:.4f} | 距离 100% 准确率的总体差距 |"
+                f"| **Total Loss** (端到端总损耗) | {loss_quant.total_loss:.4f} | 1 - End-to-End Accuracy；不等于上方差值之和 |"
                 if loss_quant.total_loss is not None
                 else "| **Total Loss** (端到端总损耗) | - | -"
             ),
