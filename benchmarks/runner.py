@@ -30,11 +30,21 @@ from benchmarks.gold.specification import (
     audit_security_gates,
 )
 from benchmarks.longmemeval import (
+    BUILTIN_FIXTURE_PATH,
+    OFFICIAL_DATASET_REVISION,
+    OFFICIAL_DATASET_SHA256,
+    OFFICIAL_DATA_URL,
+    GeminiJudge,
+    GeminiReader,
     LongMemEvalEvaluator,
     LossQuantification,
+    RuleBasedJudge,
+    RuleBasedMockReader,
     TierEvaluationResult,
     convert_to_direct_facts_benchmark,
     convert_to_sessions_benchmark,
+    export_official_hypotheses,
+    load_longmemeval_fixture_items,
     load_longmemeval_items,
     resolve_ingest_strategy,
 )
