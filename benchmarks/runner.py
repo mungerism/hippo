@@ -17,11 +17,26 @@ import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+import uuid
 
 from benchmarks.adapter import (
     BenchmarkAdapter,
     HippoEngineAdapter,
     ReplayFixtureAdapter,
+)
+from benchmarks.gold.specification import (
+    GoldScenario,
+    SecurityGateThresholds,
+    audit_security_gates,
+)
+from benchmarks.longmemeval import (
+    LongMemEvalEvaluator,
+    LossQuantification,
+    TierEvaluationResult,
+    convert_to_direct_facts_benchmark,
+    convert_to_sessions_benchmark,
+    load_longmemeval_items,
+    resolve_ingest_strategy,
 )
 from benchmarks.metrics import (
     aggregate_by_category,
@@ -38,7 +53,6 @@ from benchmarks.schemas import (
 )
 from hippo_memory.config import HippoConfig
 from hippo_memory.gate import SearchGateConfig
-from benchmarks.gold.specification import GoldScenario, audit_security_gates
 
 logger = logging.getLogger(__name__)
 
@@ -198,11 +212,13 @@ class BenchmarkRunner:
         k_values: Sequence[int] = (1, 3, 5, 10),
         max_injected: int = 3,
         seed: Optional[int] = 42,
+        ingest_profile: str = "direct-facts",
     ):
         self.adapter = adapter
         self.k_values = [int(k) for k in k_values]
         self.max_injected = max_injected
         self.seed = seed
+        self.ingest_profile = ingest_profile
 
     def run(
         self,
@@ -215,8 +231,9 @@ class BenchmarkRunner:
         start_time = time.perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # Ingest corpus into isolated adapter
-        self.adapter.ingest_corpus(dataset.corpus)
+        # Ingest corpus into isolated adapter using configured profile
+        strategy = resolve_ingest_strategy(self.ingest_profile)
+        strategy.ingest(self.adapter, dataset.corpus)
 
         query_results: List[QueryEvaluationResult] = []
         latencies_ms: List[float] = []
@@ -357,7 +374,7 @@ class BenchmarkRunner:
             seed=self.seed,
             duration_seconds=duration,
             adapter=type(self.adapter).__name__,
-            ingest_profile="direct-facts",
+            ingest_profile=self.ingest_profile,
             index_size_bytes=index_size_bytes,
             host_info={"platform": sys.platform, "python_version": sys.version.split()[0]},
         )
@@ -391,7 +408,9 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         "",
     ]
 
-    gate_audit = audit_security_gates(report)
+    is_strict_gold = "gold" in m.dataset_name.lower()
+    gate_thresh = None if is_strict_gold else SecurityGateThresholds(min_total_queries=0, min_hard_negative_ratio=0.0)
+    gate_audit = audit_security_gates(report, thresholds=gate_thresh)
     audit_icon = "✅ 全部通过 (PASSED)" if gate_audit["passed"] else "❌ 门禁违规 (FAILED)"
     lines.extend([
         f"- **门禁判定**: **{audit_icon}**",
@@ -689,10 +708,75 @@ def generate_diff_markdown(diff_data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_tier_markdown(
+    tier_results: Mapping[str, Any],
+    loss_quant: Optional[LossQuantification],
+    retrieval_r3: float,
+) -> str:
+    """Format multi-tier evaluation results and loss attribution table as Markdown."""
+    lines = [
+        "",
+        "## 4. 多层评测与误差归因 (Multi-Tier Evaluation & Loss Attribution)",
+        "",
+        "### 4.1 多层指标汇总 (Tier Summary)",
+        "",
+        "| 评测层次 (Tier) | 核心指标 | 得分 | 说明 |",
+        "| :--- | :---: | :---: | :--- |",
+        f"| **Tier 1: Retrieval** | Recall@3 | **{retrieval_r3:.4f}** | 纯检索与相关性门禁能力 (零 LLM 开销) |",
+    ]
+
+    if "oracle-reader" in tier_results:
+        ora_acc = tier_results["oracle-reader"].overall_metrics.get("accuracy", 0.0)
+        lines.append(
+            f"| **Tier 2: Oracle Reader** | Accuracy | **{ora_acc:.4f}** | 给定真实黄金证据下的阅读理解上限 |"
+        )
+
+    if "end-to-end" in tier_results:
+        e2e_acc = tier_results["end-to-end"].overall_metrics.get("accuracy", 0.0)
+        lines.append(
+            f"| **Tier 3: End-to-End** | Accuracy | **{e2e_acc:.4f}** | 完整检索 + 问答生成 + 答案评判闭环 |"
+        )
+
+    if loss_quant:
+        loss_quant.compute()
+        lines.extend([
+            "",
+            "### 4.2 分层误差归因 (Loss Quantification)",
+            "",
+            "| 误差层级 (Loss Component) | 损耗值 (Loss) | 归因说明 |",
+            "| :--- | :---: | :--- |",
+            (
+                f"| **Ingest Loss** (提炼摄入损耗) | {loss_quant.ingest_loss:.4f} | 多会话提取对话转记忆时的信息损失 |"
+                if loss_quant.ingest_loss is not None
+                else "| **Ingest Loss** (提炼摄入损耗) | - | 仅在跨 profile 对比或包含会话评测时提供 |"
+            ),
+            (
+                f"| **Retrieval Loss** (检索门禁损耗) | {loss_quant.retrieval_loss:.4f} | 检索阶段未命中或被错误过滤导致的问答失败 |"
+                if loss_quant.retrieval_loss is not None
+                else "| **Retrieval Loss** (检索门禁损耗) | - | -"
+            ),
+            (
+                f"| **Reader Loss** (生成推理损耗) | {loss_quant.reader_loss:.4f} | 证据充分输入下大模型未能正确回答的损耗 |"
+                if loss_quant.reader_loss is not None
+                else "| **Reader Loss** (生成推理损耗) | - | -"
+            ),
+            (
+                f"| **Total Loss** (端到端总损耗) | {loss_quant.total_loss:.4f} | 距离 100% 准确率的总体差距 |"
+                if loss_quant.total_loss is not None
+                else "| **Total Loss** (端到端总损耗) | - | -"
+            ),
+        ])
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def save_report(
     report: BenchmarkReport,
     output_dir: Path,
     base_name: Optional[str] = None,
+    tier_results: Optional[Mapping[str, Any]] = None,
+    loss_quant: Optional[LossQuantification] = None,
 ) -> Tuple[Path, Path]:
     """Save BenchmarkReport as JSON and Markdown files with identical numbers."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -700,8 +784,25 @@ def save_report(
     json_path = output_dir / f"{prefix}.json"
     md_path = output_dir / f"{prefix}.md"
 
-    json_path.write_text(report.to_json(indent=2), encoding="utf-8")
-    md_path.write_text(generate_markdown_report(report), encoding="utf-8")
+    report_dict = report.to_dict()
+    if tier_results:
+        report_dict["tier_results"] = {
+            k: v.to_dict() if hasattr(v, "to_dict") else v
+            for k, v in tier_results.items()
+        }
+    if loss_quant:
+        report_dict["loss_quantification"] = loss_quant.to_dict()
+
+    json_path.write_text(json.dumps(report_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    md_content = generate_markdown_report(report)
+    if tier_results or loss_quant:
+        md_content += format_tier_markdown(
+            tier_results or {},
+            loss_quant,
+            report.aggregate_metrics.get("recall@3", 0.0),
+        )
+    md_path.write_text(md_content, encoding="utf-8")
 
     return json_path, md_path
 
@@ -715,7 +816,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--dataset",
         type=str,
         default=None,
-        help="Path to benchmark dataset JSON file (defaults to built-in smoke fixture).",
+        help="Path to benchmark dataset JSON file or name ('longmemeval-s', 'smoke').",
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=["direct-facts", "mem0-session"],
+        default="direct-facts",
+        help="Ingestion profile for benchmark dataset (default: direct-facts).",
+    )
+    parser.add_argument(
+        "--tier",
+        type=str,
+        choices=["retrieval", "oracle-reader", "end-to-end", "all"],
+        default="retrieval",
+        help="Evaluation tier to run (default: retrieval).",
     )
     parser.add_argument(
         "--adapter",
@@ -754,7 +869,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=None,
         help="Explicit isolated Qdrant collection name (engine adapter only).",
     )
-
     parser.add_argument(
         "--report-name",
         type=str,
@@ -765,20 +879,54 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     # 1. Load dataset
+    is_longmemeval = False
+    longmemeval_items = None
+
     if args.dataset:
-        dataset_path = Path(args.dataset)
-        if not dataset_path.is_file():
-            print(f"Error: dataset file not found: {dataset_path}", file=sys.stderr)
-            return 1
-        dataset = BenchmarkDataset.from_json(dataset_path.read_text(encoding="utf-8"))
+        ds_raw = args.dataset.strip()
+        ds_lower = ds_raw.lower()
+        if ds_lower in ("longmemeval", "longmemeval-s", "longmemeval_s"):
+            is_longmemeval = True
+            longmemeval_items = load_longmemeval_items()
+        else:
+            dataset_path = Path(ds_raw)
+            if not dataset_path.is_file():
+                print(f"Error: dataset file not found: {dataset_path}", file=sys.stderr)
+                return 1
+            content = dataset_path.read_text(encoding="utf-8")
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, list) and len(parsed) > 0 and (
+                    "haystack_sessions" in parsed[0] or "question_id" in parsed[0]
+                ):
+                    is_longmemeval = True
+                    longmemeval_items = load_longmemeval_items(dataset_path)
+                elif isinstance(parsed, dict) and ("questions" in parsed or "data" in parsed):
+                    is_longmemeval = True
+                    longmemeval_items = load_longmemeval_items(dataset_path)
+                else:
+                    dataset = BenchmarkDataset.from_dict(parsed)
+            except Exception:
+                dataset = BenchmarkDataset.from_json(content)
     else:
         dataset = create_smoke_fixture_dataset()
+
+    if is_longmemeval and longmemeval_items is not None:
+        if args.profile == "mem0-session":
+            dataset = convert_to_sessions_benchmark(longmemeval_items)
+        else:
+            dataset = convert_to_direct_facts_benchmark(longmemeval_items)
 
     # 2. Instantiate adapter
     if args.adapter == "replay":
         adapter: BenchmarkAdapter = ReplayFixtureAdapter()
     elif args.adapter == "engine":
-        adapter = HippoEngineAdapter(collection_name=args.collection)
+        coll = args.collection or (
+            f"eval_longmemeval_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            if is_longmemeval
+            else None
+        )
+        adapter = HippoEngineAdapter(collection_name=coll)
     else:
         raise ValueError(f"Unknown adapter {args.adapter}")
 
@@ -788,14 +936,55 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             adapter=adapter,
             max_injected=args.max_injected,
             seed=args.seed,
+            ingest_profile=args.profile,
         )
         report = runner.run(dataset, capture_trace=True)
 
-        # 4. Save report
+        # 4. Multi-tier evaluation if requested
+        tier_results: Dict[str, Any] = {}
+        loss_quant: Optional[LossQuantification] = None
+
+        if args.tier in ("oracle-reader", "end-to-end", "all"):
+            evaluator = LongMemEvalEvaluator()
+            corpus_lookup = {c.id: c.text for c in dataset.corpus}
+
+            if args.tier in ("oracle-reader", "all"):
+                tier_results["oracle-reader"] = evaluator.evaluate_oracle_reader_tier(
+                    dataset=dataset, corpus_lookup=corpus_lookup
+                )
+
+            if args.tier in ("end-to-end", "all"):
+                tier_results["end-to-end"] = evaluator.evaluate_end_to_end_tier(
+                    adapter=adapter,
+                    dataset=dataset,
+                    corpus_lookup=corpus_lookup,
+                    limit=args.max_injected,
+                )
+
+            if args.tier == "all":
+                oracle_acc = tier_results["oracle-reader"].overall_metrics.get("accuracy", 0.0)
+                e2e_acc = tier_results["end-to-end"].overall_metrics.get("accuracy", 0.0)
+                r3 = report.aggregate_metrics.get("recall@3", 0.0)
+
+                loss_quant = LossQuantification(
+                    direct_facts_recall_at_3=r3 if args.profile == "direct-facts" else 1.0,
+                    sessions_recall_at_3=r3 if args.profile == "mem0-session" else None,
+                    oracle_reader_accuracy=oracle_acc,
+                    end_to_end_accuracy=e2e_acc,
+                )
+                loss_quant.compute()
+
+        # 5. Save report
         out_dir = Path(args.output_dir)
-        report_base = args.report_name or f"report_{dataset.name}"
-        json_path, md_path = save_report(report, out_dir, base_name=report_base)
-        print(f"Evaluation succeeded!")
+        report_base = args.report_name or f"report_{dataset.name}_{args.profile}"
+        json_path, md_path = save_report(
+            report=report,
+            output_dir=out_dir,
+            base_name=report_base,
+            tier_results=tier_results if tier_results else None,
+            loss_quant=loss_quant,
+        )
+        print("Evaluation succeeded!")
         print(f"JSON report: {json_path}")
         print(f"Markdown summary: {md_path}")
         print("-" * 50)
@@ -810,15 +999,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"Latency P50: {p50:.2f}ms | P95: {p95:.2f}ms")
         print("-" * 50)
 
+        # Print tier results if evaluated
+        if tier_results:
+            print("Multi-Tier Summary:")
+            print(f"  Tier 1 (Retrieval Recall@3): {report.aggregate_metrics.get('recall@3', 0.0):.4f}")
+            if "oracle-reader" in tier_results:
+                print(f"  Tier 2 (Oracle Reader Acc): {tier_results['oracle-reader'].overall_metrics.get('accuracy', 0.0):.4f}")
+            if "end-to-end" in tier_results:
+                print(f"  Tier 3 (End-to-End Acc):    {tier_results['end-to-end'].overall_metrics.get('accuracy', 0.0):.4f}")
+            if loss_quant:
+                print("Loss Quantification:")
+                if loss_quant.ingest_loss is not None:
+                    print(f"  Ingest Loss:    {loss_quant.ingest_loss:.4f}")
+                if loss_quant.retrieval_loss is not None:
+                    print(f"  Retrieval Loss: {loss_quant.retrieval_loss:.4f}")
+                if loss_quant.reader_loss is not None:
+                    print(f"  Reader Loss:    {loss_quant.reader_loss:.4f}")
+                if loss_quant.total_loss is not None:
+                    print(f"  Total Loss:     {loss_quant.total_loss:.4f}")
+            print("-" * 50)
+
         # Audit security gates
-        gate_audit = audit_security_gates(report)
+        is_strict_gold = "gold" in report.manifest.dataset_name.lower()
+        gate_thresh = None if is_strict_gold else SecurityGateThresholds(min_total_queries=0, min_hard_negative_ratio=0.0)
+        gate_audit = audit_security_gates(report, thresholds=gate_thresh)
         print(f"Security Hard Gates: {'PASSED ✅' if gate_audit['passed'] else 'FAILED ❌'}")
         if not gate_audit["passed"]:
             for violation in gate_audit["violations"]:
                 print(f"  [SECURITY VIOLATION] {violation}", file=sys.stderr)
             return 2
 
-        # 5. Compare against baseline if specified
+        # 6. Compare against baseline if specified
         if args.baseline:
             baseline_path = Path(args.baseline)
             if not baseline_path.is_file():

@@ -68,7 +68,26 @@ uv run python -m benchmarks.runner --baseline benchmarks/reports/report_hippo_sm
 
 若当前变更发生指标退化（Recall 下降）或安全违规（Forbidden Leakage > 0），命令将自动生成 `diff_*.md` 并返回退出码 2。
 
-### 3. 连接隔离临时集合运行真实引擎 (Engine Adapter)
+### 3. 运行 LongMemEval-S 双 Profile 基准评测 (ICLR 2025)
+
+支持官方 5 大任务类别（Information Extraction, Multi-Session, Temporal Reasoning, Knowledge Update, Abstention）与双 Ingest Profile：
+
+- **Direct-Facts Profile**（默认，写入提炼后的事实，快速评测纯检索与门禁性能）：
+  ```bash
+  uv run python -m benchmarks.runner --dataset longmemeval-s --profile direct-facts
+  ```
+
+- **Mem0-Session Profile**（全会话摄入，评测多会话记忆推断与摄入损耗）：
+  ```bash
+  uv run python -m benchmarks.runner --dataset longmemeval-s --profile mem0-session
+  ```
+
+- **三级评测闭环与误差归因**（`--tier all`，运行 Retrieval -> Oracle Reader -> End-to-End 并计算 Ingest/Retrieval/Reader Loss 归因）：
+  ```bash
+  uv run python -m benchmarks.runner --dataset longmemeval-s --tier all
+  ```
+
+### 4. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
 ```bash
 uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_01
@@ -78,7 +97,7 @@ uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_
 
 ## 📂 扩展与接入新数据集
 
-接入新的记忆评测集（如 LongMemEval、LoCoMo 或团队自有黄金集）只需构造符合 `BenchmarkDataset` 的 JSON 文件：
+接入新的记忆评测集（如 LoCoMo、BEAM 或团队自有黄金集）只需构造符合 `BenchmarkDataset` 的 JSON 文件：
 
 ### 1. 数据集 JSON Schema 规范
 
@@ -143,9 +162,15 @@ uv run python -m benchmarks.runner --dataset path/to/my_benchmark_v1.json
 
 ```text
 benchmarks/
-├── schemas.py      # CorpusItem, EvaluationQuery, Qrels, RunManifest, EvaluationTrace
-├── metrics.py      # Recall, Precision, Hit, MRR, nDCG, ForbiddenLeakage, EmptyAccuracy
-├── adapter.py      # BenchmarkAdapter, ReplayFixtureAdapter, HippoEngineAdapter
-├── runner.py       # BenchmarkRunner, JSON/Markdown 报告生成, Baseline 比对 diff
-└── README.md       # 本使用与扩展说明文档
+├── schemas.py          # CorpusItem, EvaluationQuery, Qrels, RunManifest, EvaluationTrace
+├── metrics.py          # Recall, Precision, Hit, MRR, nDCG, ForbiddenLeakage, EmptyAccuracy
+├── adapter.py          # BenchmarkAdapter, ReplayFixtureAdapter, HippoEngineAdapter
+├── runner.py           # BenchmarkRunner, JSON/Markdown 报告生成, Baseline 比对 diff
+├── gold/               # 自研 Hippo Gold v1 黄金集规范、校验器与构建器
+├── longmemeval/        # LongMemEval-S 评测适配器
+│   ├── loader.py       # 数据加载与 direct-facts / mem0-session schema 转换
+│   ├── ingest.py       # DirectFactsIngestStrategy 与 Mem0SessionIngestStrategy
+│   └── evaluator.py    # 三级 Tier 评测器 (Retrieval, Oracle, E2E) 与误差归因
+├── data/               # 评测轻量级 fixture 与数据集
+└── README.md           # 本使用与扩展说明文档
 ```
