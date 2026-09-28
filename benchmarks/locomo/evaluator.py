@@ -112,6 +112,16 @@ def _stemmed_tokens(text: str, *, require_porter: bool = False) -> list[str]:
     return [_PORTER.stem(token) for token in tokens]
 
 
+def ensure_official_scorer_available() -> None:
+    """Fail closed when exact upstream Porter stemming is unavailable."""
+    if _PORTER is None:
+        raise RuntimeError(
+            "Official LoCoMo QA scoring requires NLTK PorterStemmer. "
+            "Run with 'uv run --with nltk ...' or install nltk in the "
+            "evaluation environment."
+        )
+
+
 def compute_exact_match(prediction: str, ground_truth: str) -> float:
     """Match the official scorer's set-based normalized exact-match helper."""
     pred = set(normalize_answer(prediction).split())
