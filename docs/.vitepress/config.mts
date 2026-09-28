@@ -101,6 +101,7 @@ export default withMermaid(
             { text: 'Qdrant 本地常驻与部署运维', link: '/runbooks/deployment' },
             { text: 'Doctor 巡检与环境排障', link: '/runbooks/troubleshooting' },
             { text: '记忆迁移与向量重建操作手册', link: '/runbooks/migration' },
+            { text: '评测 Baseline 治理与回归排障', link: '/runbooks/eval-baseline-management' },
           ],
         },
       ],

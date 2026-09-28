@@ -109,3 +109,35 @@ jobs:
       - name: Build VitePress documentation site
         run: pnpm --dir docs run build
 
+  eval-contract:
+    name: Evaluation PR Contract (Deterministic Replay)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Validate Hippo Gold v1 Dataset Integrity
+        run: uv run python -m benchmarks.gold.validator --dataset benchmarks/data/hippo_gold_v1.json
+
+      - name: Run Hippo Gold v1 Replay Contract
+        run: uv run python -m benchmarks.runner --dataset benchmarks/data/hippo_gold_v1.json
+
+      - name: Run LongMemEval-S Smoke Fixture Replay Contract
+        run: uv run python -m benchmarks.runner --dataset longmemeval-fixture --tier all --qa-backend mock
+
+      - name: Run LoCoMo-10 Smoke Fixture Replay Contract
+        run: uv run python -m benchmarks.runner --dataset locomo-fixture --tier all
+
