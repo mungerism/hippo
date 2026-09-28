@@ -1,10 +1,8 @@
-"""Data loading and schema adaptation for LoCoMo-10 benchmark.
+"""Data loading and schema adaptation for the LoCoMo-10 benchmark.
 
-Provides models, loaders, and converters to transform Snap Research's LoCoMo-10
-into Hippo standardized BenchmarkDataset schemas supporting:
-- 5 official categories: single-hop, multi-hop, temporal, open-domain, adversarial.
-- Evidence mapping from dialog turns to CorpusItems and graded Qrels.
-- Deterministic hashing, offline caching, and built-in smoke fixtures.
+The official dataset path is deliberately fail-closed: Hippo pins both the
+upstream Git commit and the exact locomo10.json SHA-256. CI smoke data is loaded
+through a separate explicit helper and is never used as an implicit fallback.
 """
 
 from __future__ import annotations
@@ -19,28 +17,25 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from benchmarks.schemas import (
-    BenchmarkDataset,
-    CorpusItem,
-    EvaluationQuery,
-)
+from benchmarks.schemas import BenchmarkDataset, CorpusItem, EvaluationQuery
 
 logger = logging.getLogger(__name__)
 
-# Official LoCoMo category mappings
+# Official category IDs from snap-research/locomo/task_eval/evaluation.py:
+#   1 multi-hop, 2 temporal, 3 open-domain, 4 single-hop, 5 adversarial.
 LOCOMO_CATEGORY_MAP: dict[int, str] = {
-    1: "single_hop",
-    2: "multi_hop",
-    3: "temporal",
-    4: "open_domain",
+    1: "multi_hop",
+    2: "temporal",
+    3: "open_domain",
+    4: "single_hop",
     5: "adversarial",
 }
 
 LOCOMO_CATEGORY_NAME_MAP: dict[str, str] = {
-    "1": "single_hop",
-    "2": "multi_hop",
-    "3": "temporal",
-    "4": "open_domain",
+    "1": "multi_hop",
+    "2": "temporal",
+    "3": "open_domain",
+    "4": "single_hop",
     "5": "adversarial",
     "single_hop": "single_hop",
     "single-hop": "single_hop",
@@ -52,13 +47,19 @@ LOCOMO_CATEGORY_NAME_MAP: dict[str, str] = {
     "adversarial": "adversarial",
 }
 
-# Cache directory for downloaded LoCoMo files
 DEFAULT_CACHE_DIR = Path.home() / ".hippo" / "benchmarks" / "data"
+BUILTIN_FIXTURE_PATH = Path(__file__).parent.parent / "data" / "locomo10_fixture.json"
 
-# Official remote URL for locomo10.json
-OFFICIAL_DATA_URLS = [
-    "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
-]
+# Reproducible upstream pin. The SHA-256 is the byte hash of locomo10.json at
+# this commit and is independently published by multiple LoCoMo users/audits.
+OFFICIAL_DATASET_REVISION = "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376"
+OFFICIAL_DATASET_SHA256 = "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
+OFFICIAL_DATA_URL = (
+    "https://raw.githubusercontent.com/snap-research/locomo/"
+    f"{OFFICIAL_DATASET_REVISION}/data/locomo10.json"
+)
+OFFICIAL_SAMPLE_COUNT = 10
+OFFICIAL_QUESTION_COUNT = 1986
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +77,7 @@ class LoCoMoTurn:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> LoCoMoTurn:
+    def from_dict(cls, data: Mapping[str, Any]) -> "LoCoMoTurn":
         raw_img = data.get("img_url")
         img_list = [str(u) for u in raw_img] if isinstance(raw_img, list) else None
         return cls(
@@ -105,7 +106,12 @@ class LoCoMoSession:
         }
 
     @classmethod
-    def from_dict(cls, session_id: str, date_time: str | None, raw_turns: Sequence[Mapping[str, Any]]) -> LoCoMoSession:
+    def from_dict(
+        cls,
+        session_id: str,
+        date_time: str | None,
+        raw_turns: Sequence[Mapping[str, Any]],
+    ) -> "LoCoMoSession":
         return cls(
             session_id=session_id,
             date_time=date_time,
@@ -130,18 +136,37 @@ class LoCoMoQAItem:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, qa_id: str, sample_id: str, data: Mapping[str, Any]) -> LoCoMoQAItem:
-        raw_cat = data.get("category", 1)
-        cat_int = int(raw_cat) if str(raw_cat).isdigit() else 1
-        cat_name = LOCOMO_CATEGORY_MAP.get(cat_int, LOCOMO_CATEGORY_NAME_MAP.get(str(raw_cat).lower(), "single_hop"))
+    def from_dict(
+        cls,
+        qa_id: str,
+        sample_id: str,
+        data: Mapping[str, Any],
+    ) -> "LoCoMoQAItem":
+        raw_cat = data.get("category", 4)
+        cat_int = int(raw_cat) if str(raw_cat).isdigit() else 4
+        cat_name = LOCOMO_CATEGORY_MAP.get(
+            cat_int,
+            LOCOMO_CATEGORY_NAME_MAP.get(str(raw_cat).lower(), "single_hop"),
+        )
         raw_ev = data.get("evidence", [])
-        evidence_list = [str(e) for e in raw_ev] if isinstance(raw_ev, list) else [str(raw_ev)]
+        evidence_list = (
+            [str(e) for e in raw_ev] if isinstance(raw_ev, list) else [str(raw_ev)]
+        )
 
         return cls(
             qa_id=qa_id,
             question=str(data.get("question", "")),
-            answer=str(data["answer"]) if "answer" in data and data["answer"] is not None else None,
-            adversarial_answer=str(data["adversarial_answer"]) if "adversarial_answer" in data and data["adversarial_answer"] is not None else None,
+            answer=(
+                str(data["answer"])
+                if "answer" in data and data["answer"] is not None
+                else None
+            ),
+            adversarial_answer=(
+                str(data["adversarial_answer"])
+                if "adversarial_answer" in data
+                and data["adversarial_answer"] is not None
+                else None
+            ),
             evidence=evidence_list,
             category=cat_int,
             category_name=cat_name,
@@ -171,58 +196,106 @@ class LoCoMoSample:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> LoCoMoSample:
+    def from_dict(cls, data: Mapping[str, Any]) -> "LoCoMoSample":
         sample_id = str(data.get("sample_id", ""))
         conv = data.get("conversation", {})
-        speaker_a = conv.get("speaker_a")
-        speaker_b = conv.get("speaker_b")
+        speaker_a = conv.get("speaker_a") if isinstance(conv, Mapping) else None
+        speaker_b = conv.get("speaker_b") if isinstance(conv, Mapping) else None
 
-        # Parse sessions dynamically from conversation dict
         sessions: list[LoCoMoSession] = []
         if isinstance(conv, Mapping):
-            # Sort session keys like session_1, session_2, ...
-            session_indices = []
-            for k in conv:
-                m = re.match(r"^session_(\d+)$", k)
-                if m:
-                    session_indices.append(int(m.group(1)))
+            session_indices: list[int] = []
+            for key in conv:
+                match = re.match(r"^session_(\d+)$", key)
+                if match:
+                    session_indices.append(int(match.group(1)))
             session_indices.sort()
 
             for idx in session_indices:
                 sess_key = f"session_{idx}"
                 date_key = f"session_{idx}_date_time"
                 sess_turns = conv.get(sess_key, [])
-                date_val = conv.get(date_key)
                 if isinstance(sess_turns, list):
                     sessions.append(
                         LoCoMoSession.from_dict(
                             session_id=sess_key,
-                            date_time=date_val,
+                            date_time=conv.get(date_key),
                             raw_turns=sess_turns,
                         )
                     )
 
-        # Parse QA items
         raw_qa = data.get("qa", [])
         qa_items: list[LoCoMoQAItem] = []
-        for idx, q_data in enumerate(raw_qa):
-            qa_id = f"{sample_id}_qa_{idx+1}"
-            qa_items.append(LoCoMoQAItem.from_dict(qa_id=qa_id, sample_id=sample_id, data=q_data))
+        if isinstance(raw_qa, list):
+            for idx, q_data in enumerate(raw_qa):
+                if not isinstance(q_data, Mapping):
+                    continue
+                qa_items.append(
+                    LoCoMoQAItem.from_dict(
+                        qa_id=f"{sample_id}_qa_{idx + 1}",
+                        sample_id=sample_id,
+                        data=q_data,
+                    )
+                )
 
-        meta = {
+        metadata = {
             "event_summary": data.get("event_summary"),
             "observation": data.get("observation"),
             "session_summary": data.get("session_summary"),
         }
-
         return cls(
             sample_id=sample_id,
             speaker_a=speaker_a,
             speaker_b=speaker_b,
             sessions=sessions,
             qa_items=qa_items,
-            metadata=meta,
+            metadata=metadata,
         )
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    try:
+        urllib.request.urlretrieve(url, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _official_dataset_path(cache_dir: Path | None = None) -> Path:
+    cache = cache_dir or DEFAULT_CACHE_DIR
+    cache.mkdir(parents=True, exist_ok=True)
+    destination = cache / "locomo10.json"
+
+    if destination.exists():
+        actual = _sha256_path(destination)
+        if actual == OFFICIAL_DATASET_SHA256:
+            return destination
+        logger.warning(
+            "Cached LoCoMo dataset hash %s does not match the pinned official hash; "
+            "re-downloading from the pinned revision.",
+            actual,
+        )
+
+    _download_file(OFFICIAL_DATA_URL, destination)
+    actual = _sha256_path(destination)
+    if actual != OFFICIAL_DATASET_SHA256:
+        destination.unlink(missing_ok=True)
+        raise ValueError(
+            "Downloaded LoCoMo dataset hash mismatch: "
+            f"expected {OFFICIAL_DATASET_SHA256}, got {actual}"
+        )
+    return destination
 
 
 def load_locomo_samples(
@@ -230,55 +303,69 @@ def load_locomo_samples(
     cache_dir: Path | None = None,
     expected_hash: str | None = None,
 ) -> list[LoCoMoSample]:
-    """Load and parse LoCoMo-10 samples from file, cache, or official URL."""
-    cache = cache_dir or DEFAULT_CACHE_DIR
-    cache.mkdir(parents=True, exist_ok=True)
+    """Load LoCoMo samples.
 
-    target_file: Path | None = None
+    With no explicit source this loads the pinned official dataset only. It
+    never falls back to the built-in CI fixture.
+    """
+    is_official = source_path_or_url is None
 
-    if source_path_or_url:
-        p = Path(source_path_or_url).expanduser()
-        if p.exists() and p.is_file():
-            target_file = p
-        elif str(source_path_or_url).startswith("http://") or str(source_path_or_url).startswith("https://"):
-            dest = cache / "locomo10.json"
-            if not dest.exists():
-                logger.info(f"Downloading LoCoMo-10 from {source_path_or_url} to {dest}...")
-                urllib.request.urlretrieve(str(source_path_or_url), dest)
-            target_file = dest
-        else:
-            raise FileNotFoundError(f"Specified LoCoMo source does not exist: {source_path_or_url}")
+    if is_official:
+        target_file = _official_dataset_path(cache_dir)
+        expected_hash = OFFICIAL_DATASET_SHA256
     else:
-        # Check cache or fallback to built-in light fixture
-        dest = cache / "locomo10.json"
-        if dest.exists():
-            target_file = dest
+        source = str(source_path_or_url)
+        if source.startswith(("http://", "https://")):
+            cache = cache_dir or DEFAULT_CACHE_DIR
+            cache.mkdir(parents=True, exist_ok=True)
+            target_file = cache / "locomo10.json"
+            if not target_file.exists():
+                _download_file(source, target_file)
         else:
-            fixture_path = Path(__file__).parent.parent / "data" / "locomo10_fixture.json"
-            if fixture_path.exists():
-                logger.info(f"Using built-in LoCoMo fixture from {fixture_path}")
-                target_file = fixture_path
-            else:
+            target_file = Path(source_path_or_url).expanduser()
+            if not target_file.is_file():
                 raise FileNotFoundError(
-                    f"No LoCoMo dataset found at {dest} and fixture missing at {fixture_path}."
+                    f"Specified LoCoMo source does not exist: {source_path_or_url}"
                 )
 
-    raw_data = target_file.read_text(encoding="utf-8")
-
     if expected_hash:
-        file_hash = hashlib.sha256(raw_data.encode("utf-8")).hexdigest()
-        if file_hash != expected_hash:
+        actual_hash = _sha256_path(target_file)
+        if actual_hash != expected_hash:
             raise ValueError(
-                f"Dataset hash mismatch for {target_file}! Expected {expected_hash}, got {file_hash}"
+                f"Dataset hash mismatch for {target_file}! "
+                f"Expected {expected_hash}, got {actual_hash}"
             )
 
-    parsed = json.loads(raw_data)
+    parsed = json.loads(target_file.read_text(encoding="utf-8"))
     if not isinstance(parsed, list):
-        raise TypeError(f"Invalid LoCoMo JSON format; expected list of conversation samples, got {type(parsed)}")
+        raise TypeError(
+            "Invalid LoCoMo JSON format; expected list of conversation samples, "
+            f"got {type(parsed)}"
+        )
 
-    samples = [LoCoMoSample.from_dict(s) for s in parsed]
-    logger.info(f"Successfully loaded {len(samples)} LoCoMo samples from {target_file}")
+    samples = [
+        LoCoMoSample.from_dict(sample)
+        for sample in parsed
+        if isinstance(sample, Mapping)
+    ]
+
+    if is_official:
+        question_count = sum(len(sample.qa_items) for sample in samples)
+        if len(samples) != OFFICIAL_SAMPLE_COUNT or question_count != OFFICIAL_QUESTION_COUNT:
+            raise ValueError(
+                "Pinned LoCoMo dataset shape mismatch: "
+                f"expected {OFFICIAL_SAMPLE_COUNT} samples / "
+                f"{OFFICIAL_QUESTION_COUNT} questions, got "
+                f"{len(samples)} / {question_count}"
+            )
+
+    logger.info("Loaded %s LoCoMo samples from %s", len(samples), target_file)
     return samples
+
+
+def load_locomo_fixture_samples() -> list[LoCoMoSample]:
+    """Load the deterministic zero-network CI fixture explicitly."""
+    return load_locomo_samples(BUILTIN_FIXTURE_PATH)
 
 
 def convert_to_locomo_benchmark(
@@ -286,45 +373,37 @@ def convert_to_locomo_benchmark(
     name: str = "locomo10",
     version: str = "1.0.0",
 ) -> BenchmarkDataset:
-    """Convert LoCoMo samples into a standardized BenchmarkDataset.
-
-    - Every turn in each conversation session becomes a CorpusItem with ID '{sample_id}_{dia_id}'.
-    - Every QA pair becomes an EvaluationQuery with category mapped to official names.
-    - Category 5 (Adversarial / No-Answer) is treated as expected_empty=True with empty Qrels.
-    - Categories 1~4 are mapped to positive Qrels with evidence turns graded 1.
-    """
+    """Convert LoCoMo samples into Hippo's standardized benchmark schema."""
     corpus_items: list[CorpusItem] = []
     queries: list[EvaluationQuery] = []
     qrels: dict[str, dict[str, int]] = {}
     forbidden: dict[str, list[str]] = {}
 
     for sample in samples:
-        s_id = sample.sample_id
-        proj_id = f"eval_locomo_{s_id}"
-        user_id = f"eval_user_{s_id}"
+        sample_id = sample.sample_id
+        project_id = f"eval_locomo_{sample_id}"
+        user_id = f"eval_user_{sample_id}"
 
-        # 1. Ingest turns into corpus
         for session in sample.sessions:
             for turn in session.turns:
-                cid = f"{s_id}_{turn.dia_id}"
-                # Format text with timestamp context if available
+                corpus_id = f"{sample_id}_{turn.dia_id}"
                 if session.date_time:
-                    turn_text = f"[{session.date_time}] {turn.speaker}: {turn.text}"
+                    text = f"[{session.date_time}] {turn.speaker}: {turn.text}"
                 else:
-                    turn_text = f"{turn.speaker}: {turn.text}"
+                    text = f"{turn.speaker}: {turn.text}"
 
                 corpus_items.append(
                     CorpusItem(
-                        id=cid,
-                        text=turn_text,
+                        id=corpus_id,
+                        text=text,
                         scope="project",
-                        project_id=proj_id,
+                        project_id=project_id,
                         user_id=user_id,
                         status="active",
                         category=session.session_id,
                         metadata={
                             "benchmark": "locomo",
-                            "sample_id": s_id,
+                            "sample_id": sample_id,
                             "session_id": session.session_id,
                             "session_date_time": session.date_time,
                             "dia_id": turn.dia_id,
@@ -335,34 +414,31 @@ def convert_to_locomo_benchmark(
                     )
                 )
 
-        # 2. Build queries and qrels
         for qa in sample.qa_items:
-            qid = qa.qa_id
             is_adversarial = qa.category == 5
-            evidence_cids = [f"{s_id}_{dia_id}" for dia_id in qa.evidence]
+            evidence_ids = [f"{sample_id}_{dia_id}" for dia_id in qa.evidence]
 
             if is_adversarial:
-                # Adversarial question has no valid memory answer in the dialogue
-                qrels[qid] = {}
-                ref_ans = "Unknown / Not mentioned"
+                qrels[qa.qa_id] = {}
+                reference_answer = "Unknown / Not mentioned"
             else:
-                qrels[qid] = {cid: 1 for cid in evidence_cids}
-                ref_ans = qa.answer or ""
+                qrels[qa.qa_id] = {corpus_id: 1 for corpus_id in evidence_ids}
+                reference_answer = qa.answer or ""
 
             queries.append(
                 EvaluationQuery(
-                    query_id=qid,
+                    query_id=qa.qa_id,
                     query=qa.question,
                     scope="project",
-                    project_id=proj_id,
+                    project_id=project_id,
                     user_id=user_id,
                     expected_empty=is_adversarial,
                     category=qa.category_name,
-                    reference_answer=ref_ans,
-                    evidence_ids=evidence_cids,
+                    reference_answer=reference_answer,
+                    evidence_ids=evidence_ids,
                     metadata={
                         "benchmark": "locomo",
-                        "sample_id": s_id,
+                        "sample_id": sample_id,
                         "category_id": qa.category,
                         "category_name": qa.category_name,
                         "evidence_dia_ids": qa.evidence,
@@ -374,7 +450,10 @@ def convert_to_locomo_benchmark(
     return BenchmarkDataset(
         name=name,
         version=version,
-        description=f"LoCoMo-10 Benchmark ({len(queries)} queries across {len(samples)} long-term dialogues, {len(corpus_items)} turns)",
+        description=(
+            f"LoCoMo-10 Benchmark ({len(queries)} queries across "
+            f"{len(samples)} long-term dialogues, {len(corpus_items)} turns)"
+        ),
         corpus=corpus_items,
         queries=queries,
         qrels=qrels,
