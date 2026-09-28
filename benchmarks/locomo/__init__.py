@@ -9,6 +9,7 @@ from benchmarks.locomo.evaluator import (
     compute_exact_match,
     compute_locomo_official_f1,
     compute_qa_f1,
+    ensure_official_scorer_available,
     judge_adversarial_answer,
     normalize_answer,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "compute_exact_match",
     "compute_locomo_official_f1",
     "compute_qa_f1",
+    "ensure_official_scorer_available",
     "convert_to_locomo_benchmark",
     "judge_adversarial_answer",
     "load_locomo_fixture_samples",
