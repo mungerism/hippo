@@ -15,6 +15,7 @@ closed unless NLTK is available (for example: uv run --with nltk ...).
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import os
 import re
 import string
@@ -24,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from benchmarks.adapter import BenchmarkAdapter
+from benchmarks.locomo.loader import OFFICIAL_DATASET_REVISION
 from benchmarks.metrics import aggregate_by_category, aggregate_metrics, evaluate_single_query
 from benchmarks.schemas import BenchmarkDataset, QueryEvaluationResult
 
@@ -348,11 +350,18 @@ class LoCoMoEvaluator:
             if hasattr(self.reader, "manifest_config")
             else {"backend": type(self.reader).__name__}
         )
+        try:
+            nltk_version = importlib.metadata.version("nltk")
+        except importlib.metadata.PackageNotFoundError:
+            nltk_version = None
+
         return {
             "reader": reader_config,
             "scorer": {
                 "backend": "snap-research/locomo task_eval/evaluation.py semantics",
+                "upstream_revision": OFFICIAL_DATASET_REVISION,
                 "porter_stemmer": "nltk.stem.PorterStemmer",
+                "nltk_version": nltk_version,
                 "strict_official": self.strict_official_scorer,
                 "adversarial_reported_separately": True,
             },
