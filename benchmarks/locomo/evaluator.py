@@ -101,14 +101,12 @@ def normalize_answer(text: str) -> str:
 
 def _stemmed_tokens(text: str, *, require_porter: bool = False) -> list[str]:
     tokens = normalize_answer(text).split()
-    if _PORTER is None:
-        if require_porter:
-            raise RuntimeError(
-                "Official LoCoMo QA scoring requires NLTK PorterStemmer. "
-                "Run with 'uv run --with nltk ...' or install nltk in the "
-                "evaluation environment."
-            )
+    if not require_porter:
+        # CI/mock scoring must be deterministic regardless of whether an
+        # unrelated environment happens to have NLTK installed.
         return tokens
+    ensure_official_scorer_available()
+    assert _PORTER is not None
     return [_PORTER.stem(token) for token in tokens]
 
 
@@ -139,8 +137,10 @@ def compute_qa_f1(
     pred_tokens = _stemmed_tokens(prediction, require_porter=require_porter)
     gold_tokens = _stemmed_tokens(ground_truth, require_porter=require_porter)
 
+    # Upstream f1_score returns 0 whenever there is no token overlap,
+    # including the empty/empty case.
     if not pred_tokens or not gold_tokens:
-        return 1.0 if pred_tokens == gold_tokens else 0.0
+        return 0.0
 
     common = Counter(pred_tokens) & Counter(gold_tokens)
     num_same = sum(common.values())
@@ -203,9 +203,15 @@ def judge_adversarial_answer(
 ) -> tuple[float, str]:
     """Score category-5 refusal separately from ordinary QA F1."""
     pred_clean = prediction.strip().lower()
-    phrases = OFFICIAL_ADVERSARIAL_PHRASES if strict_official else ABSTENTION_PHRASES
-    is_abstained = any(phrase in pred_clean for phrase in phrases)
 
+    if strict_official:
+        # Upstream category-5 scoring is intentionally simple: either of these
+        # substrings yields 1, otherwise 0. Keep this exact for comparability.
+        if any(phrase in pred_clean for phrase in OFFICIAL_ADVERSARIAL_PHRASES):
+            return 1.0, "Matched official LoCoMo adversarial abstention rule."
+        return 0.0, "Did not match official LoCoMo adversarial abstention rule."
+
+    is_abstained = any(phrase in pred_clean for phrase in ABSTENTION_PHRASES)
     trapped = False
     if adversarial_answer:
         trap = normalize_answer(adversarial_answer)
