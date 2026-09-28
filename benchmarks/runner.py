@@ -1159,7 +1159,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if qa_requested and is_locomo:
         if official_named_dataset:
-            ensure_official_scorer_available()
+            try:
+                ensure_official_scorer_available()
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
         if args.qa_backend == "gemini":
             locomo_evaluator = LoCoMoEvaluator(
                 reader=GeminiLoCoMoReader(
