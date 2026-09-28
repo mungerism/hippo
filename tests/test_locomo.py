@@ -1,8 +1,4 @@
-"""Tests for LoCoMo-10 benchmark integration (#56).
-
-Tests loader, schema conversions, Token F1 evaluation, adversarial judgement,
-category breakdown reporting, and Runner CLI integration.
-"""
+"""Tests for LoCoMo-10 benchmark integration (#56)."""
 
 from __future__ import annotations
 
@@ -11,35 +7,76 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmarks.adapter import ReplayFixtureAdapter
 from benchmarks.locomo import (
+    BUILTIN_FIXTURE_PATH,
     LOCOMO_CATEGORY_MAP,
     LOCOMO_CATEGORY_NAME_MAP,
+    OFFICIAL_DATASET_REVISION,
+    OFFICIAL_DATASET_SHA256,
+    OFFICIAL_DATA_URL,
     LoCoMoEvaluationResult,
     LoCoMoEvaluator,
     RuleBasedMockLoCoMoReader,
     compute_exact_match,
+    compute_locomo_official_f1,
     compute_qa_f1,
     convert_to_locomo_benchmark,
     judge_adversarial_answer,
+    load_locomo_fixture_samples,
     load_locomo_samples,
     normalize_answer,
 )
 from benchmarks.runner import main as runner_main
-from benchmarks.schemas import (
-    BenchmarkDataset,
-    CorpusItem,
-)
+from benchmarks.schemas import BenchmarkDataset, CorpusItem
 
-FIXTURE_PATH = Path(__file__).resolve().parent.parent / "benchmarks" / "data" / "locomo10_fixture.json"
+FIXTURE_PATH = BUILTIN_FIXTURE_PATH
+
+
+class RecordingReplayAdapter(ReplayFixtureAdapter):
+    """Replay adapter that records requested retrieval depth."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.requested_limits: list[int] = []
+
+    def search(self, query, limit=3, capture_trace=False):
+        self.requested_limits.append(limit)
+        return super().search(query, limit=limit, capture_trace=capture_trace)
 
 
 class TestLoCoMoLoader(unittest.TestCase):
-    """Test loading and parsing LoCoMo-10 raw samples and conversions."""
+    """Loader, provenance pinning, and schema conversion tests."""
 
     def test_fixture_file_exists(self):
         self.assertTrue(FIXTURE_PATH.is_file(), f"Fixture missing at {FIXTURE_PATH}")
+
+    def test_official_dataset_is_pinned(self):
+        self.assertEqual(
+            OFFICIAL_DATASET_REVISION,
+            "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376",
+        )
+        self.assertEqual(
+            OFFICIAL_DATASET_SHA256,
+            "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+        )
+        self.assertIn(OFFICIAL_DATASET_REVISION, OFFICIAL_DATA_URL)
+        self.assertNotIn("/main/", OFFICIAL_DATA_URL)
+
+    def test_default_loader_never_falls_back_to_fixture(self):
+        with patch(
+            "benchmarks.locomo.loader._official_dataset_path",
+            side_effect=RuntimeError("download unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "download unavailable"):
+                load_locomo_samples()
+
+    def test_explicit_fixture_loader(self):
+        samples = load_locomo_fixture_samples()
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].sample_id, "conv-26")
 
     def test_load_builtin_fixture(self):
         samples = load_locomo_samples(FIXTURE_PATH)
@@ -52,7 +89,6 @@ class TestLoCoMoLoader(unittest.TestCase):
         self.assertGreaterEqual(len(sample.sessions), 2)
         self.assertGreaterEqual(len(sample.qa_items), 5)
 
-        # Check turn details
         first_session = sample.sessions[0]
         self.assertEqual(first_session.session_id, "session_1")
         self.assertEqual(first_session.date_time, "1:56 pm on 8 May, 2023")
@@ -63,22 +99,21 @@ class TestLoCoMoLoader(unittest.TestCase):
         self.assertEqual(first_turn.dia_id, "D1:1")
         self.assertIn("Hey Mel!", first_turn.text)
 
-    def test_category_mapping_coverage(self):
-        # 5 official LoCoMo categories
-        expected_cats = {
-            1: "single_hop",
-            2: "multi_hop",
-            3: "temporal",
-            4: "open_domain",
+    def test_official_category_mapping(self):
+        expected = {
+            1: "multi_hop",
+            2: "temporal",
+            3: "open_domain",
+            4: "single_hop",
             5: "adversarial",
         }
-        for code, name in expected_cats.items():
-            self.assertEqual(LOCOMO_CATEGORY_MAP[code], name)
+        self.assertEqual(LOCOMO_CATEGORY_MAP, expected)
+        for code, name in expected.items():
             self.assertEqual(LOCOMO_CATEGORY_NAME_MAP[str(code)], name)
             self.assertEqual(LOCOMO_CATEGORY_NAME_MAP[name], name)
 
     def test_convert_to_benchmark_dataset(self):
-        samples = load_locomo_samples(FIXTURE_PATH)
+        samples = load_locomo_fixture_samples()
         dataset = convert_to_locomo_benchmark(samples)
 
         self.assertIsInstance(dataset, BenchmarkDataset)
@@ -86,48 +121,52 @@ class TestLoCoMoLoader(unittest.TestCase):
         self.assertGreater(len(dataset.corpus), 0)
         self.assertGreater(len(dataset.queries), 0)
 
-        # Check corpus item schema
         corpus_item = dataset.corpus[0]
         self.assertIsInstance(corpus_item, CorpusItem)
         self.assertTrue(corpus_item.id.startswith("conv-26_D"))
         self.assertIn("speaker", corpus_item.metadata)
         self.assertIn("session_date_time", corpus_item.metadata)
 
-        # Check queries coverage across categories
         query_categories = {q.category for q in dataset.queries}
-        self.assertIn("single_hop", query_categories)
-        self.assertIn("multi_hop", query_categories)
-        self.assertIn("temporal", query_categories)
-        self.assertIn("open_domain", query_categories)
-        self.assertIn("adversarial", query_categories)
+        self.assertEqual(
+            query_categories,
+            {"single_hop", "multi_hop", "temporal", "open_domain", "adversarial"},
+        )
 
-        # Check Adversarial query specific flags
-        adv_queries = [q for q in dataset.queries if q.category == "adversarial"]
-        self.assertGreater(len(adv_queries), 0)
-        for adv_q in adv_queries:
-            self.assertTrue(adv_q.expected_empty)
-            self.assertEqual(dataset.qrels.get(adv_q.query_id, {}), {})
-            self.assertIn("adversarial_answer", adv_q.metadata)
+        category_by_id = {
+            int(q.metadata["category_id"]): q.category for q in dataset.queries
+        }
+        self.assertEqual(category_by_id[1], "multi_hop")
+        self.assertEqual(category_by_id[2], "temporal")
+        self.assertEqual(category_by_id[3], "open_domain")
+        self.assertEqual(category_by_id[4], "single_hop")
+        self.assertEqual(category_by_id[5], "adversarial")
 
-        # Check query with multiple evidence items (e.g. temporal query with D1:9, D1:11)
+        adversarial_queries = [
+            q for q in dataset.queries if q.category == "adversarial"
+        ]
+        self.assertGreater(len(adversarial_queries), 0)
+        for query in adversarial_queries:
+            self.assertTrue(query.expected_empty)
+            self.assertEqual(dataset.qrels.get(query.query_id, {}), {})
+            self.assertIn("adversarial_answer", query.metadata)
+
         multi_evidence_queries = [
-            q for q in dataset.queries if len(dataset.qrels.get(q.query_id, {})) >= 2
+            q
+            for q in dataset.queries
+            if len(dataset.qrels.get(q.query_id, {})) >= 2
         ]
         self.assertGreater(len(multi_evidence_queries), 0)
-        for meq in multi_evidence_queries:
-            self.assertFalse(meq.expected_empty)
-            self.assertGreaterEqual(len(dataset.qrels[meq.query_id]), 2)
+        for query in multi_evidence_queries:
+            self.assertFalse(query.expected_empty)
+            self.assertGreaterEqual(len(dataset.qrels[query.query_id]), 2)
 
     def test_hash_verification(self):
-        # Calculate correct hash
-        with open(FIXTURE_PATH, "rb") as f:
-            valid_hash = hashlib.sha256(f.read()).hexdigest()
+        valid_hash = hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest()
 
-        # Should succeed with valid hash
         samples = load_locomo_samples(FIXTURE_PATH, expected_hash=valid_hash)
         self.assertEqual(len(samples), 1)
 
-        # Should fail with mismatched hash
         with self.assertRaises(ValueError) as ctx:
             load_locomo_samples(FIXTURE_PATH, expected_hash="0" * 64)
         self.assertIn("Dataset hash mismatch", str(ctx.exception))
@@ -139,150 +178,191 @@ class TestLoCoMoLoader(unittest.TestCase):
             bad_path.write_text(json.dumps(bad_data), encoding="utf-8")
             samples = load_locomo_samples(bad_path)
             self.assertEqual(len(samples), 1)
-            # Empty sessions and qa items
             self.assertEqual(len(samples[0].sessions), 0)
             self.assertEqual(len(samples[0].qa_items), 0)
 
 
-class TestLoCoMoEvaluator(unittest.TestCase):
-    """Test standard SQuAD token F1, adversarial rejection, and aggregator."""
+class TestLoCoMoOfficialScorer(unittest.TestCase):
+    """Cross-check the local scorer against upstream evaluation.py semantics."""
 
-    def test_normalize_answer(self):
-        # lowercasing, punctuation, articles, whitespaces
-        self.assertEqual(normalize_answer("The Golden Gate Bridge!"), "golden gate bridge")
+    def test_normalize_answer_matches_official_rules(self):
+        self.assertEqual(
+            normalize_answer("The Golden Gate Bridge!"),
+            "golden gate bridge",
+        )
+        self.assertEqual(normalize_answer("Cats and Dogs"), "cats dogs")
         self.assertEqual(normalize_answer("   An   apple a  day... "), "apple day")
         self.assertEqual(normalize_answer("Hello, World?!"), "hello world")
         self.assertEqual(normalize_answer(""), "")
 
-    def test_compute_exact_match(self):
-        self.assertEqual(compute_exact_match("Kyoto", "kyoto"), 1.0)
+    def test_exact_match_is_set_based_like_official(self):
+        self.assertEqual(compute_exact_match("Kyoto Japan", "Japan Kyoto"), 1.0)
         self.assertEqual(compute_exact_match("The Kyoto", "Kyoto"), 1.0)
         self.assertEqual(compute_exact_match("Tokyo", "Kyoto"), 0.0)
-        self.assertEqual(compute_exact_match("", ""), 1.0)
 
-    def test_compute_qa_f1(self):
-        # Identical
+    def test_single_answer_f1(self):
         self.assertEqual(compute_qa_f1("Kyoto, Japan", "kyoto japan"), 1.0)
-
-        # Partial overlap: Pred="Kyoto temple garden", Gold="Kyoto temple"
-        # Overlap = {"kyoto", "temple"} = 2 tokens. Pred=3, Gold=2
-        # Precision = 2/3, Recall = 2/2 = 1.0, F1 = 2 * (2/3) * 1 / (5/3) = 4/5 = 0.8
-        self.assertAlmostEqual(compute_qa_f1("Kyoto temple garden", "Kyoto temple"), 0.8, places=3)
-
-        # No overlap
+        self.assertAlmostEqual(
+            compute_qa_f1("Kyoto temple garden", "Kyoto temple"),
+            0.8,
+            places=3,
+        )
         self.assertEqual(compute_qa_f1("Tokyo tower", "Kyoto temple"), 0.0)
 
-        # Both empty
-        self.assertEqual(compute_qa_f1("", ""), 1.0)
-        self.assertEqual(compute_qa_f1("something", ""), 0.0)
-        self.assertEqual(compute_qa_f1("", "something"), 0.0)
+    def test_category_1_multi_hop_splits_comma_answers(self):
+        score = compute_locomo_official_f1(
+            "counseling certification, psychology",
+            "Psychology, counseling certification",
+            category=1,
+        )
+        self.assertEqual(score, 1.0)
 
-    def test_judge_adversarial_answer(self):
-        # Correctly abstains with standard phrases -> 1.0
-        for phrase in ["I don't know.", "Unknown.", "Not mentioned in the dialogue.", "未提及"]:
-            score, reason = judge_adversarial_answer(phrase, adversarial_answer="visited Osaka")
-            self.assertEqual(score, 1.0, f"Failed for phrase: {phrase}")
-            self.assertIn("refused", reason.lower())
+    def test_category_3_trims_semicolon_suffix(self):
+        score = compute_locomo_official_f1(
+            "Paris",
+            "Paris; France",
+            category=3,
+        )
+        self.assertEqual(score, 1.0)
 
-        # Trapped by deceptive adversarial answer -> 0.0
+    def test_adversarial_strict_official_phrases(self):
+        score, _ = judge_adversarial_answer(
+            "This was not mentioned in the dialogue.",
+            strict_official=True,
+        )
+        self.assertEqual(score, 1.0)
+
+        score, _ = judge_adversarial_answer(
+            "Unknown.",
+            strict_official=True,
+        )
+        self.assertEqual(score, 0.0)
+
+        score, _ = judge_adversarial_answer(
+            "Unknown.",
+            strict_official=False,
+        )
+        self.assertEqual(score, 1.0)
+
+    def test_adversarial_trap_overrides_abstention_phrase(self):
         score, reason = judge_adversarial_answer(
-            "Caroline visited Osaka last month.",
+            "Not mentioned, but Caroline visited Osaka.",
             adversarial_answer="visited Osaka",
         )
         self.assertEqual(score, 0.0)
         self.assertIn("trap", reason.lower())
 
-        # Hallucinated answer without abstaining or trapping -> 0.0
-        score, reason = judge_adversarial_answer(
-            "Caroline went to Tokyo and bought a souvenir.",
-            adversarial_answer="visited Osaka",
-        )
-        self.assertEqual(score, 0.0)
-        self.assertIn("hallucination", reason.lower())
+
+class TestLoCoMoEvaluator(unittest.TestCase):
+    """End-to-end evaluator behavior and separation of retrieval/QA depths."""
 
     def test_rule_based_mock_reader(self):
-        # With explicit answer map
         reader = RuleBasedMockLoCoMoReader(
             answer_map={"where did caroline go?": "Kyoto"}
         )
 
-        ans = reader.answer(
+        answer = reader.answer(
             question="where did caroline go?",
             context="Turn 1: Caroline visited Kyoto.",
-            is_adversarial=False,
         )
-        self.assertEqual(ans, "Kyoto")
+        self.assertEqual(answer, "Kyoto")
 
-        # Adversarial mode returns abstention when no evidence
-        ans_adv = reader.answer(
+        empty_answer = reader.answer(
             question="When did she visit Tokyo?",
             context="",
-            is_adversarial=True,
         )
-        self.assertIn("don't know", ans_adv.lower())
+        self.assertIn("not mentioned", empty_answer.lower())
 
-        # Fallback to context lines when not in map
-        ans_ctx = reader.answer(
+        context_answer = reader.answer(
             question="What happened?",
             context="Melanie went shopping.",
-            is_adversarial=False,
         )
-        self.assertEqual(ans_ctx, "Melanie went shopping.")
+        self.assertEqual(context_answer, "Melanie went shopping.")
 
-    def test_locomo_evaluator_end_to_end(self):
-        samples = load_locomo_samples(FIXTURE_PATH)
+    def test_evaluator_uses_top10_for_metrics_and_top3_for_reader(self):
+        samples = load_locomo_fixture_samples()
         dataset = convert_to_locomo_benchmark(samples)
 
-        # Build synthetic replay search results covering all queries
         candidates_by_query = {}
         answer_map = {}
-        for q in dataset.queries:
-            gold_ids = list(dataset.qrels.get(q.query_id, {}).keys())
+        for query in dataset.queries:
+            gold_ids = list(dataset.qrels.get(query.query_id, {}).keys())
             candidates = []
-            for idx, gid in enumerate(gold_ids):
-                item_text = next((c.text for c in dataset.corpus if c.id == gid), "")
+            for idx, gold_id in enumerate(gold_ids):
+                item_text = next(
+                    (c.text for c in dataset.corpus if c.id == gold_id),
+                    "",
+                )
                 candidates.append(
                     {
-                        "id": gid,
+                        "id": gold_id,
                         "memory": item_text,
                         "score": 0.95 - idx * 0.05,
                         "score_details": {"final_score": 0.95 - idx * 0.05},
                         "metadata": {"status": "active", "scope": "project"},
-                        "project_id": "test_proj",
-                        "user_id": "test_user",
+                        "project_id": query.project_id,
+                        "user_id": query.user_id,
                     }
                 )
-            candidates_by_query[q.query_id] = candidates
-            if q.reference_answer:
-                answer_map[q.query.strip().lower()] = q.reference_answer
+            candidates_by_query[query.query_id] = candidates
+            if not query.expected_empty and query.reference_answer:
+                answer_map[query.query.strip().lower()] = query.reference_answer
 
-        adapter = ReplayFixtureAdapter(candidates_by_query=candidates_by_query)
+        adapter = RecordingReplayAdapter(candidates_by_query=candidates_by_query)
         adapter.ingest_corpus(dataset.corpus)
 
-        reader = RuleBasedMockLoCoMoReader(answer_map=answer_map)
-        evaluator = LoCoMoEvaluator(reader=reader)
-        result = evaluator.evaluate(adapter=adapter, dataset=dataset, limit=3, evaluate_qa=True)
+        evaluator = LoCoMoEvaluator(
+            reader=RuleBasedMockLoCoMoReader(answer_map=answer_map)
+        )
+        result = evaluator.evaluate(
+            adapter=adapter,
+            dataset=dataset,
+            limit=3,
+            k_values=(1, 3, 5, 10),
+            evaluate_qa=True,
+        )
 
         self.assertIsInstance(result, LoCoMoEvaluationResult)
-        self.assertIn("avg_f1", result.qa_metrics)
-        self.assertIn("avg_em", result.qa_metrics)
-        self.assertGreater(result.qa_metrics["avg_f1"], 0.8)
+        self.assertTrue(adapter.requested_limits)
+        self.assertTrue(all(limit == 10 for limit in adapter.requested_limits))
+        self.assertTrue(
+            all(len(detail["qa_context_ids"]) <= 3 for detail in result.query_details)
+        )
 
-        # Check breakdown categories
+        self.assertEqual(result.qa_metrics["avg_f1"], 1.0)
+        self.assertEqual(result.qa_metrics["avg_em"], 1.0)
+        self.assertEqual(result.qa_metrics["adversarial_accuracy"], 1.0)
+
         self.assertIn("single_hop", result.category_metrics)
         self.assertIn("multi_hop", result.category_metrics)
         self.assertIn("temporal", result.category_metrics)
         self.assertIn("open_domain", result.category_metrics)
         self.assertIn("adversarial", result.category_metrics)
+        self.assertNotIn(
+            "qa_f1",
+            result.category_metrics["adversarial"],
+        )
+        self.assertEqual(
+            result.category_metrics["adversarial"]["adversarial_accuracy"],
+            1.0,
+        )
 
-        # Summary dict formatting
         summary = result.to_dict()
         self.assertIn("qa_metrics", summary)
         self.assertIn("category_metrics", summary)
+        self.assertIn("query_details", summary)
+
+    def test_manifest_records_reader_and_scorer(self):
+        evaluator = LoCoMoEvaluator(reader=RuleBasedMockLoCoMoReader())
+        manifest = evaluator.manifest_config()
+        self.assertEqual(manifest["reader"]["backend"], "mock")
+        self.assertIn("prompt_sha256", manifest["reader"])
+        self.assertIn("scorer", manifest)
+        self.assertTrue(manifest["scorer"]["adversarial_reported_separately"])
 
 
 class TestLoCoMoRunnerCLI(unittest.TestCase):
-    """Test CLI runner execution with --dataset locomo-fixture."""
+    """Runner integration with explicit fixture selection."""
 
     def test_runner_retrieval_tier_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -301,15 +381,25 @@ class TestLoCoMoRunnerCLI(unittest.TestCase):
                 ]
             )
             self.assertEqual(exit_code, 0)
+
             out_path = Path(tmpdir) / "locomo_retrieval.json"
             self.assertTrue(out_path.is_file())
-
             data = json.loads(out_path.read_text(encoding="utf-8"))
+
             self.assertEqual(data["manifest"]["dataset_name"], "locomo10")
+            benchmark_config = data["manifest"]["benchmark_config"]
+            self.assertEqual(
+                benchmark_config["dataset_source"],
+                "benchmarks/data/locomo10_fixture.json",
+            )
+            self.assertEqual(
+                benchmark_config["dataset_release"],
+                "ci-fixture",
+            )
             self.assertIn("aggregate_metrics", data)
             self.assertIn("category_metrics", data)
 
-    def test_runner_all_tier_markdown(self):
+    def test_runner_all_tier_records_mock_provenance_and_separate_adv_score(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             exit_code = runner_main(
                 [
@@ -317,6 +407,8 @@ class TestLoCoMoRunnerCLI(unittest.TestCase):
                     "locomo-fixture",
                     "--tier",
                     "all",
+                    "--qa-backend",
+                    "mock",
                     "--max-injected",
                     "3",
                     "--output-dir",
@@ -326,13 +418,32 @@ class TestLoCoMoRunnerCLI(unittest.TestCase):
                 ]
             )
             self.assertEqual(exit_code, 0)
-            out_path = Path(tmpdir) / "locomo_all.md"
-            self.assertTrue(out_path.is_file())
 
-            content = out_path.read_text(encoding="utf-8")
-            self.assertIn("LoCoMo", content)
-            self.assertIn("single_hop", content)
-            self.assertIn("adversarial", content)
+            json_path = Path(tmpdir) / "locomo_all.json"
+            md_path = Path(tmpdir) / "locomo_all.md"
+            self.assertTrue(json_path.is_file())
+            self.assertTrue(md_path.is_file())
+
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            qa_manifest = data["manifest"]["benchmark_config"]["qa"]
+            self.assertEqual(qa_manifest["reader"]["backend"], "mock")
+            self.assertIn("prompt_sha256", qa_manifest["reader"])
+
+            locomo_eval = data["locomo_evaluation"]
+            self.assertIn("adversarial_accuracy", locomo_eval["qa_metrics"])
+            adv_details = [
+                item
+                for item in locomo_eval["query_details"]
+                if item["category"] == "adversarial"
+            ]
+            self.assertTrue(adv_details)
+            self.assertIsNone(adv_details[0]["f1"])
+            self.assertIsNotNone(adv_details[0]["adversarial_accuracy"])
+
+            markdown = md_path.read_text(encoding="utf-8")
+            self.assertIn("LoCoMo", markdown)
+            self.assertIn("Adversarial Accuracy", markdown)
+            self.assertIn("不混入 QA F1", markdown)
 
 
 if __name__ == "__main__":
