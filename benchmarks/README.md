@@ -125,31 +125,51 @@ uv run python -m benchmarks.runner --dataset longmemeval-fixture --tier all --qa
 
 ### 4. 运行 LoCoMo-10 超长对话基准评测 (ACL 2024)
 
-Snap Research 发布的 **LoCoMo-10** 是评估长上下文对话记忆的经典学术基准，包含 10 组跨越数月的大规模多轮对话，共 1,986 道评测题。首次使用 `--dataset locomo` 会自动下载并校验官方数据到 `~/.hippo/benchmarks/data/locomo10.json`。
+Snap Research 发布的 **LoCoMo-10** 包含 10 组跨越数月的大规模多轮对话，共 1,986 道评测题。Hippo 将官方数据固定到 commit
+`3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376`，并校验 `locomo10.json` 的 SHA-256
+`79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`。首次运行
+`--dataset locomo` 会下载到 `~/.hippo/benchmarks/data/locomo10.json`；缓存 hash 不匹配会从固定 revision 重新下载，绝不会退化为 CI fixture。
 
-LoCoMo-10 包含 5 大代表性任务类别，Hippo 评测套件支持自动化分桶报告：
-1. **Single-Hop (单跳查询)**: 282 题 (14.2%)，定位单一对话轮次中的事实。
-2. **Multi-Hop (多跳推理)**: 321 题 (16.2%)，综合跨会话或跨轮次的多个事实线索。
-3. **Temporal (时间感知)**: 96 题 (4.8%)，结合轮次时间戳的时间因果与先后推理。
-4. **Open-Domain (开放域查询)**: 841 题 (42.3%)，结合常识背景的对话事实回答。
-5. **Adversarial (对抗样本)**: 446 题 (22.5%)，包含虚假前提的诱导性陷阱题，评估模型抗幻觉与置空拒答能力。
+官方 category ID 与报告名称严格按 upstream scorer 对齐：
+1. **Multi-Hop (多跳推理，Category 1)**: 282 题 (14.2%)。
+2. **Temporal (时间感知，Category 2)**: 321 题 (16.2%)。
+3. **Open-Domain (开放域查询，Category 3)**: 96 题 (4.8%)。
+4. **Single-Hop (单跳查询，Category 4)**: 841 题 (42.3%)。
+5. **Adversarial (对抗样本，Category 5)**: 446 题 (22.5%)。
 
-- **多级评测口径**：
-  - **Retrieval Tier**: 评估 Top-3（Hippo 主口径，与生产 `max_injected=3` 对齐）及 Top-10 召回率与 nDCG；
-  - **QA Tier**: 按照官方标准计算 SQuAD-style Token F1 与 Exact Match (EM)；
-  - **对抗样本专门判定**: 识别出虚假前提并拒答（如 "I don't know", "Not mentioned"）记 F1=1.0，掉入诱导陷阱或产生无依据幻觉记 F1=0.0。
+- **评测口径**：
+  - **Retrieval**：实际检索至少 Top-10，用于正确计算 Hit/Recall/Precision/nDCG@3/10 与 MRR；生产注入/reader context 仍只取 Top-3。
+  - **QA Categories 1-4**：复刻官方 `task_eval/evaluation.py` 的 Porter stemming、Category 1 逗号分隔 multi-answer、Category 3 分号截断等 F1 规则；EM 仅作为补充诊断。
+  - **Category 5**：单独报告 `Adversarial Accuracy`，不再与 Categories 1-4 的 QA F1 混成一个总分。
+  - 正式 QA 使用固定 reader prompt；model、temperature、token budget 与 prompt SHA256 全部写入 manifest。正式数据禁止 mock reader。
 
-- **快速 Smoke / CI 离线评测**（使用内置 `conv-26` 代表性切片 fixture）：
+- **快速 Smoke / CI 离线评测**（显式使用内置 fixture，不读取或替代官方缓存）：
   ```bash
-  uv run python -m benchmarks.runner --dataset locomo-fixture --tier all
+  uv run python -m benchmarks.runner \
+    --dataset locomo-fixture \
+    --tier all \
+    --qa-backend mock
   ```
 
-- **全量基准评测**（连接隔离的 Hippo 引擎）：
+- **全量 Retrieval**：
   ```bash
   uv run python -m benchmarks.runner \
     --dataset locomo \
     --adapter engine \
-    --tier all \
+    --tier retrieval \
+    --collection eval_locomo_full
+  ```
+
+- **全量 End-to-End QA**：官方 scorer 使用 NLTK `PorterStemmer`，通过 `--with nltk` 固定提供该评测依赖。
+  ```bash
+  uv run --with nltk python -m benchmarks.runner \
+    --dataset locomo \
+    --adapter engine \
+    --tier end-to-end \
+    --qa-backend gemini \
+    --reader-model gemini-3.5-flash-lite \
+    --qa-temperature 0 \
+    --reader-token-budget 256 \
     --collection eval_locomo_full
   ```
 
