@@ -160,9 +160,9 @@ Snap Research 发布的 **LoCoMo-10** 包含 10 组跨越数月的大规模多�
     --collection eval_locomo_full
   ```
 
-- **全量 End-to-End QA**：官方 scorer 使用 NLTK `PorterStemmer`，通过 `--with nltk` 固定提供该评测依赖。
+- **全量 End-to-End QA**：官方 scorer 使用 NLTK `PorterStemmer`，通过 `--with 'nltk==3.9.2'` 固定提供该评测依赖；实际 NLTK 版本也会写入 manifest。
   ```bash
-  uv run --with nltk python -m benchmarks.runner \
+  uv run --with 'nltk==3.9.2' python -m benchmarks.runner \
     --dataset locomo \
     --adapter engine \
     --tier end-to-end \
