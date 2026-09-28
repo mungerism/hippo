@@ -1,0 +1,102 @@
+[
+  {
+    "question_id": "lme_info_ext_01",
+    "question_type": "single-session-user",
+    "question": "What is the name of my pet dog?",
+    "answer": "Barnaby",
+    "question_date": "2024-03-20",
+    "haystack_session_ids": ["sess_01", "sess_02"],
+    "haystack_dates": ["2024-03-10", "2024-03-15"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I just adopted a 2-year-old golden retriever named Barnaby!", "has_answer": true},
+        {"role": "assistant", "content": "Congratulations on adopting Barnaby! Golden retrievers are wonderful dogs."}
+      ],
+      [
+        {"role": "user", "content": "Can you recommend good dry food for a high-energy dog?"},
+        {"role": "assistant", "content": "Look for high-protein kibble with real meat as the first ingredient."}
+      ]
+    ],
+    "answer_session_ids": ["sess_01"]
+  },
+  {
+    "question_id": "lme_multi_sess_02",
+    "question_type": "multi-session",
+    "question": "Which frameworks did I decide to use for my backend API and frontend dashboard?",
+    "answer": "FastAPI for the backend and Next.js for the frontend dashboard.",
+    "question_date": "2024-04-15",
+    "haystack_session_ids": ["sess_10", "sess_11"],
+    "haystack_dates": ["2024-04-01", "2024-04-08"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "For our REST service, we evaluated Flask and FastAPI, and settled firmly on FastAPI.", "has_answer": true},
+        {"role": "assistant", "content": "FastAPI provides excellent performance with automatic OpenAPI docs."}
+      ],
+      [
+        {"role": "user", "content": "On the client side, we decided to build the admin dashboard using Next.js with React 19.", "has_answer": true},
+        {"role": "assistant", "content": "Next.js will pair nicely with your FastAPI backend."}
+      ]
+    ],
+    "answer_session_ids": ["sess_10", "sess_11"]
+  },
+  {
+    "question_id": "lme_temporal_03",
+    "question_type": "temporal-reasoning",
+    "question": "Which database was I using before migrating to PostgreSQL in May 2024?",
+    "answer": "MongoDB",
+    "question_date": "2024-06-01",
+    "haystack_session_ids": ["sess_20", "sess_21"],
+    "haystack_dates": ["2024-01-15", "2024-05-20"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Our user profiles and session logs are currently stored in a replica set of MongoDB.", "has_answer": true},
+        {"role": "assistant", "content": "MongoDB is flexible for semi-structured document payloads."}
+      ],
+      [
+        {"role": "user", "content": "Today we successfully finished our migration away from MongoDB over to PostgreSQL 16.", "has_answer": true},
+        {"role": "assistant", "content": "Congratulations on completing the migration to PostgreSQL."}
+      ]
+    ],
+    "answer_session_ids": ["sess_20", "sess_21"]
+  },
+  {
+    "question_id": "lme_update_04",
+    "question_type": "knowledge-update",
+    "question": "What is my current office location?",
+    "answer": "San Francisco",
+    "question_date": "2024-06-20",
+    "haystack_session_ids": ["sess_30", "sess_31"],
+    "haystack_dates": ["2023-11-01", "2024-06-15"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I am working out of the New York Manhattan branch office."},
+        {"role": "assistant", "content": "The Manhattan office has great transit access."}
+      ],
+      [
+        {"role": "user", "content": "I have officially relocated! My current office location is now in San Francisco, California.", "has_answer": true},
+        {"role": "assistant", "content": "Welcome to San Francisco! Hope the relocation went smoothly."}
+      ]
+    ],
+    "answer_session_ids": ["sess_31"]
+  },
+  {
+    "question_id": "lme_info_ext_05_abs",
+    "question_type": "single-session-preference",
+    "question": "What is my favorite flavor of ice cream?",
+    "answer": "The information is not present in the conversation history.",
+    "question_date": "2024-04-01",
+    "haystack_session_ids": ["sess_40", "sess_41"],
+    "haystack_dates": ["2024-02-14", "2024-03-22"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "We had Italian food for dinner today, pasta and tiramisu."},
+        {"role": "assistant", "content": "Sounds delicious! Classic Italian desserts are wonderful."}
+      ],
+      [
+        {"role": "user", "content": "I am preparing a coffee tasting flight this weekend."},
+        {"role": "assistant", "content": "Single-origin coffees from Ethiopia and Colombia are great for tasting flights."}
+      ]
+    ],
+    "answer_session_ids": []
+  }
+]

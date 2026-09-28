@@ -68,7 +68,62 @@ uv run python -m benchmarks.runner --baseline benchmarks/reports/report_hippo_sm
 
 若当前变更发生指标退化（Recall 下降）或安全违规（Forbidden Leakage > 0），命令将自动生成 `diff_*.md` 并返回退出码 2。
 
-### 3. 连接隔离临时集合运行真实引擎 (Engine Adapter)
+### 3. 运行 LongMemEval-S 双 Profile 基准评测 (ICLR 2025)
+
+正式运行使用官方 **longmemeval-cleaned / LongMemEval-S**。数据源固定到 revision
+`98d7416c24c778c2fee6e6f3006e7a073259d48f`，并校验 SHA-256
+`d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`。
+首次使用 `--dataset longmemeval-s` 会下载约 277 MB 数据到
+`~/.hippo/benchmarks/data/`；hash 不匹配时拒绝运行。
+
+支持官方五类能力（Information Extraction、Multi-Session、Temporal Reasoning、Knowledge Update、Abstention）和两个 ingest profile。正式 benchmark 必须使用隔离的真实 Hippo engine：
+
+- **Direct-Facts Profile**：按 gold evidence session 写入提炼后的事实，评测 retrieval/gate，不把 gold answer 偷渡成 evidence。
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset longmemeval-s \
+    --adapter engine \
+    --profile direct-facts \
+    --tier retrieval
+  ```
+
+- **Mem0-Session Profile**：将完整 timestamped sessions 通过 `infer=True` 摄入，评测真实记忆提炼与检索。
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset longmemeval-s \
+    --adapter engine \
+    --profile mem0-session \
+    --tier retrieval
+  ```
+
+Retrieval 会至少取到 Top-10 用于正确计算 Recall/nDCG@5/10，但 Hippo 主口径和 End-to-End reader context 仍严格遵循 `max_injected=3`。
+
+- **真实 QA / 三级评测**：正式数据禁止使用 CI mock reader/judge。以下示例固定 reader、judge、temperature 与 token budget，并记录到 report manifest。
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset longmemeval-s \
+    --adapter engine \
+    --profile direct-facts \
+    --tier all \
+    --qa-backend gemini \
+    --reader-model gemini-3.5-flash-lite \
+    --judge-model gemini-3.5-flash-lite \
+    --qa-temperature 0 \
+    --reader-token-budget 256 \
+    --judge-token-budget 10
+  ```
+
+QA 运行会额外生成 `*_official.jsonl`（`question_id` + `hypothesis`），可直接交给 LongMemEval 官方 `src/evaluation/evaluate_qa.py` 做交叉验证。
+
+> `Ingest Loss`、`Retrieval→QA Gap`、`Reader Loss` 是跨阶段的诊断差值，量纲/交互不同，**不可相加**；`Total Loss` 单独定义为 `1 - End-to-End Accuracy`。单次只跑一个 ingest profile 时不会伪造另一个 profile 的 baseline。
+
+PR/CI 的零网络 smoke 使用与官方 schema 相同形状的 5 题 fixture：
+
+```bash
+uv run python -m benchmarks.runner --dataset longmemeval-fixture --tier all --qa-backend mock
+```
+
+### 4. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
 ```bash
 uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_01
@@ -78,7 +133,7 @@ uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_
 
 ## 📂 扩展与接入新数据集
 
-接入新的记忆评测集（如 LongMemEval、LoCoMo 或团队自有黄金集）只需构造符合 `BenchmarkDataset` 的 JSON 文件：
+接入新的记忆评测集（如 LoCoMo、BEAM 或团队自有黄金集）只需构造符合 `BenchmarkDataset` 的 JSON 文件：
 
 ### 1. 数据集 JSON Schema 规范
 
@@ -143,9 +198,15 @@ uv run python -m benchmarks.runner --dataset path/to/my_benchmark_v1.json
 
 ```text
 benchmarks/
-├── schemas.py      # CorpusItem, EvaluationQuery, Qrels, RunManifest, EvaluationTrace
-├── metrics.py      # Recall, Precision, Hit, MRR, nDCG, ForbiddenLeakage, EmptyAccuracy
-├── adapter.py      # BenchmarkAdapter, ReplayFixtureAdapter, HippoEngineAdapter
-├── runner.py       # BenchmarkRunner, JSON/Markdown 报告生成, Baseline 比对 diff
-└── README.md       # 本使用与扩展说明文档
+├── schemas.py          # CorpusItem, EvaluationQuery, Qrels, RunManifest, EvaluationTrace
+├── metrics.py          # Recall, Precision, Hit, MRR, nDCG, ForbiddenLeakage, EmptyAccuracy
+├── adapter.py          # BenchmarkAdapter, ReplayFixtureAdapter, HippoEngineAdapter
+├── runner.py           # BenchmarkRunner, JSON/Markdown 报告生成, Baseline 比对 diff
+├── gold/               # 自研 Hippo Gold v1 黄金集规范、校验器与构建器
+├── longmemeval/        # LongMemEval-S 评测适配器
+│   ├── loader.py       # 数据加载与 direct-facts / mem0-session schema 转换
+│   ├── ingest.py       # DirectFactsIngestStrategy 与 Mem0SessionIngestStrategy
+│   └── evaluator.py    # 三级 Tier 评测器 (Retrieval, Oracle, E2E) 与误差归因
+├── data/               # 评测轻量级 fixture 与数据集
+└── README.md           # 本使用与扩展说明文档
 ```
