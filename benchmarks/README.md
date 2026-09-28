@@ -123,7 +123,37 @@ PR/CI 的零网络 smoke 使用与官方 schema 相同形状的 5 题 fixture：
 uv run python -m benchmarks.runner --dataset longmemeval-fixture --tier all --qa-backend mock
 ```
 
-### 4. 连接隔离临时集合运行真实引擎 (Engine Adapter)
+### 4. 运行 LoCoMo-10 超长对话基准评测 (ACL 2024)
+
+Snap Research 发布的 **LoCoMo-10** 是评估长上下文对话记忆的经典学术基准，包含 10 组跨越数月的大规模多轮对话，共 1,986 道评测题。首次使用 `--dataset locomo` 会自动下载并校验官方数据到 `~/.hippo/benchmarks/data/locomo10.json`。
+
+LoCoMo-10 包含 5 大代表性任务类别，Hippo 评测套件支持自动化分桶报告：
+1. **Single-Hop (单跳查询)**: 282 题 (14.2%)，定位单一对话轮次中的事实。
+2. **Multi-Hop (多跳推理)**: 321 题 (16.2%)，综合跨会话或跨轮次的多个事实线索。
+3. **Temporal (时间感知)**: 96 题 (4.8%)，结合轮次时间戳的时间因果与先后推理。
+4. **Open-Domain (开放域查询)**: 841 题 (42.3%)，结合常识背景的对话事实回答。
+5. **Adversarial (对抗样本)**: 446 题 (22.5%)，包含虚假前提的诱导性陷阱题，评估模型抗幻觉与置空拒答能力。
+
+- **多级评测口径**：
+  - **Retrieval Tier**: 评估 Top-3（Hippo 主口径，与生产 `max_injected=3` 对齐）及 Top-10 召回率与 nDCG；
+  - **QA Tier**: 按照官方标准计算 SQuAD-style Token F1 与 Exact Match (EM)；
+  - **对抗样本专门判定**: 识别出虚假前提并拒答（如 "I don't know", "Not mentioned"）记 F1=1.0，掉入诱导陷阱或产生无依据幻觉记 F1=0.0。
+
+- **快速 Smoke / CI 离线评测**（使用内置 `conv-26` 代表性切片 fixture）：
+  ```bash
+  uv run python -m benchmarks.runner --dataset locomo-fixture --tier all
+  ```
+
+- **全量基准评测**（连接隔离的 Hippo 引擎）：
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset locomo \
+    --adapter engine \
+    --tier all \
+    --collection eval_locomo_full
+  ```
+
+### 5. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
 ```bash
 uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_01
@@ -207,6 +237,9 @@ benchmarks/
 │   ├── loader.py       # 数据加载与 direct-facts / mem0-session schema 转换
 │   ├── ingest.py       # DirectFactsIngestStrategy 与 Mem0SessionIngestStrategy
 │   └── evaluator.py    # 三级 Tier 评测器 (Retrieval, Oracle, E2E) 与误差归因
+├── locomo/             # LoCoMo-10 超长对话基准评测适配器
+│   ├── loader.py       # 数据加载、Turn/Session 解析与 BenchmarkDataset 转换
+│   └── evaluator.py    # SQuAD Token F1、Exact Match、对抗样本拒答判定与分类报告
 ├── data/               # 评测轻量级 fixture 与数据集
 └── README.md           # 本使用与扩展说明文档
 ```
