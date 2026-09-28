@@ -123,7 +123,57 @@ PR/CI 的零网络 smoke 使用与官方 schema 相同形状的 5 题 fixture：
 uv run python -m benchmarks.runner --dataset longmemeval-fixture --tier all --qa-backend mock
 ```
 
-### 4. 连接隔离临时集合运行真实引擎 (Engine Adapter)
+### 4. 运行 LoCoMo-10 超长对话基准评测 (ACL 2024)
+
+Snap Research 发布的 **LoCoMo-10** 包含 10 组跨越数月的大规模多轮对话，共 1,986 道评测题。Hippo 将官方数据固定到 commit
+`3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376`，并校验 `locomo10.json` 的 SHA-256
+`79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`。首次运行
+`--dataset locomo` 会下载到 `~/.hippo/benchmarks/data/locomo10.json`；缓存 hash 不匹配会从固定 revision 重新下载，绝不会退化为 CI fixture。
+
+官方 category ID 与报告名称严格按 upstream scorer 对齐：
+1. **Multi-Hop (多跳推理，Category 1)**: 282 题 (14.2%)。
+2. **Temporal (时间感知，Category 2)**: 321 题 (16.2%)。
+3. **Open-Domain (开放域查询，Category 3)**: 96 题 (4.8%)。
+4. **Single-Hop (单跳查询，Category 4)**: 841 题 (42.3%)。
+5. **Adversarial (对抗样本，Category 5)**: 446 题 (22.5%)。
+
+- **评测口径**：
+  - **Retrieval**：实际检索至少 Top-10，用于正确计算 Hit/Recall/Precision/nDCG@3/10 与 MRR；生产注入/reader context 仍只取 Top-3。
+  - **QA Categories 1-4**：复刻官方 `task_eval/evaluation.py` 的 Porter stemming、Category 1 逗号分隔 multi-answer、Category 3 分号截断等 F1 规则；EM 仅作为补充诊断。
+  - **Category 5**：单独报告 `Adversarial Accuracy`，不再与 Categories 1-4 的 QA F1 混成一个总分。
+  - 正式 QA 使用固定 reader prompt；model、temperature、token budget 与 prompt SHA256 全部写入 manifest。正式数据禁止 mock reader。
+
+- **快速 Smoke / CI 离线评测**（显式使用内置 fixture，不读取或替代官方缓存）：
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset locomo-fixture \
+    --tier all \
+    --qa-backend mock
+  ```
+
+- **全量 Retrieval**：
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset locomo \
+    --adapter engine \
+    --tier retrieval \
+    --collection eval_locomo_full
+  ```
+
+- **全量 End-to-End QA**：官方 scorer 使用 NLTK `PorterStemmer`，通过 `--with 'nltk==3.9.2'` 固定提供该评测依赖；实际 NLTK 版本也会写入 manifest。
+  ```bash
+  uv run --with 'nltk==3.9.2' python -m benchmarks.runner \
+    --dataset locomo \
+    --adapter engine \
+    --tier end-to-end \
+    --qa-backend gemini \
+    --reader-model gemini-3.5-flash-lite \
+    --qa-temperature 0 \
+    --reader-token-budget 256 \
+    --collection eval_locomo_full
+  ```
+
+### 5. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
 ```bash
 uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_01
@@ -207,6 +257,9 @@ benchmarks/
 │   ├── loader.py       # 数据加载与 direct-facts / mem0-session schema 转换
 │   ├── ingest.py       # DirectFactsIngestStrategy 与 Mem0SessionIngestStrategy
 │   └── evaluator.py    # 三级 Tier 评测器 (Retrieval, Oracle, E2E) 与误差归因
+├── locomo/             # LoCoMo-10 超长对话基准评测适配器
+│   ├── loader.py       # 数据加载、Turn/Session 解析与 BenchmarkDataset 转换
+│   └── evaluator.py    # SQuAD Token F1、Exact Match、对抗样本拒答判定与分类报告
 ├── data/               # 评测轻量级 fixture 与数据集
 └── README.md           # 本使用与扩展说明文档
 ```

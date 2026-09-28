@@ -29,6 +29,19 @@ from benchmarks.gold.specification import (
     SecurityGateThresholds,
     audit_security_gates,
 )
+from benchmarks.locomo import (
+    GeminiLoCoMoReader,
+    LoCoMoEvaluationResult,
+    LoCoMoEvaluator,
+    OFFICIAL_DATASET_REVISION as LOCOMO_OFFICIAL_DATASET_REVISION,
+    OFFICIAL_DATASET_SHA256 as LOCOMO_OFFICIAL_DATASET_SHA256,
+    OFFICIAL_DATA_URL as LOCOMO_OFFICIAL_DATA_URL,
+    RuleBasedMockLoCoMoReader,
+    convert_to_locomo_benchmark,
+    ensure_official_scorer_available,
+    load_locomo_fixture_samples,
+    load_locomo_samples,
+)
 from benchmarks.longmemeval import (
     BUILTIN_FIXTURE_PATH,
     OFFICIAL_DATASET_REVISION,
@@ -40,7 +53,6 @@ from benchmarks.longmemeval import (
     LossQuantification,
     RuleBasedJudge,
     RuleBasedMockReader,
-    TierEvaluationResult,
     convert_to_direct_facts_benchmark,
     convert_to_sessions_benchmark,
     export_official_hypotheses,
@@ -61,7 +73,6 @@ from benchmarks.schemas import (
     QueryEvaluationResult,
     RunManifest,
 )
-from hippo_memory.config import HippoConfig
 from hippo_memory.gate import SearchGateConfig
 
 logger = logging.getLogger(__name__)
@@ -427,7 +438,15 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
     ]
 
     is_strict_gold = "gold" in m.dataset_name.lower()
-    gate_thresh = None if is_strict_gold else SecurityGateThresholds(min_total_queries=0, min_hard_negative_ratio=0.0)
+    gate_thresh = (
+        None
+        if is_strict_gold
+        else SecurityGateThresholds(
+            min_total_queries=0,
+            min_hard_negative_ratio=0.0,
+            max_hard_negative_fpr=1.0,
+        )
+    )
     gate_audit = audit_security_gates(report, thresholds=gate_thresh)
     audit_icon = "✅ 全部通过 (PASSED)" if gate_audit["passed"] else "❌ 门禁违规 (FAILED)"
     lines.extend([
@@ -439,7 +458,11 @@ def generate_markdown_report(report: BenchmarkReport) -> str:
         f"| **Cross-User Leakage** (跨用户泄漏) | **{gate_audit['cross_user_leakage']}** | 0 | {'✅ 合规' if gate_audit['cross_user_leakage'] == 0 else '❌ 违规'} |",
         f"| **Cross-Project Leakage** (跨项目泄漏) | **{gate_audit['cross_project_leakage']}** | 0 | {'✅ 合规' if gate_audit['cross_project_leakage'] == 0 else '❌ 违规'} |",
         f"| **Superseded Leakage** (过期事实泄漏) | **{gate_audit['superseded_leakage']}** | 0 | {'✅ 合规' if gate_audit['superseded_leakage'] == 0 else '❌ 违规'} |",
-        f"| **Hard-Negative FPR** (硬负样本假阳率) | **{gate_audit['hard_negative_fpr']:.2%}** | <= 2.00% | {'✅ 合规' if gate_audit['hard_negative_fpr'] <= 0.02 else '❌ 违规'} |",
+        (
+            f"| **Hard-Negative FPR** (硬负样本假阳率) | **{gate_audit['hard_negative_fpr']:.2%}** | <= 2.00% | {'✅ 合规' if gate_audit['hard_negative_fpr'] <= 0.02 else '❌ 违规'} |"
+            if is_strict_gold
+            else f"| **Hard-Negative FPR** (硬负样本假阳率) | **{gate_audit['hard_negative_fpr']:.2%}** | N/A (外部基准) | ⚪ 参考指标 |"
+        ),
         "",
         "## 1. 核心召回与安全指标汇总 (Primary Metrics)",
         "",
@@ -689,7 +712,7 @@ def compare_reports(
 def generate_diff_markdown(diff_data: Dict[str, Any]) -> str:
     """Format comparison result into Markdown."""
     lines = [
-        f"# Hippo 评测 Baseline 对比报告",
+        "# Hippo 评测 Baseline 对比报告",
         "",
         f"- **数据集**: `{diff_data['dataset_name']}`",
         f"- **Baseline Git SHA**: `{diff_data['baseline_sha']}`",
@@ -730,6 +753,7 @@ def format_tier_markdown(
     tier_results: Mapping[str, Any],
     loss_quant: Optional[LossQuantification],
     retrieval_r3: float,
+    locomo_result: Optional[LoCoMoEvaluationResult] = None,
 ) -> str:
     """Format multi-tier evaluation results and loss attribution table as Markdown."""
     lines = [
@@ -755,11 +779,41 @@ def format_tier_markdown(
             f"| **Tier 3: End-to-End** | Accuracy | **{e2e_acc:.4f}** | 完整检索 + 问答生成 + 答案评判闭环 |"
         )
 
+    if locomo_result and locomo_result.qa_metrics:
+        avg_f1 = locomo_result.qa_metrics.get("avg_f1")
+        avg_em = locomo_result.qa_metrics.get("avg_em")
+        adversarial_accuracy = locomo_result.qa_metrics.get("adversarial_accuracy")
+        lines.extend([
+            "",
+            "### 4.2 LoCoMo 对话理解与 QA",
+            "",
+        ])
+        if avg_f1 is not None:
+            lines.append(f"- **Categories 1-4 官方口径 QA F1**: `{avg_f1:.4f}`")
+        if avg_em is not None:
+            lines.append(f"- **Categories 1-4 补充 Exact Match**: `{avg_em:.4f}`")
+        if adversarial_accuracy is not None:
+            lines.append(
+                f"- **Category 5 Adversarial Accuracy**: "
+                f"`{adversarial_accuracy:.4f}`（不混入 QA F1）"
+            )
+        lines.extend([
+            "",
+            "| 分类 (Category) | QA F1 | Adversarial Accuracy |",
+            "| :--- | :---: | :---: |",
+        ])
+        for cat, cat_m in sorted(locomo_result.category_metrics.items()):
+            f1_val = cat_m.get("qa_f1")
+            adv_val = cat_m.get("adversarial_accuracy")
+            f1_str = f"**{f1_val:.4f}**" if f1_val is not None else "-"
+            adv_str = f"**{adv_val:.4f}**" if adv_val is not None else "-"
+            lines.append(f"| `{cat}` | {f1_str} | {adv_str} |")
+
     if loss_quant:
         loss_quant.compute()
         lines.extend([
             "",
-            "### 4.2 分层误差诊断 (Loss Diagnostics)",
+            "### 4.3 分层误差诊断 (Loss Diagnostics)",
             "",
             "> 注意：这些字段来自不同阶段/指标尺度，是诊断性差值，**不能相加得到 Total Loss**。",
             "",
@@ -797,6 +851,7 @@ def save_report(
     base_name: Optional[str] = None,
     tier_results: Optional[Mapping[str, Any]] = None,
     loss_quant: Optional[LossQuantification] = None,
+    locomo_result: Optional[LoCoMoEvaluationResult] = None,
 ) -> Tuple[Path, Path]:
     """Save BenchmarkReport as JSON and Markdown files with identical numbers."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -812,15 +867,18 @@ def save_report(
         }
     if loss_quant:
         report_dict["loss_quantification"] = loss_quant.to_dict()
+    if locomo_result:
+        report_dict["locomo_evaluation"] = locomo_result.to_dict()
 
     json_path.write_text(json.dumps(report_dict, indent=2, ensure_ascii=False), encoding="utf-8")
 
     md_content = generate_markdown_report(report)
-    if tier_results or loss_quant:
+    if tier_results or loss_quant or locomo_result:
         md_content += format_tier_markdown(
             tier_results or {},
             loss_quant,
             report.aggregate_metrics.get("recall@3", 0.0),
+            locomo_result=locomo_result,
         )
     md_path.write_text(md_content, encoding="utf-8")
 
@@ -939,8 +997,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     is_longmemeval = False
+    is_locomo = False
     official_named_dataset = False
     longmemeval_items = None
+    locomo_samples = None
     benchmark_source: Dict[str, Any] = {}
 
     try:
@@ -948,7 +1008,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ds_raw = args.dataset.strip()
             ds_lower = ds_raw.lower()
 
-            if ds_lower in ("longmemeval", "longmemeval-s", "longmemeval_s"):
+            if ds_lower in ("locomo", "locomo10", "locomo-10"):
+                is_locomo = True
+                official_named_dataset = True
+                locomo_samples = load_locomo_samples()
+                benchmark_source = {
+                    "dataset_source": LOCOMO_OFFICIAL_DATA_URL,
+                    "dataset_revision": LOCOMO_OFFICIAL_DATASET_REVISION,
+                    "dataset_source_sha256": LOCOMO_OFFICIAL_DATASET_SHA256,
+                    "dataset_release": "locomo10",
+                }
+            elif ds_lower in ("locomo-fixture", "locomo_fixture", "locomo-smoke"):
+                is_locomo = True
+                locomo_samples = load_locomo_fixture_samples()
+                benchmark_source = {
+                    "dataset_source": "benchmarks/data/locomo10_fixture.json",
+                    "dataset_release": "ci-fixture",
+                }
+            elif ds_lower in ("longmemeval", "longmemeval-s", "longmemeval_s"):
                 is_longmemeval = True
                 official_named_dataset = True
                 longmemeval_items = load_longmemeval_items()
@@ -984,6 +1061,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     isinstance(parsed, list)
                     and parsed
                     and isinstance(parsed[0], Mapping)
+                    and "sample_id" in parsed[0]
+                    and "conversation" in parsed[0]
+                ):
+                    is_locomo = True
+                    locomo_samples = load_locomo_samples(dataset_path)
+                    benchmark_source = {
+                        "dataset_source": str(dataset_path.resolve()),
+                        "dataset_release": "local-locomo",
+                    }
+                elif (
+                    isinstance(parsed, list)
+                    and parsed
+                    and isinstance(parsed[0], Mapping)
                     and "question_id" in parsed[0]
                     and "haystack_sessions" in parsed[0]
                 ) or (
@@ -1011,6 +1101,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 dataset = convert_to_sessions_benchmark(longmemeval_items)
             else:
                 dataset = convert_to_direct_facts_benchmark(longmemeval_items)
+        elif is_locomo and locomo_samples is not None:
+            dataset = convert_to_locomo_benchmark(locomo_samples)
     except Exception as exc:
         print(
             f"Error loading benchmark dataset: {type(exc).__name__}: {exc}",
@@ -1019,18 +1111,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     if official_named_dataset and args.adapter != "engine":
+        dataset_label = "LoCoMo-10" if is_locomo else "LongMemEval-S"
+        fixture_name = "locomo-fixture" if is_locomo else "longmemeval-fixture"
         print(
-            "Error: the named official LongMemEval-S benchmark must use "
-            "--adapter engine. Use --dataset longmemeval-fixture for replay/CI smoke tests.",
+            f"Error: the named official {dataset_label} benchmark must use "
+            f"--adapter engine. Use --dataset {fixture_name} for replay/CI smoke tests.",
             file=sys.stderr,
         )
         return 1
 
     qa_requested = args.tier in ("oracle-reader", "end-to-end", "all")
-    if official_named_dataset and qa_requested and args.qa_backend == "mock":
+    if is_locomo and args.tier == "oracle-reader":
         print(
-            "Error: mock reader/judge are CI smoke helpers and cannot score the "
-            "official LongMemEval-S dataset. Select --qa-backend gemini and pin models.",
+            "Error: LoCoMo exposes retrieval and end-to-end QA tiers; "
+            "use --tier end-to-end or --tier all.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if official_named_dataset and qa_requested and args.qa_backend == "mock":
+        dataset_label = "LoCoMo-10" if is_locomo else "LongMemEval-S"
+        print(
+            f"Error: mock readers are CI smoke helpers and cannot score official "
+            f"{dataset_label}. Select --qa-backend gemini and pin the reader model.",
             file=sys.stderr,
         )
         return 1
@@ -1039,16 +1142,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         adapter: BenchmarkAdapter = ReplayFixtureAdapter()
     elif args.adapter == "engine":
         coll = args.collection or (
-            f"eval_longmemeval_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-            if is_longmemeval
-            else None
+            f"eval_locomo_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            if is_locomo
+            else (
+                f"eval_longmemeval_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                if is_longmemeval
+                else None
+            )
         )
         adapter = HippoEngineAdapter(collection_name=coll)
     else:
         raise ValueError(f"Unknown adapter {args.adapter}")
 
     evaluator: Optional[LongMemEvalEvaluator] = None
-    if qa_requested:
+    locomo_evaluator: Optional[LoCoMoEvaluator] = None
+
+    if qa_requested and is_locomo:
+        if official_named_dataset:
+            try:
+                ensure_official_scorer_available()
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+        if args.qa_backend == "gemini":
+            locomo_evaluator = LoCoMoEvaluator(
+                reader=GeminiLoCoMoReader(
+                    args.reader_model,
+                    temperature=args.qa_temperature,
+                    max_output_tokens=args.reader_token_budget,
+                ),
+                strict_official_scorer=official_named_dataset,
+            )
+        else:
+            locomo_evaluator = LoCoMoEvaluator(
+                reader=RuleBasedMockLoCoMoReader(),
+                strict_official_scorer=False,
+            )
+    elif qa_requested:
         if args.qa_backend == "gemini":
             evaluator = LongMemEvalEvaluator(
                 reader=GeminiReader(
@@ -1068,11 +1198,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 judge=RuleBasedJudge(),
             )
 
+    qa_manifest: Optional[Dict[str, Any]] = None
+    if locomo_evaluator is not None:
+        qa_manifest = locomo_evaluator.manifest_config()
+    elif evaluator is not None:
+        qa_manifest = evaluator.manifest_config()
+
     manifest_extra: Dict[str, Any] = {
         **benchmark_source,
         "tier": args.tier,
         "qa_backend": args.qa_backend if qa_requested else None,
-        "qa": evaluator.manifest_config() if evaluator is not None else None,
+        "qa": qa_manifest,
     }
 
     try:
@@ -1090,8 +1226,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         tier_results: Dict[str, Any] = {}
         loss_quant: Optional[LossQuantification] = None
+        locomo_result: Optional[LoCoMoEvaluationResult] = None
 
-        if qa_requested:
+        if is_locomo and qa_requested:
+            assert locomo_evaluator is not None
+            locomo_result = locomo_evaluator.evaluate(
+                adapter=adapter,
+                dataset=dataset,
+                limit=args.max_injected,
+                k_values=runner.k_values,
+                evaluate_qa=True,
+            )
+        elif qa_requested:
             assert evaluator is not None
             corpus_lookup = {item.id: item.text for item in dataset.corpus}
 
@@ -1137,6 +1283,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             base_name=report_base,
             tier_results=tier_results if tier_results else None,
             loss_quant=loss_quant,
+            locomo_result=locomo_result,
         )
 
         hypothesis_paths: List[Path] = []
@@ -1206,6 +1353,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print(f"  Total Loss:        {loss_quant.total_loss:.4f}")
             print("-" * 50)
 
+        if locomo_result and locomo_result.qa_metrics:
+            print("LoCoMo QA Evaluation:")
+            if "avg_f1" in locomo_result.qa_metrics:
+                print(
+                    "  Categories 1-4 QA F1: "
+                    f"{locomo_result.qa_metrics['avg_f1']:.4f}"
+                )
+            if "avg_em" in locomo_result.qa_metrics:
+                print(
+                    "  Categories 1-4 EM: "
+                    f"{locomo_result.qa_metrics['avg_em']:.4f}"
+                )
+            if "adversarial_accuracy" in locomo_result.qa_metrics:
+                print(
+                    "  Category 5 Adversarial Accuracy: "
+                    f"{locomo_result.qa_metrics['adversarial_accuracy']:.4f}"
+                )
+            print("-" * 50)
+
         is_strict_gold = "gold" in report.manifest.dataset_name.lower()
         gate_thresh = (
             None
@@ -1213,6 +1379,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else SecurityGateThresholds(
                 min_total_queries=0,
                 min_hard_negative_ratio=0.0,
+                max_hard_negative_fpr=1.0,
             )
         )
         gate_audit = audit_security_gates(report, thresholds=gate_thresh)
