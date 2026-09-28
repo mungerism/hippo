@@ -30,9 +30,16 @@ from benchmarks.gold.specification import (
     audit_security_gates,
 )
 from benchmarks.locomo import (
+    GeminiLoCoMoReader,
     LoCoMoEvaluationResult,
     LoCoMoEvaluator,
+    OFFICIAL_DATASET_REVISION as LOCOMO_OFFICIAL_DATASET_REVISION,
+    OFFICIAL_DATASET_SHA256 as LOCOMO_OFFICIAL_DATASET_SHA256,
+    OFFICIAL_DATA_URL as LOCOMO_OFFICIAL_DATA_URL,
+    RuleBasedMockLoCoMoReader,
     convert_to_locomo_benchmark,
+    ensure_official_scorer_available,
+    load_locomo_fixture_samples,
     load_locomo_samples,
 )
 from benchmarks.longmemeval import (
@@ -773,22 +780,34 @@ def format_tier_markdown(
         )
 
     if locomo_result and locomo_result.qa_metrics:
-        avg_f1 = locomo_result.qa_metrics.get("avg_f1", 0.0)
-        avg_em = locomo_result.qa_metrics.get("avg_em", 0.0)
+        avg_f1 = locomo_result.qa_metrics.get("avg_f1")
+        avg_em = locomo_result.qa_metrics.get("avg_em")
+        adversarial_accuracy = locomo_result.qa_metrics.get("adversarial_accuracy")
         lines.extend([
             "",
-            "### 4.2 LoCoMo 对话理解与 QA Token F1",
+            "### 4.2 LoCoMo 对话理解与 QA",
             "",
-            f"- **平均 QA Token F1**: `{avg_f1:.4f}`",
-            f"- **平均 Exact Match (EM)**: `{avg_em:.4f}`",
+        ])
+        if avg_f1 is not None:
+            lines.append(f"- **Categories 1-4 官方口径 QA F1**: `{avg_f1:.4f}`")
+        if avg_em is not None:
+            lines.append(f"- **Categories 1-4 补充 Exact Match**: `{avg_em:.4f}`")
+        if adversarial_accuracy is not None:
+            lines.append(
+                f"- **Category 5 Adversarial Accuracy**: "
+                f"`{adversarial_accuracy:.4f}`（不混入 QA F1）"
+            )
+        lines.extend([
             "",
-            "| 分类 (Category) | 题数 | QA Token F1 |",
+            "| 分类 (Category) | QA F1 | Adversarial Accuracy |",
             "| :--- | :---: | :---: |",
         ])
         for cat, cat_m in sorted(locomo_result.category_metrics.items()):
             f1_val = cat_m.get("qa_f1")
+            adv_val = cat_m.get("adversarial_accuracy")
             f1_str = f"**{f1_val:.4f}**" if f1_val is not None else "-"
-            lines.append(f"| `{cat}` | - | {f1_str} |")
+            adv_str = f"**{adv_val:.4f}**" if adv_val is not None else "-"
+            lines.append(f"| `{cat}` | {f1_str} | {adv_str} |")
 
     if loss_quant:
         loss_quant.compute()
@@ -994,12 +1013,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 official_named_dataset = True
                 locomo_samples = load_locomo_samples()
                 benchmark_source = {
-                    "dataset_source": "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json",
+                    "dataset_source": LOCOMO_OFFICIAL_DATA_URL,
+                    "dataset_revision": LOCOMO_OFFICIAL_DATASET_REVISION,
+                    "dataset_source_sha256": LOCOMO_OFFICIAL_DATASET_SHA256,
                     "dataset_release": "locomo10",
                 }
             elif ds_lower in ("locomo-fixture", "locomo_fixture", "locomo-smoke"):
                 is_locomo = True
-                locomo_samples = load_locomo_samples()
+                locomo_samples = load_locomo_fixture_samples()
                 benchmark_source = {
                     "dataset_source": "benchmarks/data/locomo10_fixture.json",
                     "dataset_release": "ci-fixture",
@@ -1090,18 +1111,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     if official_named_dataset and args.adapter != "engine":
+        dataset_label = "LoCoMo-10" if is_locomo else "LongMemEval-S"
+        fixture_name = "locomo-fixture" if is_locomo else "longmemeval-fixture"
         print(
-            "Error: the named official LongMemEval-S benchmark must use "
-            "--adapter engine. Use --dataset longmemeval-fixture for replay/CI smoke tests.",
+            f"Error: the named official {dataset_label} benchmark must use "
+            f"--adapter engine. Use --dataset {fixture_name} for replay/CI smoke tests.",
             file=sys.stderr,
         )
         return 1
 
     qa_requested = args.tier in ("oracle-reader", "end-to-end", "all")
-    if official_named_dataset and qa_requested and args.qa_backend == "mock":
+    if is_locomo and args.tier == "oracle-reader":
         print(
-            "Error: mock reader/judge are CI smoke helpers and cannot score the "
-            "official LongMemEval-S dataset. Select --qa-backend gemini and pin models.",
+            "Error: LoCoMo exposes retrieval and end-to-end QA tiers; "
+            "use --tier end-to-end or --tier all.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if official_named_dataset and qa_requested and args.qa_backend == "mock":
+        dataset_label = "LoCoMo-10" if is_locomo else "LongMemEval-S"
+        print(
+            f"Error: mock readers are CI smoke helpers and cannot score official "
+            f"{dataset_label}. Select --qa-backend gemini and pin the reader model.",
             file=sys.stderr,
         )
         return 1
@@ -1123,7 +1155,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError(f"Unknown adapter {args.adapter}")
 
     evaluator: Optional[LongMemEvalEvaluator] = None
-    if qa_requested and not is_locomo:
+    locomo_evaluator: Optional[LoCoMoEvaluator] = None
+
+    if qa_requested and is_locomo:
+        if official_named_dataset:
+            ensure_official_scorer_available()
+        if args.qa_backend == "gemini":
+            locomo_evaluator = LoCoMoEvaluator(
+                reader=GeminiLoCoMoReader(
+                    args.reader_model,
+                    temperature=args.qa_temperature,
+                    max_output_tokens=args.reader_token_budget,
+                ),
+                strict_official_scorer=official_named_dataset,
+            )
+        else:
+            locomo_evaluator = LoCoMoEvaluator(
+                reader=RuleBasedMockLoCoMoReader(),
+                strict_official_scorer=False,
+            )
+    elif qa_requested:
         if args.qa_backend == "gemini":
             evaluator = LongMemEvalEvaluator(
                 reader=GeminiReader(
@@ -1143,11 +1194,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 judge=RuleBasedJudge(),
             )
 
+    qa_manifest: Optional[Dict[str, Any]] = None
+    if locomo_evaluator is not None:
+        qa_manifest = locomo_evaluator.manifest_config()
+    elif evaluator is not None:
+        qa_manifest = evaluator.manifest_config()
+
     manifest_extra: Dict[str, Any] = {
         **benchmark_source,
         "tier": args.tier,
         "qa_backend": args.qa_backend if qa_requested else None,
-        "qa": evaluator.manifest_config() if evaluator is not None else None,
+        "qa": qa_manifest,
     }
 
     try:
@@ -1168,7 +1225,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         locomo_result: Optional[LoCoMoEvaluationResult] = None
 
         if is_locomo and qa_requested:
-            locomo_evaluator = LoCoMoEvaluator()
+            assert locomo_evaluator is not None
             locomo_result = locomo_evaluator.evaluate(
                 adapter=adapter,
                 dataset=dataset,
@@ -1294,8 +1351,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if locomo_result and locomo_result.qa_metrics:
             print("LoCoMo QA Evaluation:")
-            print(f"  Average QA Token F1: {locomo_result.qa_metrics.get('avg_f1', 0.0):.4f}")
-            print(f"  Average Exact Match: {locomo_result.qa_metrics.get('avg_em', 0.0):.4f}")
+            if "avg_f1" in locomo_result.qa_metrics:
+                print(
+                    "  Categories 1-4 QA F1: "
+                    f"{locomo_result.qa_metrics['avg_f1']:.4f}"
+                )
+            if "avg_em" in locomo_result.qa_metrics:
+                print(
+                    "  Categories 1-4 EM: "
+                    f"{locomo_result.qa_metrics['avg_em']:.4f}"
+                )
+            if "adversarial_accuracy" in locomo_result.qa_metrics:
+                print(
+                    "  Category 5 Adversarial Accuracy: "
+                    f"{locomo_result.qa_metrics['adversarial_accuracy']:.4f}"
+                )
             print("-" * 50)
 
         is_strict_gold = "gold" in report.manifest.dataset_name.lower()
