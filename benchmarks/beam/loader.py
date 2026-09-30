@@ -29,6 +29,7 @@ BUILTIN_BEAM_FIXTURE_PATH = (
 OFFICIAL_BEAM_DATASET_ID = "Mohammadta/BEAM"
 OFFICIAL_BEAM_DATASET_REVISION = "8b4ddc477010c07a852752fe2f27a2722755ff2b"
 OFFICIAL_BEAM_SPLIT = "100K"
+OFFICIAL_BEAM_SPLITS = ("100K", "500K", "1M")
 OFFICIAL_BEAM_PROTOCOL_REVISION = "4b61c5d31b9c668a12b4f5e78064248a02c82d2b"
 
 
@@ -226,7 +227,11 @@ def _rubric_text(question: Mapping[str, Any]) -> Optional[str]:
     return " | ".join(values) if values else None
 
 
-def _convert_official_rows(rows: Iterable[Mapping[str, Any]]) -> BeamDataset:
+def _convert_official_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    split: str = OFFICIAL_BEAM_SPLIT,
+) -> BeamDataset:
     memories: list[BeamMemory] = []
     queries: list[BeamQuery] = []
 
@@ -257,7 +262,7 @@ def _convert_official_rows(rows: Iterable[Mapping[str, Any]]) -> BeamDataset:
                     metadata={
                         "conversation_id": conversation_id,
                         "source_turn_id": raw_id,
-                        "official_split": OFFICIAL_BEAM_SPLIT,
+                        "official_split": split,
                     },
                 )
             )
@@ -303,7 +308,7 @@ def _convert_official_rows(rows: Iterable[Mapping[str, Any]]) -> BeamDataset:
                             "conversation_id": conversation_id,
                             "difficulty": question.get("difficulty"),
                             "source_chat_ids": [str(v) for v in source_ids],
-                            "official_split": OFFICIAL_BEAM_SPLIT,
+                            "official_split": split,
                         },
                     )
                 )
@@ -315,10 +320,13 @@ def _convert_official_rows(rows: Iterable[Mapping[str, Any]]) -> BeamDataset:
 
     return BeamDataset(
         benchmark="BEAM",
-        profile="100k",
-        version=f"hf:{OFFICIAL_BEAM_DATASET_ID}@{OFFICIAL_BEAM_DATASET_REVISION}",
+        profile=split.lower(),
+        version=(
+            f"hf:{OFFICIAL_BEAM_DATASET_ID}@{OFFICIAL_BEAM_DATASET_REVISION}"
+            f"#{split}"
+        ),
         description=(
-            "Pinned official BEAM 100K split normalized for Hippo retrieval/scale profiling. "
+            f"Pinned official BEAM {split} split normalized for Hippo retrieval/scale profiling. "
             "This is a retrieval proxy over BEAM source turns; the official BEAM answer/judge "
             "score remains a separate end-to-end metric."
         ),
@@ -329,8 +337,15 @@ def _convert_official_rows(rows: Iterable[Mapping[str, Any]]) -> BeamDataset:
 
 def load_official_beam_dataset(
     cache_dir: Optional[Path | str] = None,
+    *,
+    split: str = OFFICIAL_BEAM_SPLIT,
 ) -> BeamDataset:
-    """Load the pinned official BEAM 100K split from Hugging Face."""
+    """Load a pinned official BEAM scale split from Hugging Face."""
+    normalized_split = str(split).upper()
+    if normalized_split not in OFFICIAL_BEAM_SPLITS:
+        raise ValueError(
+            f"Unsupported BEAM split {split!r}; expected one of {OFFICIAL_BEAM_SPLITS}"
+        )
     try:
         from datasets import load_dataset as hf_load_dataset
     except ImportError as exc:
@@ -343,7 +358,7 @@ def load_official_beam_dataset(
     try:
         dataset = hf_load_dataset(
             OFFICIAL_BEAM_DATASET_ID,
-            split=OFFICIAL_BEAM_SPLIT,
+            split=normalized_split,
             revision=OFFICIAL_BEAM_DATASET_REVISION,
             cache_dir=str(Path(cache_dir or DEFAULT_CACHE_DIR).expanduser()),
         )
@@ -351,10 +366,10 @@ def load_official_beam_dataset(
         raise RuntimeError(
             "Failed to load pinned official BEAM dataset "
             f"{OFFICIAL_BEAM_DATASET_ID}@{OFFICIAL_BEAM_DATASET_REVISION} "
-            f"split={OFFICIAL_BEAM_SPLIT}: {exc}"
+            f"split={normalized_split}: {exc}"
         ) from exc
 
-    return _convert_official_rows(dataset)
+    return _convert_official_rows(dataset, split=normalized_split)
 
 
 def convert_to_beam_benchmark(
