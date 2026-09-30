@@ -1109,6 +1109,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--beam-compare-report",
+        action="append",
+        default=[],
+        help=(
+            "Path to a prior BEAM JSON report. Repeat at least twice with "
+            "different scale splits to generate a quality/latency/cost curve."
+        ),
+    )
+    parser.add_argument(
         "--max-benchmark-items",
         type=int,
         default=250000,
@@ -1128,6 +1137,105 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    if args.beam_compare_report:
+        if len(args.beam_compare_report) < 2:
+            print(
+                "Error: --beam-compare-report must be supplied at least twice.",
+                file=sys.stderr,
+            )
+            return 1
+        points: list[dict[str, Any]] = []
+        try:
+            for raw_path in args.beam_compare_report:
+                report_path = Path(raw_path)
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+                section = payload.get("beam_evaluation")
+                if not isinstance(section, Mapping):
+                    raise ValueError(
+                        f"{report_path} does not contain a beam_evaluation object"
+                    )
+                performance = section.get("performance")
+                metrics = section.get("retrieval_metrics")
+                if not isinstance(performance, Mapping) or not isinstance(metrics, Mapping):
+                    raise ValueError(
+                        f"{report_path} has an invalid beam_evaluation object"
+                    )
+                manifest = payload.get("manifest")
+                dataset_name = (
+                    str(manifest.get("dataset_name"))
+                    if isinstance(manifest, Mapping) and manifest.get("dataset_name")
+                    else report_path.stem
+                )
+                points.append(
+                    {
+                        "dataset_name": dataset_name,
+                        "total_memories": int(performance.get("total_memories", 0)),
+                        "estimated_corpus_tokens": int(
+                            performance.get("estimated_corpus_tokens", 0)
+                        ),
+                        "recall@3": float(metrics.get("recall@3", 0.0)),
+                        "recall@10": float(metrics.get("recall@10", 0.0)),
+                        "ndcg@10": float(metrics.get("ndcg@10", 0.0)),
+                        "p95_ms": float(
+                            performance.get("query_latency_p95_ms", 0.0)
+                        ),
+                        "estimated_cost_usd": float(
+                            performance.get("estimated_cost_usd", 0.0)
+                        ),
+                        "index_size_bytes": performance.get("index_size_bytes"),
+                    }
+                )
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            print(f"Error merging BEAM reports: {exc}", file=sys.stderr)
+            return 1
+
+        points.sort(key=lambda point: point["total_memories"])
+        if len({point["total_memories"] for point in points}) < 2:
+            print(
+                "Error: BEAM scale curve requires reports with at least two "
+                "different corpus sizes.",
+                file=sys.stderr,
+            )
+            return 1
+
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        base_name = args.report_name or "beam_scale_curve"
+        json_path = output_dir / f"{base_name}.json"
+        md_path = output_dir / f"{base_name}.md"
+        json_path.write_text(
+            json.dumps(
+                {"beam_scale_curve": {"points": points}},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        lines = [
+            "# BEAM Scale Curve",
+            "",
+            "| Dataset | Memories | Tokens | Recall@3 | Recall@10 | nDCG@10 | P95 ms | Est. Cost USD | Index Bytes |",
+            "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for point in points:
+            index_size = (
+                str(point["index_size_bytes"])
+                if point["index_size_bytes"] is not None
+                else "-"
+            )
+            lines.append(
+                f"| {point['dataset_name']} | {point['total_memories']} | "
+                f"{point['estimated_corpus_tokens']} | {point['recall@3']:.4f} | "
+                f"{point['recall@10']:.4f} | {point['ndcg@10']:.4f} | "
+                f"{point['p95_ms']:.2f} | {point['estimated_cost_usd']:.6f} | "
+                f"{index_size} |"
+            )
+        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print("BEAM scale comparison succeeded!")
+        print(f"JSON report: {json_path}")
+        print(f"Markdown summary: {md_path}")
+        return 0
 
     if args.lmeb_compare_report:
         if len(args.lmeb_compare_report) < 2:
