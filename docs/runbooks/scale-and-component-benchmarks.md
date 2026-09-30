@@ -1,139 +1,182 @@
-# 规模评测与 Embedding 选型对比运维手册 (BEAM-128K & LMEB)
+# 规模评测与 Embedding 选型对比运维手册（BEAM & LMEB）
 
-本手册指导在 Hippo 记忆系统演进过程中，如何通过 **BEAM-128K** 规模基准与 **LMEB** 对话记忆组件对比套件，进行生产级容量规划、吞吐压测与向量模型选型评估。
+本手册说明 Hippo 如何运行 **BEAM 多规模检索/容量评测**与 **LMEB Dialogue/MemBench 组件评测**。两者都属于外部 benchmark，不替代 Hippo Gold v1 的生产安全门禁。
 
----
+> [!IMPORTANT]
+> 上游 BEAM 数据集文档把最小档描述为约 128K tokens，但 Mem0 当前公开 benchmark runner 与 Hugging Face split 名称使用 `100K`。Hippo 的正式命令因此使用 `beam-100k`；历史 `beam-128k` 仅保留为兼容别名，并在 manifest 中标记。
 
-## 1. 核心定位与安全边界
+## 1. 安全与口径边界
 
-Hippo 评测体系采用分层度量模型：
+- **Hippo Gold v1**：生产安全主门禁，覆盖跨用户/跨项目隔离、superseded、hard negative 与 forbidden leakage。
+- **BEAM**：关注长历史规模增长下的检索质量、写入吞吐、P50/P95/P99、索引体积和成本。Hippo 当前接入的是 **retrieval/scale proxy**；BEAM 官方 answer + rubric judge 分数是另一层端到端指标，不能混为一谈。
+- **LMEB**：只衡量 embedding 表征与候选召回组件，报告 nDCG@10、Recall@10、MRR；不得把组件高分视为生产端到端质量。
 
-```mermaid
-flowchart TD
-    subgraph ComponentLevel ["组件层表征评估 (Component-Level)"]
-        LMEB["LMEB dialogue-memory<br/>(nDCG@10 / Recall@10 / MRR)"]
-    end
+所有 engine 评测使用 `eval_*` 独立 collection，并在运行结束后清理。
 
-    subgraph ScaleLevel ["规模与容量基准 (Scale & Capacity)"]
-        BEAM["BEAM-128K<br/>(吞吐 items/s / 延迟 P50/P95/P99 / 索引体积 / 成本)"]
-    end
+## 2. 离线 Smoke
 
-    subgraph SafetyGate ["生产与安全硬门禁 (Production & Security Gates)"]
-        GOLD["Hippo Gold v1 基线<br/>(身份正交 / 状态失效防污染 / 零泄漏审核)"]
-    end
+普通 PR/CI 不下载公共数据，不调用付费模型：
 
-    LMEB -->|"仅衡量向量候选质量"| BEAM
-    BEAM -->|"通过规模验证"| GOLD
-    GOLD -->|"必须通过 0 泄漏与 0 退化门禁"| PROD["生产部署上线 (Production Release)"]
-```
-
-> [!CAUTION] 核心安全红线 (Component vs Production Gate)
-> **LMEB/BEAM 均为学术与组件级基准，其高分仅反映向量表征或基础召回能力，绝不等于生产端到端质量。**
-> 任何 Embedding 模型选型、维度裁剪（MRL）或索引调优，在采用前**必须在 `hippo_gold_v1` 上完整通过四大安全硬门禁（跨用户、跨项目、过期事实与 forbidden zero leakage）**。
-
----
-
-## 2. 离线快速验证 (Replay Smoke Test)
-
-在无公网连接或无需启动外部依赖的 CI 环境中，推荐使用内置 Smoke Fixture：
-
-### 2.1 BEAM 规模评测 Smoke
 ```bash
 uv run python -m benchmarks.runner --dataset beam-fixture --adapter replay
-```
-**预期输出**：
-- 输出写入吞吐（items/s）、延迟分位数（P50/P95/P99 ms）、Token 预估与成本测算；
-- 生成 `benchmarks/reports/report_beam-128k.json` 与 `.md`。
-
-### 2.2 LMEB 组件对比 Smoke
-```bash
 uv run python -m benchmarks.runner --dataset lmeb-fixture --adapter replay
 ```
-**预期输出**：
-- 输出 nDCG@10、Recall@10、MRR、Recall@3；
-- 输出显式免责声明并生成 `benchmarks/reports/report_lmeb-dialogue-memory.json` 与 `.md`。
 
----
+fixture 只能通过显式 `*-fixture` alias 使用。正式 alias 下载失败、revision 不匹配或 schema 变化时直接失败，**不会回退 fixture**。
 
-## 3. 生产级规模压测实操 (BEAM-128K)
+## 3. BEAM 正式规模评测
 
-### 3.1 前置检查
-确保本地 Qdrant 常驻服务健康且监听 `127.0.0.1:6333`：
+### 3.1 固定数据源
+
+Hippo 对齐 Mem0 `memory-benchmarks` 当前 BEAM 数据入口：
+
+- Hugging Face：`Mohammadta/BEAM`
+- 数据 revision：`8b4ddc477010c07a852752fe2f27a2722755ff2b`
+- Mem0 BEAM runner revision：`4b61c5d31b9c668a12b4f5e78064248a02c82d2b`
+- 支持首版规模：`100K`、`500K`、`1M`；10M 仍保持手工/后续扩展
+
+正式数据依赖 Hugging Face `datasets`，不加入 Hippo 生产依赖：
+
 ```bash
-hippo doctor
-curl -s http://127.0.0.1:6333/healthz
-```
-
-### 3.2 运行全量 BEAM-128K 评测
-```bash
-uv run python -m benchmarks.runner \
-  --dataset beam-128k \
+uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+  --dataset beam-100k \
   --adapter engine \
-  --output-dir benchmarks/reports/scale
+  --output-dir benchmarks/reports/scale \
+  --report-name beam100k
 ```
-> [!NOTE] 物理隔离原则
-> 命令行若未显式指定 `--collection`，系统会自动创建 `eval_beam_{timestamp}_{uuid}` 临时集合，测试完成后自动销毁，绝不干扰用户生产记忆库。
 
-### 3.3 核心性能指标参考与排障
+`Recall@10` / `nDCG@10` 的检索深度至少为 Top-10；`max_injected=3` 仍只代表 Hippo Agent 的生产注入预算，不再截断 benchmark 的 @10 指标。
 
-| 指标 (Metric) | 达标基准 (Target) | 告警排查动作 |
-| :--- | :---: | :--- |
-| **写入吞吐 (Throughput)** | `> 50 items/s` | 检查 Qdrant 批量批次大小、本地磁盘 IOPS、Python 进程 CPU 负载 |
-| **查询延迟 P50** | `< 15.0 ms` | 确认 Qdrant 内存索引常驻，无频繁磁盘换页 |
-| **查询延迟 P95** | `< 50.0 ms` | 检查混合检索 BM25 词表分词耗时与并发锁竞争 |
-| **查询延迟 P99** | `< 100.0 ms` | 排查操作系统 GC 停顿或 Surge 代理流量劫持本地回环导致的额外时延 |
-| **索引内存占用** | `< 250 MB / 10K items` | 考虑引入标量量化 (Scalar Quantization) 或 MRL 降维 |
+### 3.2 资源与成本 fail-closed
 
----
+BEAM/LMEB 在真正 ingest 前先执行预算预检。默认：
 
-## 4. Embedding 模型选型与对比流程 (LMEB)
+- `--max-benchmark-items 250000`
+- `--max-estimated-embedding-cost-usd 5.0`
+- `--embedding-cost-per-million-tokens 0.02`
 
-当考虑引入更轻量、更高维或开源自部署的向量模型（如 BAAI/bge-m3、KaLM-embedding 或 OpenAI text-embedding-3）时，请遵循以下流程：
+超过任一上限直接以非零退出码停止，不会部分执行后把结果当成完整 benchmark。运行 500K/1M 时必须显式提高资源上限，例如：
 
-### 4.1 候选模型 LMEB 并列度量
-针对多个待评估 Profile 分别生成测试报告：
 ```bash
-# 评估候选 Profile A
+uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+  --dataset beam-500k \
+  --adapter engine \
+  --max-benchmark-items 1000000 \
+  --max-estimated-embedding-cost-usd 10 \
+  --output-dir benchmarks/reports/scale \
+  --report-name beam500k
+```
+
+预算参数与运行前估算值都会进入 manifest。
+
+### 3.3 生成质量—规模曲线
+
+至少运行两个不同规模后，合并报告：
+
+```bash
 uv run python -m benchmarks.runner \
+  --beam-compare-report benchmarks/reports/scale/beam100k.json \
+  --beam-compare-report benchmarks/reports/scale/beam500k.json \
+  --output-dir benchmarks/reports/scale \
+  --report-name beam_scale_curve
+```
+
+输出按 corpus size 排序的 JSON/Markdown 曲线表，包含：
+
+- Recall@3 / Recall@10 / nDCG@10
+- P95 query latency
+- estimated embedding cost
+- index size
+- corpus memories / estimated tokens
+
+如果两个报告的 corpus size 相同，合并命令 fail-closed。
+
+## 4. LMEB Embedding Profile 对比
+
+### 4.1 固定数据源
+
+首版选用 LMEB 的 **Dialogue / MemBench / single_hop** retrieval 子集：
+
+- Hugging Face：`KaLM-Embedding/LMEB`
+- 数据 revision：`9671811`
+- corpus config：`MemBench_corpus`
+- query config：`MemBench_queries`
+- qrels：`Dialogue/MemBench/single_hop/qrels.tsv`
+
+正式运行：
+
+```bash
+uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
   --dataset lmeb-dialogue \
   --adapter engine \
-  --profile direct-facts \
-  --report-name lmeb_profile_bge
-
-# 评估候选 Profile B
-uv run python -m benchmarks.runner \
-  --dataset lmeb-dialogue \
-  --adapter engine \
-  --profile mem0-session \
-  --report-name lmeb_profile_openai
+  --lmeb-profile-name vertex-gemini-768 \
+  --output-dir benchmarks/reports/lmeb \
+  --report-name lmeb_vertex_gemini_768
 ```
 
-### 4.2 决策矩阵三要素
-1. **nDCG@10 (权重 40%)**：衡量排序前位的质量。高 nDCG 能有效降低下游 LLM 注入的上下文噪音；
-2. **Recall@10 (权重 30%)**：衡量召回上限覆盖度；
-3. **向量维度与开销 (权重 30%)**：若 512 维与 1536 维的 nDCG 差距小于 `0.015`，优先选用 512 维以节约 60% 存储与延迟。
+> [!CAUTION]
+> `--profile direct-facts|mem0-session` 是 **ingestion profile**，不是 embedding profile。Embedding provider/model/dimensions 由 Hippo 配置/环境决定，并写入报告。不要用 `--profile` 模拟 BGE/OpenAI/Vertex 等模型差异。
 
-### 4.3 终审：Hippo Gold v1 安全门禁复验
-在决定替换默认生产 Embedding 之前，**必须**运行：
+### 4.2 并列比较两个或更多 embedding profile
+
+不同 provider 往往需要不同凭据与进程环境，因此先分别运行，再合并结果。示意：
+
+```bash
+# Profile A：按当前 Vertex 配置运行
+HIPPO_PROVIDER=vertexai \
+uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+  --dataset lmeb-dialogue --adapter engine \
+  --lmeb-profile-name vertex-gemini-768 \
+  --output-dir benchmarks/reports/lmeb \
+  --report-name lmeb_vertex
+
+# Profile B：按当前 OpenAI 配置运行
+HIPPO_PROVIDER=openai \
+uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+  --dataset lmeb-dialogue --adapter engine \
+  --lmeb-profile-name openai-small-1536 \
+  --output-dir benchmarks/reports/lmeb \
+  --report-name lmeb_openai
+```
+
+生成真正的并列报告：
+
+```bash
+uv run python -m benchmarks.runner \
+  --lmeb-compare-report benchmarks/reports/lmeb/lmeb_vertex.json \
+  --lmeb-compare-report benchmarks/reports/lmeb/lmeb_openai.json \
+  --output-dir benchmarks/reports/lmeb \
+  --report-name lmeb_profile_comparison
+```
+
+合并器要求至少两个**不同 profile**且 dataset 一致；否则拒绝生成比较报告。
+
+## 5. GitHub Actions
+
+- PR CI：只跑 `beam-fixture` / `lmeb-fixture`，零网络、零付费。
+- Release：默认执行 pinned BEAM 100K scale/retrieval gate。
+- Manual release workflow：可关闭/开启 BEAM，并通过 `run_lmeb` + `lmeb_profile_name` 运行当前配置的 LMEB profile。不同 embedding profile 可分多次手工运行，再用上面的 merge 命令并列比较。
+- 所有 JSON/Markdown 报告作为 workflow artifact 保留。
+
+## 6. 生产选型终审
+
+Embedding 变更完成 LMEB 对比后，仍必须重新运行 Hippo Gold v1：
+
 ```bash
 uv run python -m benchmarks.runner \
   --dataset benchmarks/data/hippo_gold_v1.json \
   --adapter engine \
-  --baseline benchmarks/gold/approved_baselines/engine_default.json
+  --baseline benchmarks/baselines/hippo_gold_v1_baseline.json
 ```
-**严格判定**：
-- `Security Hard Gates` 必须 `PASSED ✅`；
-- Forbidden Leakage 必须为 0；
-- Recall@3 回归退化题数必须为 0。
 
----
+必须满足安全硬门禁和 baseline regression gate 后，才能考虑更新生产配置。
 
-## 5. 常见问题与异常排查
+## 7. 常见错误
 
-### Q1: 运行 `--dataset beam` 报错 `the named official BEAM-128K benchmark must use --adapter engine`
-- **原因**：官方基准测试禁止使用离线 mock/replay 充当正式结果。
-- **解法**：在 CI 或单元测试中使用 `--dataset beam-fixture --adapter replay`；在实际环境中使用 `--adapter engine`。
+**正式 BEAM/LMEB 使用 replay**：正式 alias 强制 `--adapter engine`；CI 请显式使用 `beam-fixture` / `lmeb-fixture`。
 
-### Q2: 误传 `--tier oracle-reader` 报错误
-- **原因**：BEAM/LMEB 仅评估检索层与规模，不包含问答 Reader/Judge 层。
-- **解法**：去掉 `--tier` 参数（默认 `retrieval`）。
+**缺少 Hugging Face 依赖**：正式公共集不会隐式安装依赖，也不会退化到 fixture；使用 `uv run --with datasets --with huggingface_hub ...`。
+
+**预算超限**：提高预算前先确认预估成本与机器资源；不要为了“让 benchmark 跑完”无条件放宽上限。
+
+**把 LMEB 高分当生产质量**：LMEB 是 component benchmark，生产上线仍由 Hippo Gold v1 的 scope/lifecycle/zero-leakage 门禁决定。
