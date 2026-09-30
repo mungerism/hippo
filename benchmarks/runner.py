@@ -1375,6 +1375,54 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 1
 
+    if is_beam or is_lmeb:
+        if args.max_benchmark_items <= 0:
+            print("Error: --max-benchmark-items must be positive.", file=sys.stderr)
+            return 1
+        if args.max_estimated_embedding_cost_usd < 0:
+            print(
+                "Error: --max-estimated-embedding-cost-usd cannot be negative.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.embedding_cost_per_million_tokens < 0:
+            print(
+                "Error: --embedding-cost-per-million-tokens cannot be negative.",
+                file=sys.stderr,
+            )
+            return 1
+
+        corpus_items = len(dataset.corpus)
+        estimated_tokens = sum(
+            estimate_tokens_from_text(item.text) for item in dataset.corpus
+        )
+        estimated_embedding_cost = (
+            estimated_tokens / 1_000_000.0
+        ) * args.embedding_cost_per_million_tokens
+        benchmark_source["resource_budget"] = {
+            "max_corpus_items": args.max_benchmark_items,
+            "max_estimated_embedding_cost_usd": args.max_estimated_embedding_cost_usd,
+            "embedding_cost_per_million_tokens": args.embedding_cost_per_million_tokens,
+            "estimated_corpus_tokens": estimated_tokens,
+            "estimated_embedding_cost_usd": round(estimated_embedding_cost, 6),
+        }
+
+        if corpus_items > args.max_benchmark_items:
+            print(
+                "Error: benchmark corpus exceeds configured resource budget: "
+                f"{corpus_items} items > {args.max_benchmark_items}.",
+                file=sys.stderr,
+            )
+            return 2
+        if estimated_embedding_cost > args.max_estimated_embedding_cost_usd:
+            print(
+                "Error: estimated embedding cost exceeds configured budget: "
+                f"${estimated_embedding_cost:.4f} > "
+                f"${args.max_estimated_embedding_cost_usd:.4f}.",
+                file=sys.stderr,
+            )
+            return 2
+
     if official_named_dataset and args.adapter != "engine":
         if is_locomo:
             dataset_label = "LoCoMo-10"
