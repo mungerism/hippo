@@ -173,7 +173,69 @@ Snap Research 发布的 **LoCoMo-10** 包含 10 组跨越数月的大规模多�
     --collection eval_locomo_full
   ```
 
-### 5. 连接隔离临时集合运行真实引擎 (Engine Adapter)
+### 5. 运行 BEAM 多规模检索与容量评测
+
+上游 BEAM 数据集将最小档描述为约 128K tokens，但 Mem0 当前公开 runner/Hugging Face split 名称使用 `100K`。Hippo 正式命令使用 `beam-100k`，历史 `beam-128k` 仅作为兼容 alias。
+
+- **快速 Smoke / CI 离线评测**：
+  ```bash
+  uv run python -m benchmarks.runner --dataset beam-fixture --adapter replay
+  ```
+
+- **Pinned 100K 正式评测**：
+  ```bash
+  uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+    --dataset beam-100k \
+    --adapter engine \
+    --collection eval_beam_100k \
+    --output-dir benchmarks/reports/scale \
+    --report-name beam100k
+  ```
+
+正式入口固定到 `Mohammadta/BEAM` revision
+`8b4ddc477010c07a852752fe2f27a2722755ff2b`，支持 `100K`、`500K`、`1M`。
+正式下载/解析失败时直接报错，绝不回退 CI fixture。BEAM 的 @10 指标至少检索 Top-10，与生产 `max_injected=3` 注入预算分离。
+
+BEAM/LMEB 默认启用 corpus item 数量和 estimated embedding cost 上限；超限在 ingest 前 fail-closed。不同规模报告可生成质量—规模曲线：
+
+```bash
+uv run python -m benchmarks.runner \
+  --beam-compare-report benchmarks/reports/scale/beam100k.json \
+  --beam-compare-report benchmarks/reports/scale/beam500k.json \
+  --report-name beam_scale_curve
+```
+
+### 6. 运行 LMEB 对话记忆组件对比评测
+
+首版固定使用 `KaLM-Embedding/LMEB` revision `9671811` 的
+`Dialogue/MemBench/single_hop` retrieval 子集，报告 `nDCG@10`、`Recall@10`、`MRR`。
+
+> ⚠️ **免责声明**：LMEB 仅评估向量表征与候选召回组件质量，不等于生产端到端安全。选型变更必须重新通过 `hippo_gold_v1` 安全硬门禁。
+
+- **快速 Smoke / CI 离线评测**：
+  ```bash
+  uv run python -m benchmarks.runner --dataset lmeb-fixture --adapter replay
+  ```
+
+- **正式运行一个 embedding profile**：
+  ```bash
+  uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+    --dataset lmeb-dialogue \
+    --adapter engine \
+    --lmeb-profile-name vertex-gemini-768 \
+    --report-name lmeb_vertex
+  ```
+
+`--profile direct-facts|mem0-session` 是 ingestion profile，**不是 embedding profile**。不同 provider/model/dimensions 应在各自配置环境独立运行，再生成并列比较：
+
+```bash
+uv run python -m benchmarks.runner \
+  --lmeb-compare-report benchmarks/reports/lmeb_vertex.json \
+  --lmeb-compare-report benchmarks/reports/lmeb_openai.json \
+  --report-name lmeb_profile_comparison
+```
+
+### 7. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
 ```bash
 uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_01
@@ -253,13 +315,19 @@ benchmarks/
 ├── adapter.py          # BenchmarkAdapter, ReplayFixtureAdapter, HippoEngineAdapter
 ├── runner.py           # BenchmarkRunner, JSON/Markdown 报告生成, Baseline 比对 diff
 ├── gold/               # 自研 Hippo Gold v1 黄金集规范、校验器与构建器
-├── longmemeval/        # LongMemEval-S 评测适配器
+├── longmemeval/        # LongMemEval-S 评测适配器 (ICLR 2025)
 │   ├── loader.py       # 数据加载与 direct-facts / mem0-session schema 转换
 │   ├── ingest.py       # DirectFactsIngestStrategy 与 Mem0SessionIngestStrategy
 │   └── evaluator.py    # 三级 Tier 评测器 (Retrieval, Oracle, E2E) 与误差归因
-├── locomo/             # LoCoMo-10 超长对话基准评测适配器
+├── locomo/             # LoCoMo-10 超长对话基准评测适配器 (ACL 2024)
 │   ├── loader.py       # 数据加载、Turn/Session 解析与 BenchmarkDataset 转换
 │   └── evaluator.py    # SQuAD Token F1、Exact Match、对抗样本拒答判定与分类报告
+├── beam/               # BEAM 多规模检索/容量评测适配器 (100K/500K/1M)
+│   ├── loader.py       # pinned Hugging Face 数据加载、fixture 与格式转换
+│   └── evaluator.py    # 延迟分位数 (P50/P95/P99)、写入吞吐率、索引体积与成本测算
+├── lmeb/               # LMEB 对话记忆组件对比评测适配器 (KaLM)
+│   ├── loader.py       # 对话记忆子集加载与格式转换
+│   └── evaluator.py    # nDCG@10、Recall@10、MRR 多 Profile 对比矩阵与免责声明
 ├── data/               # 评测轻量级 fixture 与数据集
 └── README.md           # 本使用与扩展说明文档
 ```

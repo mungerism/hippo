@@ -1,0 +1,107 @@
+{
+  "benchmark": "BEAM",
+  "profile": "128k",
+  "version": "1.0.0",
+  "description": "BEAM-128K smoke fixture containing representative long-horizon conversational context and multi-category evaluation queries.",
+  "memories": [
+    {
+      "id": "beam_mem_001",
+      "text": "User prefers concise code reviews with actionable diff snippets.",
+      "timestamp": "2024-01-10T08:00:00Z",
+      "category": "preference",
+      "metadata": { "speaker": "user", "session": "sess_1" }
+    },
+    {
+      "id": "beam_mem_002",
+      "text": "Project hippo utilizes local single-binary Qdrant vector database listening on port 6333.",
+      "timestamp": "2024-01-12T10:30:00Z",
+      "category": "architecture",
+      "metadata": { "speaker": "agent", "session": "sess_2" }
+    },
+    {
+      "id": "beam_mem_003",
+      "text": "User configured Surge proxy outbound rules to direct domestic traffic via Direct policy.",
+      "timestamp": "2024-01-15T14:15:00Z",
+      "category": "networking",
+      "metadata": { "speaker": "user", "session": "sess_3" }
+    },
+    {
+      "id": "beam_mem_004",
+      "text": "Hippo Spool queue operates as an append-only write-ahead log located at ~/.hippo/spool.",
+      "timestamp": "2024-01-18T09:00:00Z",
+      "category": "architecture",
+      "metadata": { "speaker": "agent", "session": "sess_4" }
+    },
+    {
+      "id": "beam_mem_005",
+      "text": "User switched default Python tooling from Poetry to uv in February 2024.",
+      "timestamp": "2024-02-01T11:00:00Z",
+      "category": "tooling",
+      "metadata": { "speaker": "user", "session": "sess_5" }
+    },
+    {
+      "id": "beam_mem_006",
+      "text": "Hippo implements an untrusted context envelope to sanitize external memory injections.",
+      "timestamp": "2024-02-10T16:20:00Z",
+      "category": "security",
+      "metadata": { "speaker": "agent", "session": "sess_6" }
+    },
+    {
+      "id": "beam_mem_007",
+      "text": "Deprecated SQLite vector storage backend was decommissioned in favor of Qdrant.",
+      "timestamp": "2024-02-15T12:00:00Z",
+      "category": "architecture",
+      "status": "superseded",
+      "metadata": { "speaker": "agent", "session": "sess_7" }
+    },
+    {
+      "id": "beam_mem_008",
+      "text": "Documentation is built using VitePress with pnpm package manager in docs directory.",
+      "timestamp": "2024-02-20T17:45:00Z",
+      "category": "tooling",
+      "metadata": { "speaker": "user", "session": "sess_8" }
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "beam_q_001",
+      "query": "What vector database and port does Hippo use by default?",
+      "category": "single_hop",
+      "expected_empty": false,
+      "evidence_ids": ["beam_mem_002"],
+      "reference_answer": "Qdrant on port 6333"
+    },
+    {
+      "query_id": "beam_q_002",
+      "query": "Which Python tooling and package manager does Hippo recommend across docs and core?",
+      "category": "multi_hop",
+      "expected_empty": false,
+      "evidence_ids": ["beam_mem_005", "beam_mem_008"],
+      "reference_answer": "uv for Python core and pnpm for documentation"
+    },
+    {
+      "query_id": "beam_q_003",
+      "query": "Where is the Spool WAL directory located on disk?",
+      "category": "single_hop",
+      "expected_empty": false,
+      "evidence_ids": ["beam_mem_004"],
+      "reference_answer": "~/.hippo/spool"
+    },
+    {
+      "query_id": "beam_q_004",
+      "query": "What are user's preferences regarding code review styles?",
+      "category": "preference",
+      "expected_empty": false,
+      "evidence_ids": ["beam_mem_001"],
+      "reference_answer": "Concise code reviews with actionable diff snippets"
+    },
+    {
+      "query_id": "beam_q_005",
+      "query": "Does Hippo recommend using MongoDB as its distributed vector index?",
+      "category": "hard_negative",
+      "expected_empty": true,
+      "evidence_ids": [],
+      "reference_answer": "No information; Hippo uses Qdrant, not MongoDB"
+    }
+  ]
+}
