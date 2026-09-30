@@ -129,6 +129,59 @@ class TestLmebBenchmark(unittest.TestCase):
             self.assertIn("LMEB 对话记忆组件评测与 Profile 对比报告", md_text)
             self.assertIn("免责声明", md_text)
 
+
+    def test_lmeb_runner_merges_independent_profiles(self) -> None:
+        """Merge at least two independently produced embedding profile reports."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            reports = []
+            for name, model, dims, ndcg in (
+                ("Profile-A", "model-a", 768, 0.8),
+                ("Profile-B", "model-b", 1536, 0.82),
+            ):
+                report = LmebComparisonReport(
+                    dataset_name="lmeb-dialogue-memory",
+                    profiles=[
+                        LmebProfileMetrics(
+                            profile_name=name,
+                            provider="replay",
+                            model=model,
+                            dims=dims,
+                            ndcg_10=ndcg,
+                            recall_10=0.9,
+                            recall_3=0.75,
+                            mrr=0.8,
+                            hit_rate_10=0.95,
+                        )
+                    ],
+                )
+                path = root / f"{name}.json"
+                path.write_text(
+                    json.dumps(
+                        {"lmeb_evaluation": report.to_dict()},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                reports.append(path)
+
+            code = runner_main([
+                "--lmeb-compare-report", str(reports[0]),
+                "--lmeb-compare-report", str(reports[1]),
+                "--output-dir", str(root),
+                "--report-name", "comparison",
+            ])
+            self.assertEqual(code, 0)
+
+            merged = json.loads(
+                (root / "comparison.json").read_text(encoding="utf-8")
+            )["lmeb_evaluation"]
+            self.assertEqual(len(merged["profiles"]), 2)
+            self.assertEqual(
+                {profile["profile_name"] for profile in merged["profiles"]},
+                {"Profile-A", "Profile-B"},
+            )
+
     def test_lmeb_guards(self) -> None:
         """Verify guards against named official dataset with replay, and QA tier rejection."""
         # 1. Named official LMEB requires engine adapter
