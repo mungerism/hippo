@@ -48,6 +48,20 @@ class LmebProfileMetrics:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "LmebProfileMetrics":
+        return cls(
+            profile_name=str(data["profile_name"]),
+            provider=str(data.get("provider", "unknown")),
+            model=str(data.get("model", "unknown")),
+            dims=(int(data["dims"]) if data.get("dims") not in (None, "") else None),
+            ndcg_10=float(data.get("ndcg_10", 0.0)),
+            recall_10=float(data.get("recall_10", 0.0)),
+            recall_3=float(data.get("recall_3", 0.0)),
+            mrr=float(data.get("mrr", 0.0)),
+            hit_rate_10=float(data.get("hit_rate_10", 0.0)),
+        )
+
 
 @dataclass
 class LmebComparisonReport:
@@ -63,6 +77,18 @@ class LmebComparisonReport:
             "disclaimer": self.disclaimer,
             "profiles": [p.to_dict() for p in self.profiles],
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "LmebComparisonReport":
+        return cls(
+            dataset_name=str(data["dataset_name"]),
+            profiles=[
+                LmebProfileMetrics.from_dict(profile)
+                for profile in data.get("profiles", [])
+                if isinstance(profile, Mapping)
+            ],
+            disclaimer=str(data.get("disclaimer") or DISCLAIMER_TEXT),
+        )
 
     def to_markdown(self) -> str:
         """Render side-by-side comparison table in Markdown."""
@@ -173,3 +199,42 @@ class LmebEvaluator:
             dataset_name=dataset.name,
             profiles=profiles,
         )
+
+
+def merge_lmeb_reports(
+    reports: Sequence[LmebComparisonReport],
+) -> LmebComparisonReport:
+    """Merge independently executed LMEB profile reports into one comparison.
+
+    Embedding providers often require different credentials and environment
+    configuration, so profile runs are intentionally isolated. This merger is
+    the supported way to create a true side-by-side report without conflating
+    ingestion profiles with embedding profiles.
+    """
+    if len(reports) < 2:
+        raise ValueError("LMEB comparison requires at least two profile reports")
+
+    dataset_names = {report.dataset_name for report in reports}
+    if len(dataset_names) != 1:
+        raise ValueError(
+            "LMEB profile reports must use the same dataset: "
+            + ", ".join(sorted(dataset_names))
+        )
+
+    profiles_by_name: dict[str, LmebProfileMetrics] = {}
+    for report in reports:
+        for profile in report.profiles:
+            existing = profiles_by_name.get(profile.profile_name)
+            if existing is not None and existing != profile:
+                raise ValueError(
+                    f"Conflicting LMEB profile results for {profile.profile_name!r}"
+                )
+            profiles_by_name[profile.profile_name] = profile
+
+    if len(profiles_by_name) < 2:
+        raise ValueError("LMEB comparison requires at least two distinct profiles")
+
+    return LmebComparisonReport(
+        dataset_name=next(iter(dataset_names)),
+        profiles=list(profiles_by_name.values()),
+    )
