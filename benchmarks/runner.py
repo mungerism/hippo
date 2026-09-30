@@ -1232,6 +1232,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "beam-128k",
                 "beam_128k",
                 "beam-128",
+                "beam-500k",
+                "beam_500k",
+                "beam-1m",
+                "beam_1m",
             ):
                 is_beam = True
                 official_named_dataset = True
@@ -1242,13 +1246,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         file=sys.stderr,
                     )
                     return 1
+                if "500k" in ds_lower:
+                    beam_split = "500K"
+                elif "1m" in ds_lower:
+                    beam_split = "1M"
+                else:
+                    beam_split = OFFICIAL_BEAM_SPLIT
                 beam_dataset = load_official_beam_dataset(
-                    cache_dir=args.dataset_cache_dir
+                    cache_dir=args.dataset_cache_dir,
+                    split=beam_split,
                 )
                 benchmark_source = {
                     "dataset_source": f"hf://datasets/{OFFICIAL_BEAM_DATASET_ID}",
                     "dataset_revision": OFFICIAL_BEAM_DATASET_REVISION,
-                    "dataset_release": f"beam-{OFFICIAL_BEAM_SPLIT.lower()}",
+                    "dataset_release": f"beam-{beam_split.lower()}",
                     "upstream_protocol_revision": OFFICIAL_BEAM_PROTOCOL_REVISION,
                     "legacy_alias_used": "128" in ds_lower,
                 }
