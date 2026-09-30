@@ -5,6 +5,7 @@ from benchmarks.lmeb.evaluator import (
     LmebComparisonReport,
     LmebEvaluator,
     LmebProfileMetrics,
+    merge_lmeb_reports,
 )
 from benchmarks.lmeb.loader import (
     BUILTIN_LMEB_FIXTURE_PATH,
@@ -40,4 +41,5 @@ __all__ = [
     "convert_to_lmeb_benchmark",
     "load_lmeb_dataset",
     "load_official_lmeb_dataset",
+    "merge_lmeb_reports",
 ]
