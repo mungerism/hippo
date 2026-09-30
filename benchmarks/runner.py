@@ -1235,6 +1235,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ):
                 is_beam = True
                 official_named_dataset = True
+                if args.adapter != "engine":
+                    print(
+                        "Error: the named official BEAM benchmark must use --adapter engine. "
+                        "Use --dataset beam-fixture for replay/CI smoke tests.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 beam_dataset = load_official_beam_dataset(
                     cache_dir=args.dataset_cache_dir
                 )
@@ -1255,6 +1262,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elif ds_lower in ("lmeb", "lmeb-dialogue", "lmeb_dialogue", "lmeb-memory"):
                 is_lmeb = True
                 official_named_dataset = True
+                if args.adapter != "engine":
+                    print(
+                        "Error: the named official LMEB benchmark must use --adapter engine. "
+                        "Use --dataset lmeb-fixture for replay/CI smoke tests.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 lmeb_dataset = load_official_lmeb_dataset(
                     cache_dir=args.dataset_cache_dir
                 )
