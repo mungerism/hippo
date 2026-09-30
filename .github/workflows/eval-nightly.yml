@@ -112,7 +112,7 @@ jobs:
             --collection eval_nightly_gold_${{ github.run_id }} \
             --baseline benchmarks/baselines/hippo_gold_v1_baseline.json \
             --latency-state .cache/eval/hippo_gold_v1_latency.json \
-            --max-injected ${{ inputs.max_injected || '3' }} \
+            --max-injected 3 \
             --output-dir benchmarks/reports/nightly \
             --report-name hippo_gold_v1_nightly
 
