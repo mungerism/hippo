@@ -1225,34 +1225,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "dataset_source": str(BUILTIN_FIXTURE_PATH),
                     "dataset_release": "ci-fixture",
                 }
-            elif ds_lower in ("beam", "beam-128k", "beam_128k", "beam-128"):
+            elif ds_lower in (
+                "beam",
+                "beam-100k",
+                "beam_100k",
+                "beam-128k",
+                "beam_128k",
+                "beam-128",
+            ):
                 is_beam = True
                 official_named_dataset = True
-                beam_dataset = load_beam_dataset()
+                beam_dataset = load_official_beam_dataset(
+                    cache_dir=args.dataset_cache_dir
+                )
                 benchmark_source = {
-                    "dataset_source": "https://raw.githubusercontent.com/mem0ai/BEAM/main/data/beam_128k.json",
-                    "dataset_release": "beam-128k",
+                    "dataset_source": f"hf://datasets/{OFFICIAL_BEAM_DATASET_ID}",
+                    "dataset_revision": OFFICIAL_BEAM_DATASET_REVISION,
+                    "dataset_release": f"beam-{OFFICIAL_BEAM_SPLIT.lower()}",
+                    "upstream_protocol_revision": OFFICIAL_BEAM_PROTOCOL_REVISION,
+                    "legacy_alias_used": "128" in ds_lower,
                 }
             elif ds_lower in ("beam-fixture", "beam_fixture", "beam-smoke"):
                 is_beam = True
-                beam_dataset = load_beam_dataset()
+                beam_dataset = load_beam_dataset(BUILTIN_BEAM_FIXTURE_PATH)
                 benchmark_source = {
-                    "dataset_source": "benchmarks/data/beam_128k_fixture.json",
+                    "dataset_source": str(BUILTIN_BEAM_FIXTURE_PATH),
                     "dataset_release": "ci-fixture",
                 }
             elif ds_lower in ("lmeb", "lmeb-dialogue", "lmeb_dialogue", "lmeb-memory"):
                 is_lmeb = True
                 official_named_dataset = True
-                lmeb_dataset = load_lmeb_dataset()
+                lmeb_dataset = load_official_lmeb_dataset(
+                    cache_dir=args.dataset_cache_dir
+                )
                 benchmark_source = {
-                    "dataset_source": "https://raw.githubusercontent.com/KaLM-Embedding/LMEB/main/data/dialogue_memory.json",
-                    "dataset_release": "lmeb-dialogue",
+                    "dataset_source": f"hf://datasets/{OFFICIAL_LMEB_DATASET_ID}",
+                    "dataset_revision": OFFICIAL_LMEB_DATASET_REVISION,
+                    "dataset_release": (
+                        f"lmeb-dialogue-{OFFICIAL_LMEB_FAMILY.lower()}-"
+                        f"{OFFICIAL_LMEB_SPLIT}"
+                    ),
                 }
             elif ds_lower in ("lmeb-fixture", "lmeb_fixture", "lmeb-smoke"):
                 is_lmeb = True
-                lmeb_dataset = load_lmeb_dataset()
+                lmeb_dataset = load_lmeb_dataset(BUILTIN_LMEB_FIXTURE_PATH)
                 benchmark_source = {
-                    "dataset_source": "benchmarks/data/lmeb_dialogue_fixture.json",
+                    "dataset_source": str(BUILTIN_LMEB_FIXTURE_PATH),
                     "dataset_release": "ci-fixture",
                 }
             else:
