@@ -173,7 +173,42 @@ Snap Research 发布的 **LoCoMo-10** 包含 10 组跨越数月的大规模多�
     --collection eval_locomo_full
   ```
 
-### 5. 连接隔离临时集合运行真实引擎 (Engine Adapter)
+### 5. 运行 BEAM-128K 规模与延迟基准评测 (Mem0 官方)
+
+针对数万条记忆（128K tokens 上下文）下的系统容量与检索表现进行度量，包括写入吞吐率（items/s）、查询延迟分位数（P50/P95/P99 ms）、Qdrant 向量索引体积与成本估算。
+
+- **快速 Smoke / CI 离线评测**：
+  ```bash
+  uv run python -m benchmarks.runner --dataset beam-fixture --adapter replay
+  ```
+
+- **全量规模评测 (Qdrant Engine 隔离集合)**：
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset beam-128k \
+    --adapter engine \
+    --collection eval_beam_128k
+  ```
+
+### 6. 运行 LMEB 对话记忆组件对比评测 (KaLM-Embedding)
+
+用于对标 MTEB/KaLM 规范，度量不同 Embedding Profile 在长对话记忆中的候选召回与重排质量（`nDCG@10`、`Recall@10`、`MRR`）。
+
+> ⚠️ **免责声明**：LMEB 仅评估向量表征与候选召回组件质量，不等于生产端到端安全。选型变更必须在 `hippo_gold_v1` 上通过安全硬门禁。
+
+- **快速 Smoke / CI 离线评测**：
+  ```bash
+  uv run python -m benchmarks.runner --dataset lmeb-fixture --adapter replay
+  ```
+
+- **全量对话记忆组件对比**：
+  ```bash
+  uv run python -m benchmarks.runner \
+    --dataset lmeb-dialogue \
+    --adapter engine
+  ```
+
+### 7. 连接隔离临时集合运行真实引擎 (Engine Adapter)
 
 ```bash
 uv run python -m benchmarks.runner --adapter engine --collection eval_bench_run_01
@@ -253,13 +288,19 @@ benchmarks/
 ├── adapter.py          # BenchmarkAdapter, ReplayFixtureAdapter, HippoEngineAdapter
 ├── runner.py           # BenchmarkRunner, JSON/Markdown 报告生成, Baseline 比对 diff
 ├── gold/               # 自研 Hippo Gold v1 黄金集规范、校验器与构建器
-├── longmemeval/        # LongMemEval-S 评测适配器
+├── longmemeval/        # LongMemEval-S 评测适配器 (ICLR 2025)
 │   ├── loader.py       # 数据加载与 direct-facts / mem0-session schema 转换
 │   ├── ingest.py       # DirectFactsIngestStrategy 与 Mem0SessionIngestStrategy
 │   └── evaluator.py    # 三级 Tier 评测器 (Retrieval, Oracle, E2E) 与误差归因
-├── locomo/             # LoCoMo-10 超长对话基准评测适配器
+├── locomo/             # LoCoMo-10 超长对话基准评测适配器 (ACL 2024)
 │   ├── loader.py       # 数据加载、Turn/Session 解析与 BenchmarkDataset 转换
 │   └── evaluator.py    # SQuAD Token F1、Exact Match、对抗样本拒答判定与分类报告
+├── beam/               # BEAM-128K 规模基准评测适配器 (Mem0)
+│   ├── loader.py       # 规模数据加载、SHA256 校验与格式转换
+│   └── evaluator.py    # 延迟分位数 (P50/P95/P99)、写入吞吐率、索引体积与成本测算
+├── lmeb/               # LMEB 对话记忆组件对比评测适配器 (KaLM)
+│   ├── loader.py       # 对话记忆子集加载与格式转换
+│   └── evaluator.py    # nDCG@10、Recall@10、MRR 多 Profile 对比矩阵与免责声明
 ├── data/               # 评测轻量级 fixture 与数据集
 └── README.md           # 本使用与扩展说明文档
 ```

@@ -141,3 +141,9 @@ jobs:
       - name: Run LoCoMo-10 Smoke Fixture Replay Contract
         run: uv run python -m benchmarks.runner --dataset locomo-fixture --tier all
 
+      - name: Run BEAM-128K Smoke Fixture Replay Contract
+        run: uv run python -m benchmarks.runner --dataset beam-fixture --adapter replay
+
+      - name: Run LMEB Dialogue Memory Smoke Fixture Replay Contract
+        run: uv run python -m benchmarks.runner --dataset lmeb-fixture --adapter replay
+

@@ -1,0 +1,64 @@
+{
+  "benchmark": "LMEB",
+  "subset": "dialogue-memory",
+  "version": "1.0.0",
+  "description": "LMEB dialogue-memory smoke fixture for embedding model representation and recall evaluation.",
+  "corpus": [
+    {
+      "id": "lmeb_doc_001",
+      "text": "The team agreed that Python 3.12 is the primary runtime for Hippo memory core.",
+      "category": "technical_decision"
+    },
+    {
+      "id": "lmeb_doc_002",
+      "text": "Antigravity agents interact with Hippo memory via standard Model Context Protocol over stdio.",
+      "category": "interface_architecture"
+    },
+    {
+      "id": "lmeb_doc_003",
+      "text": "In case of memory corruption, Spool WAL provides crash-safe tombstone replay.",
+      "category": "reliability"
+    },
+    {
+      "id": "lmeb_doc_004",
+      "text": "User expressed preference for concise pull request descriptions with mermaid diagrams.",
+      "category": "preference"
+    },
+    {
+      "id": "lmeb_doc_005",
+      "text": "Surge HTTP proxy is used to capture external network traffic for debugging.",
+      "category": "tooling"
+    },
+    {
+      "id": "lmeb_doc_006",
+      "text": "The memory gate strictly filters low-confidence candidates with dense semantic score below 0.32.",
+      "category": "security_gate"
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "lmeb_q_001",
+      "query": "Which Python runtime version is used as primary target for Hippo core?",
+      "category": "technical_decision",
+      "relevant_ids": ["lmeb_doc_001"]
+    },
+    {
+      "query_id": "lmeb_q_002",
+      "query": "How do Antigravity AI agents communicate with Hippo long term memory?",
+      "category": "interface_architecture",
+      "relevant_ids": ["lmeb_doc_002"]
+    },
+    {
+      "query_id": "lmeb_q_003",
+      "query": "What threshold does the memory gate enforce for filtering dense candidates?",
+      "category": "security_gate",
+      "relevant_ids": ["lmeb_doc_006"]
+    },
+    {
+      "query_id": "lmeb_q_004",
+      "query": "What PR description style does the user prefer?",
+      "category": "preference",
+      "relevant_ids": ["lmeb_doc_004"]
+    }
+  ]
+}

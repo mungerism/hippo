@@ -102,6 +102,7 @@ export default withMermaid(
             { text: 'Doctor 巡检与环境排障', link: '/runbooks/troubleshooting' },
             { text: '记忆迁移与向量重建操作手册', link: '/runbooks/migration' },
             { text: '评测 Baseline 治理与回归排障', link: '/runbooks/eval-baseline-management' },
+            { text: '规模评测与 Embedding 选型对比', link: '/runbooks/scale-and-component-benchmarks' },
           ],
         },
       ],

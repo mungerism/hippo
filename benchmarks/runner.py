@@ -29,6 +29,18 @@ from benchmarks.gold.specification import (
     SecurityGateThresholds,
     audit_security_gates,
 )
+from benchmarks.beam import (
+    BeamEvaluationResult,
+    BeamEvaluator,
+    convert_to_beam_benchmark,
+    load_beam_dataset,
+)
+from benchmarks.lmeb import (
+    LmebComparisonReport,
+    LmebEvaluator,
+    convert_to_lmeb_benchmark,
+    load_lmeb_dataset,
+)
 from benchmarks.locomo import (
     GeminiLoCoMoReader,
     LoCoMoEvaluationResult,
@@ -241,6 +253,7 @@ class BenchmarkRunner:
         self.seed = seed
         self.ingest_profile = ingest_profile
         self.evaluation_depth = max([self.max_injected] + self.k_values)
+        self.last_ingest_duration_seconds: float = 0.0
 
     def run(
         self,
@@ -254,8 +267,10 @@ class BenchmarkRunner:
         timestamp = datetime.now(timezone.utc).isoformat()
 
         # Ingest corpus into isolated adapter using configured profile
+        t_ingest_start = time.perf_counter()
         strategy = resolve_ingest_strategy(self.ingest_profile)
         strategy.ingest(self.adapter, dataset.corpus)
+        self.last_ingest_duration_seconds = round(time.perf_counter() - t_ingest_start, 4)
 
         query_results: List[QueryEvaluationResult] = []
         latencies_ms: List[float] = []
@@ -353,6 +368,8 @@ class BenchmarkRunner:
             measured_index_size = self.adapter.get_index_size_bytes()
             if measured_index_size is not None:
                 agg_metrics["index_size_bytes"] = float(measured_index_size)
+
+        agg_metrics["ingest_duration_seconds"] = self.last_ingest_duration_seconds
 
         # Build manifest
         gate_cfg = getattr(self.adapter, "gate_config", SearchGateConfig())
@@ -891,6 +908,8 @@ def save_report(
     tier_results: Optional[Mapping[str, Any]] = None,
     loss_quant: Optional[LossQuantification] = None,
     locomo_result: Optional[LoCoMoEvaluationResult] = None,
+    beam_result: Optional[BeamEvaluationResult] = None,
+    lmeb_report: Optional[LmebComparisonReport] = None,
 ) -> Tuple[Path, Path]:
     """Save BenchmarkReport as JSON and Markdown files with identical numbers."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -908,6 +927,10 @@ def save_report(
         report_dict["loss_quantification"] = loss_quant.to_dict()
     if locomo_result:
         report_dict["locomo_evaluation"] = locomo_result.to_dict()
+    if beam_result:
+        report_dict["beam_evaluation"] = beam_result.to_dict()
+    if lmeb_report:
+        report_dict["lmeb_evaluation"] = lmeb_report.to_dict()
 
     json_path.write_text(json.dumps(report_dict, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -919,6 +942,11 @@ def save_report(
             report.aggregate_metrics.get("recall@3", 0.0),
             locomo_result=locomo_result,
         )
+    if beam_result:
+        md_content += "\n\n---\n\n" + beam_result.to_markdown()
+    if lmeb_report:
+        md_content += "\n\n---\n\n" + lmeb_report.to_markdown()
+
     md_path.write_text(md_content, encoding="utf-8")
 
     return json_path, md_path
@@ -1046,9 +1074,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     is_longmemeval = False
     is_locomo = False
+    is_beam = False
+    is_lmeb = False
     official_named_dataset = False
     longmemeval_items = None
     locomo_samples = None
+    beam_dataset = None
+    lmeb_dataset = None
     benchmark_source: Dict[str, Any] = {}
 
     try:
@@ -1094,6 +1126,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "dataset_source": str(BUILTIN_FIXTURE_PATH),
                     "dataset_release": "ci-fixture",
                 }
+            elif ds_lower in ("beam", "beam-128k", "beam_128k", "beam-128"):
+                is_beam = True
+                official_named_dataset = True
+                beam_dataset = load_beam_dataset()
+                benchmark_source = {
+                    "dataset_source": "https://raw.githubusercontent.com/mem0ai/BEAM/main/data/beam_128k.json",
+                    "dataset_release": "beam-128k",
+                }
+            elif ds_lower in ("beam-fixture", "beam_fixture", "beam-smoke"):
+                is_beam = True
+                beam_dataset = load_beam_dataset()
+                benchmark_source = {
+                    "dataset_source": "benchmarks/data/beam_128k_fixture.json",
+                    "dataset_release": "ci-fixture",
+                }
+            elif ds_lower in ("lmeb", "lmeb-dialogue", "lmeb_dialogue", "lmeb-memory"):
+                is_lmeb = True
+                official_named_dataset = True
+                lmeb_dataset = load_lmeb_dataset()
+                benchmark_source = {
+                    "dataset_source": "https://raw.githubusercontent.com/KaLM-Embedding/LMEB/main/data/dialogue_memory.json",
+                    "dataset_release": "lmeb-dialogue",
+                }
+            elif ds_lower in ("lmeb-fixture", "lmeb_fixture", "lmeb-smoke"):
+                is_lmeb = True
+                lmeb_dataset = load_lmeb_dataset()
+                benchmark_source = {
+                    "dataset_source": "benchmarks/data/lmeb_dialogue_fixture.json",
+                    "dataset_release": "ci-fixture",
+                }
             else:
                 dataset_path = Path(ds_raw)
                 if not dataset_path.is_file():
@@ -1134,6 +1196,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "dataset_source": str(dataset_path.resolve()),
                         "dataset_release": "local-longmemeval",
                     }
+                elif isinstance(parsed, Mapping) and (
+                    parsed.get("benchmark") == "BEAM"
+                    or ("profile" in parsed and "memories" in parsed)
+                ):
+                    is_beam = True
+                    beam_dataset = load_beam_dataset(dataset_path)
+                    benchmark_source = {
+                        "dataset_source": str(dataset_path.resolve()),
+                        "dataset_release": f"local-beam-{beam_dataset.profile}",
+                    }
+                elif isinstance(parsed, Mapping) and (
+                    parsed.get("benchmark") == "LMEB"
+                    or ("subset" in parsed and "corpus" in parsed)
+                ):
+                    is_lmeb = True
+                    lmeb_dataset = load_lmeb_dataset(dataset_path)
+                    benchmark_source = {
+                        "dataset_source": str(dataset_path.resolve()),
+                        "dataset_release": f"local-lmeb-{lmeb_dataset.subset}",
+                    }
                 else:
                     dataset = BenchmarkDataset.from_dict(parsed)
                     benchmark_source = {
@@ -1151,6 +1233,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 dataset = convert_to_direct_facts_benchmark(longmemeval_items)
         elif is_locomo and locomo_samples is not None:
             dataset = convert_to_locomo_benchmark(locomo_samples)
+        elif is_beam and beam_dataset is not None:
+            dataset = convert_to_beam_benchmark(beam_dataset)
+        elif is_lmeb and lmeb_dataset is not None:
+            dataset = convert_to_lmeb_benchmark(lmeb_dataset)
     except Exception as exc:
         print(
             f"Error loading benchmark dataset: {type(exc).__name__}: {exc}",
@@ -1159,8 +1245,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     if official_named_dataset and args.adapter != "engine":
-        dataset_label = "LoCoMo-10" if is_locomo else "LongMemEval-S"
-        fixture_name = "locomo-fixture" if is_locomo else "longmemeval-fixture"
+        if is_locomo:
+            dataset_label = "LoCoMo-10"
+            fixture_name = "locomo-fixture"
+        elif is_beam:
+            dataset_label = "BEAM-128K"
+            fixture_name = "beam-fixture"
+        elif is_lmeb:
+            dataset_label = "LMEB"
+            fixture_name = "lmeb-fixture"
+        else:
+            dataset_label = "LongMemEval-S"
+            fixture_name = "longmemeval-fixture"
         print(
             f"Error: the named official {dataset_label} benchmark must use "
             f"--adapter engine. Use --dataset {fixture_name} for replay/CI smoke tests.",
@@ -1169,6 +1265,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     qa_requested = args.tier in ("oracle-reader", "end-to-end", "all")
+    if (is_beam or is_lmeb) and qa_requested:
+        ds_name = "BEAM" if is_beam else "LMEB"
+        print(
+            f"Error: {ds_name} is a retrieval/scale benchmark and only supports --tier retrieval.",
+            file=sys.stderr,
+        )
+        return 1
+
     if is_locomo and args.tier == "oracle-reader":
         print(
             "Error: LoCoMo exposes retrieval and end-to-end QA tiers; "
@@ -1193,9 +1297,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"eval_locomo_{int(time.time())}_{uuid.uuid4().hex[:6]}"
             if is_locomo
             else (
-                f"eval_longmemeval_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-                if is_longmemeval
-                else None
+                f"eval_beam_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                if is_beam
+                else (
+                    f"eval_lmeb_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                    if is_lmeb
+                    else (
+                        f"eval_longmemeval_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                        if is_longmemeval
+                        else None
+                    )
+                )
             )
         )
         adapter = HippoEngineAdapter(collection_name=coll)
@@ -1275,8 +1387,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tier_results: Dict[str, Any] = {}
         loss_quant: Optional[LossQuantification] = None
         locomo_result: Optional[LoCoMoEvaluationResult] = None
+        beam_result: Optional[BeamEvaluationResult] = None
+        lmeb_report: Optional[LmebComparisonReport] = None
 
-        if is_locomo and qa_requested:
+        if is_beam:
+            beam_evaluator = BeamEvaluator()
+            beam_result = beam_evaluator.evaluate(
+                adapter=adapter,
+                dataset=dataset,
+                limit=args.max_injected,
+                k_values=runner.k_values,
+                ingest_duration_seconds=getattr(runner, "last_ingest_duration_seconds", 0.0),
+            )
+        elif is_lmeb:
+            lmeb_evaluator = LmebEvaluator()
+            profile_name = getattr(adapter, "profile_name", getattr(adapter, "collection_name", args.adapter))
+            lmeb_report = lmeb_evaluator.compare_profiles(
+                {str(profile_name): adapter},
+                dataset=dataset,
+            )
+        elif is_locomo and qa_requested:
             assert locomo_evaluator is not None
             locomo_result = locomo_evaluator.evaluate(
                 adapter=adapter,
@@ -1332,6 +1462,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tier_results=tier_results if tier_results else None,
             loss_quant=loss_quant,
             locomo_result=locomo_result,
+            beam_result=beam_result,
+            lmeb_report=lmeb_report,
         )
 
         hypothesis_paths: List[Path] = []
@@ -1417,6 +1549,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(
                     "  Category 5 Adversarial Accuracy: "
                     f"{locomo_result.qa_metrics['adversarial_accuracy']:.4f}"
+                )
+            print("-" * 50)
+
+        if beam_result:
+            print("BEAM Scale & Performance Evaluation:")
+            perf = beam_result.performance
+            print(
+                f"  Ingest: {perf.ingest_duration_seconds:.2f}s "
+                f"({perf.ingest_throughput_items_per_sec:.1f} items/s)"
+            )
+            print(
+                f"  Latency: P50={perf.query_latency_p50_ms:.2f}ms | "
+                f"P95={perf.query_latency_p95_ms:.2f}ms | "
+                f"P99={perf.query_latency_p99_ms:.2f}ms"
+            )
+            if perf.index_size_bytes is not None:
+                print(f"  Index Size: {perf.index_size_bytes:,} bytes")
+            print(
+                f"  Corpus Tokens: ~{perf.estimated_corpus_tokens:,} | "
+                f"Cost: ${perf.estimated_cost_usd:.4f} USD"
+            )
+            print(
+                f"  Recall@3: {beam_result.retrieval_metrics.get('recall@3', 0.0):.4f} | "
+                f"Recall@10: {beam_result.retrieval_metrics.get('recall@10', 0.0):.4f} | "
+                f"nDCG@10: {beam_result.retrieval_metrics.get('ndcg@10', 0.0):.4f}"
+            )
+            print("-" * 50)
+
+        if lmeb_report:
+            print("LMEB Component Evaluation:")
+            print(f"  {lmeb_report.disclaimer}")
+            for p in lmeb_report.profiles:
+                print(
+                    f"  Profile [{p.profile_name}]: "
+                    f"nDCG@10={p.ndcg_10:.4f} | Recall@10={p.recall_10:.4f} | "
+                    f"MRR={p.mrr:.4f} | Recall@3={p.recall_3:.4f}"
                 )
             print("-" * 50)
 
