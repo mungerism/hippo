@@ -146,6 +146,55 @@ class TestBeamBenchmark(unittest.TestCase):
             self.assertIn("BEAM Scale & Performance Evaluation Report", md_text)
 
 
+
+    def test_beam_runner_builds_scale_curve(self) -> None:
+        """Combine different BEAM scale reports into one quality/latency/cost curve."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            reports = []
+            for name, memories, recall, p95, cost in (
+                ("beam-100k", 100, 0.80, 20.0, 0.01),
+                ("beam-500k", 500, 0.76, 35.0, 0.05),
+            ):
+                path = root / f"{name}.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "manifest": {"dataset_name": name},
+                            "beam_evaluation": {
+                                "retrieval_metrics": {
+                                    "recall@3": recall,
+                                    "recall@10": recall + 0.05,
+                                    "ndcg@10": recall + 0.02,
+                                },
+                                "performance": {
+                                    "total_memories": memories,
+                                    "estimated_corpus_tokens": memories * 100,
+                                    "query_latency_p95_ms": p95,
+                                    "estimated_cost_usd": cost,
+                                    "index_size_bytes": memories * 1024,
+                                },
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                reports.append(path)
+
+            code = runner_main([
+                "--beam-compare-report", str(reports[0]),
+                "--beam-compare-report", str(reports[1]),
+                "--output-dir", str(root),
+                "--report-name", "curve",
+            ])
+            self.assertEqual(code, 0)
+
+            curve = json.loads(
+                (root / "curve.json").read_text(encoding="utf-8")
+            )["beam_scale_curve"]["points"]
+            self.assertEqual([point["total_memories"] for point in curve], [100, 500])
+            self.assertTrue((root / "curve.md").exists())
+
     def test_beam_budget_guard_fails_closed(self) -> None:
         """Reject a benchmark before ingest when its configured item cap is exceeded."""
         code = runner_main([
