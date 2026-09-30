@@ -1,4 +1,4 @@
-"""Unit tests for BEAM-128K scale evaluation module."""
+"""Unit tests for BEAM scale evaluation module."""
 
 import json
 from pathlib import Path
