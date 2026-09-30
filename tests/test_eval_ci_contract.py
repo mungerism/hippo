@@ -16,6 +16,7 @@ from pathlib import Path
 
 from benchmarks.runner import compare_reports
 from benchmarks.runner import main as runner_main
+from benchmarks.runner import update_latency_breach_state
 from benchmarks.schemas import (
     BenchmarkReport,
     QueryEvaluationResult,
@@ -165,6 +166,37 @@ class TestEvalCIContract(unittest.TestCase):
         self.assertIn("recall@3", diff["metrics_diff"])
         self.assertTrue(diff["metrics_diff"]["recall@3"]["regressed"])
         self.assertAlmostEqual(diff["metrics_diff"]["recall@3"]["delta"], -0.10, places=3)
+
+    def test_compare_reports_uses_two_point_default_tolerance(self):
+        baseline = _make_dummy_report(recall_3=0.80)
+
+        within_tolerance = _make_dummy_report(recall_3=0.781)
+        within_diff = compare_reports(within_tolerance, baseline)
+        self.assertFalse(within_diff["has_regression"])
+
+        beyond_tolerance = _make_dummy_report(recall_3=0.779)
+        beyond_diff = compare_reports(beyond_tolerance, baseline)
+        self.assertTrue(beyond_diff["has_regression"])
+
+    def test_compare_reports_tracks_p95_latency_without_single_run_failure(self):
+        baseline = _make_dummy_report()
+        current = _make_dummy_report()
+        baseline.aggregate_metrics["latency_p95_ms"] = 100.0
+        current.aggregate_metrics["latency_p95_ms"] = 111.0
+
+        diff = compare_reports(current, baseline)
+        self.assertTrue(diff["latency_warning"])
+        self.assertFalse(diff["has_regression"])
+        self.assertAlmostEqual(diff["latency_p95_change_ratio"], 0.11, places=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "latency-state.json"
+            self.assertEqual(update_latency_breach_state(diff, state_path), 1)
+            self.assertEqual(update_latency_breach_state(diff, state_path), 2)
+
+            healthy = dict(diff)
+            healthy["latency_warning"] = False
+            self.assertEqual(update_latency_breach_state(healthy, state_path), 0)
 
     def test_compare_reports_detects_security_violation(self):
         baseline = _make_dummy_report(forbidden_leakage_3=0.0)
