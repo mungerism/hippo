@@ -657,13 +657,14 @@ def compare_reports(
             if b_val > 0:
                 latency_p95_change_ratio = (c_val - b_val) / b_val
                 latency_warning = latency_p95_change_ratio > latency_p95_tolerance_ratio
-        elif "latency" in k or "token" in k or "index_size" in k:
-            # Other auxiliary performance metrics do not fail regression checks.
-            regressed = False
-        else:
+        elif k in {"recall@3", "ndcg@3", "mrr"}:
             regressed = delta < -tolerance
             if regressed:
                 has_regression = True
+        else:
+            # Other retrieval/diagnostic/performance metrics are reported but are
+            # not merge-blocking under the Issue #57 regression policy.
+            regressed = False
 
         diff_metrics[k] = {
             "baseline": b_val,
