@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import logging
 import math
+import sys
 import time
 from typing import Any, Mapping, Optional, Sequence
 
@@ -41,6 +42,18 @@ def estimate_tokens_from_text(text: str) -> int:
     return max(1, math.ceil(len(text) / 4.0))
 
 
+def _get_peak_rss_bytes() -> Optional[int]:
+    """Return process peak resident memory in bytes when the platform exposes it."""
+    try:
+        import resource
+
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        # macOS reports bytes; Linux and the common BSD CI environments report KiB.
+        return peak if sys.platform == "darwin" else peak * 1024
+    except (ImportError, OSError, ValueError):
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class BeamPerformanceProfile:
     """System resource, timing, and capacity profile under scale evaluation."""
@@ -51,6 +64,7 @@ class BeamPerformanceProfile:
     query_latency_p95_ms: float
     query_latency_p99_ms: float
     index_size_bytes: Optional[int]
+    peak_rss_bytes: Optional[int]
     total_memories: int
     total_queries: int
     estimated_corpus_tokens: int
@@ -103,6 +117,12 @@ class BeamEvaluationResult:
             size_mb = size_kb / 1024.0
             size_str = f"{size_mb:.2f} MB" if size_mb >= 1.0 else f"{size_kb:.1f} KB"
             lines.append(f"| **索引体积 (Index Size)** | `{size_str}` | 单二进制紧凑存储 |")
+
+        if self.performance.peak_rss_bytes is not None:
+            rss_mb = self.performance.peak_rss_bytes / (1024.0 * 1024.0)
+            lines.append(
+                f"| **进程峰值 RSS (Peak RSS)** | `{rss_mb:.1f} MB` | 运行资源诊断 |"
+            )
 
         lines.extend([
             "",
@@ -236,6 +256,7 @@ class BeamEvaluator:
             query_latency_p95_ms=p95,
             query_latency_p99_ms=p99,
             index_size_bytes=index_size,
+            peak_rss_bytes=_get_peak_rss_bytes(),
             total_memories=num_corpus,
             total_queries=len(dataset.queries),
             estimated_corpus_tokens=total_tokens,
