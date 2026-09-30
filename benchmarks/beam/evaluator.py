@@ -158,10 +158,16 @@ class BeamEvaluator:
         """Run scale evaluation over BEAM dataset, tracking query latency and memory footprint."""
         query_results: list[QueryEvaluationResult] = []
         latencies_ms: list[float] = []
+        # Retrieval depth must cover every reported @K metric. The production
+        # injection budget (normally 3) is a separate contract and must not
+        # silently truncate Recall@10 / nDCG@10.
+        search_limit = max([int(limit)] + [int(k) for k in k_values])
 
         for q in dataset.queries:
             t0 = time.perf_counter()
-            retrieved_ids, trace = adapter.search(q, limit=limit, capture_trace=True)
+            retrieved_ids, trace = adapter.search(
+                q, limit=search_limit, capture_trace=True
+            )
             latency_ms = (time.perf_counter() - t0) * 1000.0
             latencies_ms.append(latency_ms)
 
