@@ -4,6 +4,27 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      run_beam:
+        description: 'Run pinned BEAM 100K scale/retrieval benchmark'
+        required: false
+        default: true
+        type: boolean
+      run_lmeb:
+        description: 'Run pinned LMEB Dialogue/MemBench component benchmark'
+        required: false
+        default: false
+        type: boolean
+      lmeb_profile_name:
+        description: 'Label for the active embedding profile in the LMEB report'
+        required: false
+        default: 'vertex-default'
+        type: string
+      max_embedding_cost_usd:
+        description: 'Fail-closed estimated embedding cost cap for BEAM/LMEB'
+        required: false
+        default: '5.0'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,7 +32,7 @@ concurrency:
 
 jobs:
   release-eval:
-    name: LongMemEval-S & LoCoMo-10 Release Gate
+    name: Public Benchmark Release Gate
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -110,6 +131,30 @@ jobs:
             --max-injected 3 \
             --output-dir benchmarks/reports/release \
             --report-name locomo10_release
+
+      - name: Run BEAM 100K Scale & Retrieval Gate
+        if: github.event_name == 'release' || inputs.run_beam == true
+        run: |
+          uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+            --dataset beam-100k \
+            --adapter engine \
+            --collection eval_release_beam_${{ github.run_id }} \
+            --max-injected 3 \
+            --max-estimated-embedding-cost-usd "${{ inputs.max_embedding_cost_usd || '5.0' }}" \
+            --output-dir benchmarks/reports/release \
+            --report-name beam100k_release
+
+      - name: Run LMEB Dialogue Component Profile
+        if: github.event_name == 'workflow_dispatch' && inputs.run_lmeb == true
+        run: |
+          uv run --with datasets --with huggingface_hub python -m benchmarks.runner \
+            --dataset lmeb-dialogue \
+            --adapter engine \
+            --collection eval_release_lmeb_${{ github.run_id }} \
+            --lmeb-profile-name "${{ inputs.lmeb_profile_name }}" \
+            --max-estimated-embedding-cost-usd "${{ inputs.max_embedding_cost_usd || '5.0' }}" \
+            --output-dir benchmarks/reports/release \
+            --report-name "lmeb_${{ inputs.lmeb_profile_name }}_release"
 
       - name: Publish Step Summary
         if: always()
