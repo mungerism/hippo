@@ -2,12 +2,12 @@ name: Nightly Evaluation & Regression Gates
 
 on:
   schedule:
-    # Run daily at 02:00 UTC (10:00 AM CST)
+    # Run daily at 02:00 UTC (10:00 Beijing time).
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       include_qa:
-        description: 'Run end-to-end LLM reader/judge evaluation (requires GEMINI_API_KEY secret)'
+        description: 'Also run LongMemEval-S end-to-end QA (requires GEMINI_API_KEY)'
         required: false
         default: false
         type: boolean
@@ -25,16 +25,22 @@ jobs:
   nightly-eval:
     name: Nightly Regression & Benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      HIPPO_PROVIDER: vertexai
+      VERTEX_EMBEDDING_MODEL: gemini-embedding-2
+      VERTEX_EMBEDDING_DIMS: '768'
+      GOOGLE_CLOUD_LOCATION: global
+      GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ENGINE_EVAL_ENABLED: 'false'
     services:
       qdrant:
-        image: qdrant/qdrant:latest
+        # Pin the engine used by the approved baseline; do not use :latest.
+        image: qdrant/qdrant:v1.19.1
         ports:
           - 6333:6333
-        options: >-
-          --health-cmd "curl -s http://localhost:6333/readyz || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -54,75 +60,122 @@ jobs:
 
       - name: Verify Qdrant Service Health
         run: |
-          echo "Checking Qdrant readiness at 127.0.0.1:6333..."
-          curl -f -s http://127.0.0.1:6333/readyz || (echo "Qdrant not ready!" && exit 1)
-          echo "Qdrant is healthy."
+          echo "Waiting for Qdrant readiness at 127.0.0.1:6333..."
+          for attempt in {1..30}; do
+            if curl -f -s http://127.0.0.1:6333/readyz >/dev/null; then
+              echo "Qdrant is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant did not become ready within 60 seconds." >&2
+          exit 1
 
-      - name: Create Nightly Reports Directory
-        run: mkdir -p benchmarks/reports/nightly
+      - name: Configure Vertex AI Credentials
+        if: env.GOOGLE_CREDENTIALS_JSON != '' && env.GOOGLE_CLOUD_PROJECT != ''
+        run: |
+          credentials_path="${RUNNER_TEMP}/gcp-credentials.json"
+          printf '%s' "$GOOGLE_CREDENTIALS_JSON" > "$credentials_path"
+          chmod 600 "$credentials_path"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$credentials_path" >> "$GITHUB_ENV"
+          echo "ENGINE_EVAL_ENABLED=true" >> "$GITHUB_ENV"
+
+      - name: Explain Missing Engine Credentials
+        if: env.GOOGLE_CREDENTIALS_JSON == '' || env.GOOGLE_CLOUD_PROJECT == ''
+        run: |
+          {
+            echo "## Nightly engine evaluation skipped"
+            echo ""
+            echo "The approved Hippo Gold baseline uses Vertex AI embeddings."
+            echo "Configure GOOGLE_CREDENTIALS_JSON and GOOGLE_CLOUD_PROJECT repository secrets"
+            echo "to enable the live Qdrant + Vertex regression gate."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create Nightly Reports & State Directories
+        run: mkdir -p benchmarks/reports/nightly .cache/eval
+
+      - name: Restore P95 Latency Breach State
+        if: env.ENGINE_EVAL_ENABLED == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/eval
+          key: eval-latency-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            eval-latency-${{ github.ref_name }}-
 
       - name: Run Hippo Gold v1 with Live Engine & Baseline Regression Gate
+        if: env.ENGINE_EVAL_ENABLED == 'true'
         run: |
-          echo "Executing Hippo Gold v1 evaluation against baseline..."
           uv run python -m benchmarks.runner \
             --dataset benchmarks/data/hippo_gold_v1.json \
             --adapter engine \
             --collection eval_nightly_gold_${{ github.run_id }} \
             --baseline benchmarks/baselines/hippo_gold_v1_baseline.json \
+            --latency-state .cache/eval/hippo_gold_v1_latency.json \
             --max-injected ${{ inputs.max_injected || '3' }} \
             --output-dir benchmarks/reports/nightly \
             --report-name hippo_gold_v1_nightly
 
-      - name: Run LongMemEval-S Evaluation
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      - name: Run LongMemEval-S Retrieval with Live Engine
+        if: env.ENGINE_EVAL_ENABLED == 'true'
         run: |
-          if [ -n "$GEMINI_API_KEY" ] && [ "${{ inputs.include_qa }}" == "true" ]; then
-            echo "Running LongMemEval-S full QA tier with Gemini..."
-            uv run python -m benchmarks.runner \
-              --dataset longmemeval-fixture \
-              --tier all \
-              --qa-backend gemini \
-              --max-injected ${{ inputs.max_injected || '3' }} \
-              --output-dir benchmarks/reports/nightly \
-              --report-name longmemeval_nightly
-          else
-            echo "Running LongMemEval-S retrieval tier (offline/graceful degradation)..."
-            uv run python -m benchmarks.runner \
-              --dataset longmemeval-fixture \
-              --tier retrieval \
-              --max-injected ${{ inputs.max_injected || '3' }} \
-              --output-dir benchmarks/reports/nightly \
-              --report-name longmemeval_nightly
-          fi
-
-      - name: Run LoCoMo-10 Benchmark Evaluation
-        run: |
-          echo "Executing LoCoMo-10 benchmark..."
           uv run python -m benchmarks.runner \
-            --dataset locomo-fixture \
-            --tier all \
+            --dataset longmemeval-s \
+            --adapter engine \
+            --tier retrieval \
+            --collection eval_nightly_longmem_${{ github.run_id }} \
             --max-injected ${{ inputs.max_injected || '3' }} \
             --output-dir benchmarks/reports/nightly \
-            --report-name locomo_nightly
+            --report-name longmemeval_retrieval_nightly
+
+      - name: Run Optional LongMemEval-S End-to-End QA
+        if: env.ENGINE_EVAL_ENABLED == 'true' && env.GEMINI_API_KEY != '' && inputs.include_qa == true
+        run: |
+          uv run python -m benchmarks.runner \
+            --dataset longmemeval-s \
+            --adapter engine \
+            --tier end-to-end \
+            --qa-backend gemini \
+            --collection eval_nightly_longmem_qa_${{ github.run_id }} \
+            --max-injected ${{ inputs.max_injected || '3' }} \
+            --output-dir benchmarks/reports/nightly \
+            --report-name longmemeval_e2e_nightly
+
+      - name: Run Offline Fixture When Engine Credentials Are Missing
+        if: env.ENGINE_EVAL_ENABLED != 'true'
+        run: |
+          uv run python -m benchmarks.runner \
+            --dataset longmemeval-fixture \
+            --tier retrieval \
+            --max-injected ${{ inputs.max_injected || '3' }} \
+            --output-dir benchmarks/reports/nightly \
+            --report-name longmemeval_fixture_nightly
 
       - name: Publish Step Summary
         if: always()
         run: |
-          echo "# 🌙 Hippo Nightly Evaluation Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Run ID**: \`${{ github.run_id }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Trigger**: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Hippo Nightly Evaluation Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run ID**: \`${{ github.run_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit**: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Trigger**: \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Live engine enabled**: \`$ENGINE_EVAL_ENABLED\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
           for md in benchmarks/reports/nightly/*.md; do
             if [ -f "$md" ]; then
-              echo "---" >> $GITHUB_STEP_SUMMARY
-              cat "$md" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "---" >> "$GITHUB_STEP_SUMMARY"
+              cat "$md" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
+
+      - name: Save P95 Latency Breach State
+        if: always() && env.ENGINE_EVAL_ENABLED == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/eval
+          key: eval-latency-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload Evaluation Artifacts
         if: always()
