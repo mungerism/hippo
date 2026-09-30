@@ -1547,7 +1547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dataset_label = "LoCoMo-10"
             fixture_name = "locomo-fixture"
         elif is_beam:
-            dataset_label = "BEAM-128K"
+            dataset_label = "BEAM"
             fixture_name = "beam-fixture"
         elif is_lmeb:
             dataset_label = "LMEB"
