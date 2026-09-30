@@ -71,7 +71,20 @@ class TestBeamBenchmark(unittest.TestCase):
         beam_ds = load_beam_dataset()
         b_ds = convert_to_beam_benchmark(beam_ds)
 
-        adapter = ReplayFixtureAdapter()
+        class RecordingReplayAdapter(ReplayFixtureAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.search_limits: list[int] = []
+
+            def search(self, query, limit=3, capture_trace=True):
+                self.search_limits.append(limit)
+                return super().search(
+                    query,
+                    limit=limit,
+                    capture_trace=capture_trace,
+                )
+
+        adapter = RecordingReplayAdapter()
         adapter.ingest_corpus(b_ds.corpus)
 
         evaluator = BeamEvaluator()
@@ -79,8 +92,11 @@ class TestBeamBenchmark(unittest.TestCase):
             adapter=adapter,
             dataset=b_ds,
             limit=3,
+            k_values=(1, 3, 10),
             ingest_duration_seconds=0.05,
         )
+        self.assertTrue(adapter.search_limits)
+        self.assertEqual(set(adapter.search_limits), {10})
 
         self.assertIsInstance(result.performance, BeamPerformanceProfile)
         self.assertGreater(result.performance.ingest_throughput_items_per_sec, 0)
@@ -128,6 +144,16 @@ class TestBeamBenchmark(unittest.TestCase):
 
             md_text = md_file.read_text(encoding="utf-8")
             self.assertIn("BEAM Scale & Performance Evaluation Report", md_text)
+
+
+    def test_beam_budget_guard_fails_closed(self) -> None:
+        """Reject a benchmark before ingest when its configured item cap is exceeded."""
+        code = runner_main([
+            "--dataset", "beam-fixture",
+            "--adapter", "replay",
+            "--max-benchmark-items", "1",
+        ])
+        self.assertEqual(code, 2)
 
     def test_beam_guards(self) -> None:
         """Verify guards against named official dataset with replay, and QA tier rejection."""
