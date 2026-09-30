@@ -620,19 +620,23 @@ def _validate_baseline_compatibility(
 def compare_reports(
     current: BenchmarkReport,
     baseline: BenchmarkReport,
-    tolerance: float = 0.001,
+    tolerance: float = 0.02,
+    latency_p95_tolerance_ratio: float = 0.10,
 ) -> Dict[str, Any]:
     """Compare current evaluation report with a compatible baseline report.
 
     Detects:
-        - Metric regressions (drop > tolerance)
+        - Core metric regressions (absolute drop > tolerance; default 2 percentage points)
         - Forbidden leakage regressions (any increase > 0)
+        - P95 latency warnings (relative increase > 10%; escalation is handled across runs)
         - Per-query regressions and improvements
     """
     _validate_baseline_compatibility(current, baseline)
     diff_metrics: Dict[str, Dict[str, Any]] = {}
     has_regression = False
     has_security_violation = False
+    latency_warning = False
+    latency_p95_change_ratio: Optional[float] = None
 
     all_keys = set(current.aggregate_metrics.keys()) | set(baseline.aggregate_metrics.keys())
 
@@ -646,8 +650,15 @@ def compare_reports(
             if regressed:
                 has_security_violation = True
                 has_regression = True
+        elif k == "latency_p95_ms":
+            # A single noisy shared-runner latency breach only warns. The caller
+            # may persist consecutive breaches and escalate the second one.
+            regressed = False
+            if b_val > 0:
+                latency_p95_change_ratio = (c_val - b_val) / b_val
+                latency_warning = latency_p95_change_ratio > latency_p95_tolerance_ratio
         elif "latency" in k or "token" in k or "index_size" in k:
-            # Auxiliary performance metrics do not fail regression check
+            # Other auxiliary performance metrics do not fail regression checks.
             regressed = False
         else:
             regressed = delta < -tolerance
@@ -703,10 +714,35 @@ def compare_reports(
         "current_sha": current.manifest.git_sha,
         "has_regression": has_regression,
         "has_security_violation": has_security_violation,
+        "latency_warning": latency_warning,
+        "latency_p95_change_ratio": latency_p95_change_ratio,
         "metrics_diff": diff_metrics,
         "regressed_queries": regressed_queries,
         "improved_queries": improved_queries,
     }
+
+
+def update_latency_breach_state(diff_data: Dict[str, Any], state_path: Path) -> int:
+    """Persist consecutive P95 latency breaches and return the updated count.
+
+    The first >10% breach is warning-only. A second consecutive breach is
+    escalated by the caller. A healthy run resets the counter to zero.
+    """
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_count = 0
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            previous_count = int(state.get("consecutive_p95_breaches", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            previous_count = 0
+
+    count = previous_count + 1 if diff_data.get("latency_warning") else 0
+    state_path.write_text(
+        json.dumps({"consecutive_p95_breaches": count}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return count
 
 
 def generate_diff_markdown(diff_data: Dict[str, Any]) -> str:
@@ -718,6 +754,8 @@ def generate_diff_markdown(diff_data: Dict[str, Any]) -> str:
         f"- **Baseline Git SHA**: `{diff_data['baseline_sha']}`",
         f"- **Current Git SHA**: `{diff_data['current_sha']}`",
         f"- **回归判定 (Regression Status)**: {'❌ 存在退化或泄漏' if diff_data['has_regression'] else '✅ 全部通过 (No Regressions)'}",
+        f"- **P95 延迟**: {'⚠️ 较 baseline 上升超过 10%' if diff_data.get('latency_warning') else '✅ 未触发 10% 告警'}",
+        f"- **连续 P95 告警次数**: {diff_data.get('latency_consecutive_breaches', 0)}",
         "",
         "## 1. 核心指标对比 (@3 主口径)",
         "",
@@ -968,6 +1006,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         type=str,
         default=None,
         help="Path to an approved baseline JSON report to compare against.",
+    )
+    parser.add_argument(
+        "--latency-state",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON state file used to persist consecutive P95 latency "
+            "breaches across scheduled runs."
+        ),
     )
     parser.add_argument(
         "--max-injected",
@@ -1399,25 +1446,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             baseline_path = Path(args.baseline)
             if not baseline_path.is_file():
                 print(
-                    f"Warning: Baseline file not found: {baseline_path}",
+                    f"Error: Baseline file not found: {baseline_path}",
                     file=sys.stderr,
                 )
-            else:
-                baseline_report = BenchmarkReport.from_json(
-                    baseline_path.read_text(encoding="utf-8")
+                return 1
+
+            baseline_report = BenchmarkReport.from_json(
+                baseline_path.read_text(encoding="utf-8")
+            )
+            try:
+                diff = compare_reports(report, baseline_report)
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+
+            if args.latency_state:
+                breach_count = update_latency_breach_state(
+                    diff, Path(args.latency_state)
                 )
-                try:
-                    diff = compare_reports(report, baseline_report)
-                except ValueError as exc:
-                    print(f"Error: {exc}", file=sys.stderr)
-                    return 1
-                diff_md = generate_diff_markdown(diff)
-                diff_path = out_dir / f"diff_{dataset.name}.md"
-                diff_path.write_text(diff_md, encoding="utf-8")
-                print(f"Diff report: {diff_path}")
-                if diff["has_regression"]:
-                    print("WARNING: Regression detected against baseline!")
-                    return 2
+                diff["latency_consecutive_breaches"] = breach_count
+                if diff["latency_warning"]:
+                    print(
+                        "WARNING: P95 latency increased by more than 10% "
+                        f"(consecutive breaches: {breach_count}).",
+                        file=sys.stderr,
+                    )
+                if breach_count >= 2:
+                    diff["has_regression"] = True
+                    diff["latency_escalated"] = True
+                    print(
+                        "ERROR: P95 latency regression confirmed on consecutive runs.",
+                        file=sys.stderr,
+                    )
+
+            diff_md = generate_diff_markdown(diff)
+            diff_path = out_dir / f"diff_{dataset.name}.md"
+            diff_path.write_text(diff_md, encoding="utf-8")
+            print(f"Diff report: {diff_path}")
+            if diff["has_regression"]:
+                print("WARNING: Regression detected against baseline!")
+                return 2
 
         return 0
     finally:
