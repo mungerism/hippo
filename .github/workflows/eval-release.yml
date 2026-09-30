@@ -1,0 +1,137 @@
+name: Release Evaluation Gate
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-eval:
+    name: LongMemEval-S & LoCoMo-10 Release Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      HIPPO_PROVIDER: vertexai
+      VERTEX_EMBEDDING_MODEL: gemini-embedding-2
+      VERTEX_EMBEDDING_DIMS: '768'
+      GOOGLE_CLOUD_LOCATION: global
+      GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.19.1
+        ports:
+          - 6333:6333
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Verify Required Evaluation Secrets
+        run: |
+          missing=0
+          for name in GOOGLE_CLOUD_PROJECT GOOGLE_CREDENTIALS_JSON GEMINI_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required repository secret: $name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Configure Vertex AI Credentials
+        run: |
+          credentials_path="${RUNNER_TEMP}/gcp-credentials.json"
+          printf '%s' "$GOOGLE_CREDENTIALS_JSON" > "$credentials_path"
+          chmod 600 "$credentials_path"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$credentials_path" >> "$GITHUB_ENV"
+
+      - name: Verify Qdrant Service Health
+        run: |
+          for attempt in {1..30}; do
+            if curl -f -s http://127.0.0.1:6333/readyz >/dev/null; then
+              echo "Qdrant is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant did not become ready within 60 seconds." >&2
+          exit 1
+
+      - name: Create Release Reports Directory
+        run: mkdir -p benchmarks/reports/release
+
+      - name: Run LongMemEval-S End-to-End Gate
+        run: |
+          uv run python -m benchmarks.runner \
+            --dataset longmemeval-s \
+            --adapter engine \
+            --tier end-to-end \
+            --qa-backend gemini \
+            --reader-model gemini-3.5-flash-lite \
+            --judge-model gemini-3.5-flash-lite \
+            --qa-temperature 0 \
+            --reader-token-budget 256 \
+            --judge-token-budget 10 \
+            --collection eval_release_longmem_${{ github.run_id }} \
+            --max-injected 3 \
+            --output-dir benchmarks/reports/release \
+            --report-name longmemeval_e2e_release
+
+      - name: Run LoCoMo-10 Full Gate
+        run: |
+          uv run python -m benchmarks.runner \
+            --dataset locomo-10 \
+            --adapter engine \
+            --tier all \
+            --qa-backend gemini \
+            --reader-model gemini-3.5-flash-lite \
+            --qa-temperature 0 \
+            --reader-token-budget 256 \
+            --collection eval_release_locomo_${{ github.run_id }} \
+            --max-injected 3 \
+            --output-dir benchmarks/reports/release \
+            --report-name locomo10_release
+
+      - name: Publish Step Summary
+        if: always()
+        run: |
+          echo "# Hippo Release Evaluation Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run ID**: \`${{ github.run_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit**: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Trigger**: \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for md in benchmarks/reports/release/*.md; do
+            if [ -f "$md" ]; then
+              echo "---" >> "$GITHUB_STEP_SUMMARY"
+              cat "$md" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Upload Release Evaluation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hippo-release-eval-${{ github.run_id }}
+          path: benchmarks/reports/release/
+          retention-days: 90
