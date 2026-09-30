@@ -1570,20 +1570,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lmeb_report: Optional[LmebComparisonReport] = None
 
         if is_beam:
-            beam_evaluator = BeamEvaluator()
+            beam_evaluator = BeamEvaluator(
+                cost_per_million_tokens=args.embedding_cost_per_million_tokens,
+            )
             beam_result = beam_evaluator.evaluate(
                 adapter=adapter,
                 dataset=dataset,
-                limit=args.max_injected,
+                limit=max(runner.k_values),
                 k_values=runner.k_values,
                 ingest_duration_seconds=getattr(runner, "last_ingest_duration_seconds", 0.0),
             )
         elif is_lmeb:
             lmeb_evaluator = LmebEvaluator()
-            profile_name = getattr(adapter, "profile_name", getattr(adapter, "collection_name", args.adapter))
-            lmeb_report = lmeb_evaluator.compare_profiles(
-                {str(profile_name): adapter},
-                dataset=dataset,
+            profile_meta = adapter.get_embedding_profile()
+            profile_name = args.lmeb_profile_name or (
+                f"{profile_meta.get('provider', 'unknown')}:"
+                f"{profile_meta.get('model', 'unknown')}:"
+                f"{profile_meta.get('dims', 0)}"
+            )
+            profile_metrics = lmeb_evaluator.evaluate_profile(
+                adapter,
+                dataset,
+                profile_name=profile_name,
+            )
+            lmeb_report = LmebComparisonReport(
+                dataset_name=dataset.name,
+                profiles=[profile_metrics],
             )
         elif is_locomo and qa_requested:
             assert locomo_evaluator is not None
