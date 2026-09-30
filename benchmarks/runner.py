@@ -1084,8 +1084,92 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=None,
         help="Explicit base filename for generated reports (without extension).",
     )
+    parser.add_argument(
+        "--dataset-cache-dir",
+        type=str,
+        default=None,
+        help="Optional cache directory for pinned public benchmark downloads.",
+    )
+    parser.add_argument(
+        "--lmeb-profile-name",
+        type=str,
+        default=None,
+        help=(
+            "Human-readable embedding profile label for an LMEB run. "
+            "This is independent of --profile, which controls ingestion strategy."
+        ),
+    )
+    parser.add_argument(
+        "--lmeb-compare-report",
+        action="append",
+        default=[],
+        help=(
+            "Path to a prior LMEB JSON report. Repeat at least twice to merge "
+            "independent embedding runs into a side-by-side comparison report."
+        ),
+    )
+    parser.add_argument(
+        "--max-benchmark-items",
+        type=int,
+        default=250000,
+        help="Fail closed before ingest if a BEAM/LMEB corpus exceeds this item count.",
+    )
+    parser.add_argument(
+        "--max-estimated-embedding-cost-usd",
+        type=float,
+        default=5.0,
+        help="Fail closed before ingest when estimated BEAM/LMEB embedding cost exceeds this budget.",
+    )
+    parser.add_argument(
+        "--embedding-cost-per-million-tokens",
+        type=float,
+        default=DEFAULT_EMBEDDING_COST_PER_1M_TOKENS,
+        help="Cost model used for benchmark preflight and BEAM reporting.",
+    )
 
     args = parser.parse_args(argv)
+
+    if args.lmeb_compare_report:
+        if len(args.lmeb_compare_report) < 2:
+            print(
+                "Error: --lmeb-compare-report must be supplied at least twice.",
+                file=sys.stderr,
+            )
+            return 1
+        reports: list[LmebComparisonReport] = []
+        try:
+            for raw_path in args.lmeb_compare_report:
+                report_path = Path(raw_path)
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+                section = payload.get("lmeb_evaluation")
+                if not isinstance(section, Mapping):
+                    raise ValueError(
+                        f"{report_path} does not contain an lmeb_evaluation object"
+                    )
+                reports.append(LmebComparisonReport.from_dict(section))
+            merged = merge_lmeb_reports(reports)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            print(f"Error merging LMEB reports: {exc}", file=sys.stderr)
+            return 1
+
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        base_name = args.report_name or "lmeb_profile_comparison"
+        json_path = output_dir / f"{base_name}.json"
+        md_path = output_dir / f"{base_name}.md"
+        json_path.write_text(
+            json.dumps(
+                {"lmeb_evaluation": merged.to_dict()},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        md_path.write_text(merged.to_markdown(), encoding="utf-8")
+        print("LMEB comparison succeeded!")
+        print(f"JSON report: {json_path}")
+        print(f"Markdown summary: {md_path}")
+        return 0
 
     is_longmemeval = False
     is_locomo = False
