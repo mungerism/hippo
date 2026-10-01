@@ -18,10 +18,10 @@ from hippo_memory.lifecycle import (
 )
 from hippo_memory.config import HippoConfig
 from hippo_memory.decision import resolve_identity
-from hippo_memory.exceptions import HippoLockTimeoutError, HippoValidationError
+from hippo_memory.exceptions import ContextConflictError, HippoLockTimeoutError, HippoValidationError
 from hippo_memory.persistence_quality import audit_distilled_memory
 from hippo_memory.recent import fetch_recent_memories
-from hippo_memory.router import ScopeRouter
+from hippo_memory.router import ScopeRouter, compose_scope_filters
 
 logger = logging.getLogger(__name__)
 
@@ -757,6 +757,7 @@ class HippoEngine:
                                 if i_ids:
                                     for s_id in i_ids:
                                         holder.skipped_ids.add(str(s_id))
+                                holder.context_aborted = True
                                 holder.primary_completed = True
                                 holder.release_if_locked()
                                 return []
@@ -849,6 +850,7 @@ class HippoEngine:
                             ):
                                 if v_id:
                                     holder.skipped_ids.add(str(v_id))
+                                holder.context_aborted = True
                                 holder.primary_completed = True
                                 holder.entity_linking_aborted = True
                                 holder.release_if_locked()
@@ -907,6 +909,7 @@ class HippoEngine:
                             ):
                                 if v_id:
                                     holder.skipped_ids.add(str(v_id))
+                                holder.context_aborted = True
                                 holder.primary_completed = True
                                 holder.entity_linking_aborted = True
                                 holder.release_if_locked()
@@ -1350,13 +1353,12 @@ class HippoEngine:
         # Re-raise lock timeout / error if Mem0 internal try-except swallowed it (#42)
         if holder.error is not None:
             raise holder.error
+        if holder.context_aborted:
+            raise ContextConflictError(
+                "Warm Path observed context was mutated concurrently during extraction (concurrency conflict)"
+            )
 
-        if holder.context_aborted and result is not None:
-            if isinstance(result, dict) and "results" in result:
-                result["results"] = []
-            elif isinstance(result, list):
-                result = []
-        elif holder.skipped_ids and result is not None:
+        if holder.skipped_ids and result is not None:
             if isinstance(result, dict) and isinstance(result.get("results"), list):
                 result["results"] = [
                     r
@@ -1488,18 +1490,13 @@ class HippoEngine:
             return []
 
         uid = user_id or self.config.user_id
-        if filters:
-            computed_filters = filters.copy()
-            if "user_id" not in computed_filters and not any(k in computed_filters for k in ("AND", "OR", "NOT")):
-                computed_filters["user_id"] = uid
-        elif agent_id:
-            computed_filters = {"user_id": uid, "agent_id": agent_id}
-        else:
-            computed_filters = self.router.build_search_filters(
-                scope=scope,
-                user_id=uid,
-                project_id=project_id,
-            )
+        mandatory_scope = self.router.resolve_search_scope(
+            user_id=uid,
+            agent_id=agent_id,
+            scope=scope,
+            project_id=project_id,
+        )
+        computed_filters = compose_scope_filters(mandatory_scope, filters)
 
         # Determine effective semantic threshold (preserve explicit 0.0)
         effective_threshold = (
@@ -1598,21 +1595,13 @@ class HippoEngine:
             return [], trace
 
         uid = user_id or self.config.user_id
-
-        if filters:
-            computed_filters = filters.copy()
-            if "user_id" not in computed_filters and not any(
-                k in computed_filters for k in ("AND", "OR", "NOT")
-            ):
-                computed_filters["user_id"] = uid
-        elif agent_id:
-            computed_filters = {"user_id": uid, "agent_id": agent_id}
-        else:
-            computed_filters = self.router.build_search_filters(
-                scope=scope,
-                user_id=uid,
-                project_id=project_id,
-            )
+        mandatory_scope = self.router.resolve_search_scope(
+            user_id=uid,
+            agent_id=agent_id,
+            scope=scope,
+            project_id=project_id,
+        )
+        computed_filters = compose_scope_filters(mandatory_scope, filters)
 
         effective_threshold = (
             getattr(self.config, "semantic_threshold", 0.1)
@@ -1849,18 +1838,13 @@ class HippoEngine:
     ) -> List[Dict[str, Any]]:
         """List stored memories under the specified filters or scope."""
         uid = user_id or self.config.user_id
-        if filters:
-            computed_filters = filters.copy()
-            if "user_id" not in computed_filters and not any(k in computed_filters for k in ("AND", "OR", "NOT")):
-                computed_filters["user_id"] = uid
-        elif agent_id:
-            computed_filters = {"user_id": uid, "agent_id": agent_id}
-        else:
-            computed_filters = self.router.build_search_filters(
-                scope=scope,
-                user_id=uid,
-                project_id=project_id,
-            )
+        mandatory_scope = self.router.resolve_search_scope(
+            user_id=uid,
+            agent_id=agent_id,
+            scope=scope,
+            project_id=project_id,
+        )
+        computed_filters = compose_scope_filters(mandatory_scope, filters)
 
         lifecycle_filters = add_lifecycle_exclusion(computed_filters)
         results = self.memory.get_all(filters=lifecycle_filters, top_k=limit)

@@ -33,3 +33,7 @@ class HippoLockTimeoutError(HippoError, TimeoutError):
         self.lock_path = lock_path
         self.timeout = timeout
 
+
+class ContextConflictError(HippoError):
+    """Warm Path observed-context revalidation detected a retryable concurrency conflict."""
+

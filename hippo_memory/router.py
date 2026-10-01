@@ -1,5 +1,6 @@
 import os
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -140,3 +141,46 @@ class ScopeRouter:
                     {"agent_id": resolved_proj},
                 ],
             }
+
+    def resolve_search_scope(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        scope: str = "all",
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve the mandatory caller identity and project/global scope boundaries."""
+        uid = user_id or self.default_user_id
+        if agent_id:
+            if agent_id == "global":
+                return {"user_id": uid, "agent_id": "global"}
+            return {"user_id": uid, "agent_id": agent_id}
+
+        return self.build_search_filters(
+            scope=scope,
+            user_id=uid,
+            project_id=project_id,
+        )
+
+
+def compose_scope_filters(
+    mandatory_scope: Dict[str, Any],
+    custom_filter: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compose mandatory scope boundaries with caller-supplied custom business filters.
+
+    Contract (Issue #80 Decision 4):
+        - custom_filter can only narrow the results, cannot replace or broaden mandatory scope.
+        - If custom_filter is empty, returns a defensive copy of mandatory_scope.
+        - If custom_filter is provided, returns conjunction {"AND": [deepcopy(mandatory_scope), deepcopy(custom_filter)]}.
+        - Does not mutate input parameters.
+    """
+    if not custom_filter:
+        return deepcopy(mandatory_scope)
+
+    return {
+        "AND": [
+            deepcopy(mandatory_scope),
+            deepcopy(custom_filter),
+        ]
+    }

@@ -47,11 +47,22 @@ flowchart TD
   - **Pre-check（蒸馏前预审）**：在调用 LLM 蒸馏前，`SpoolWorker` 审查会话是否为纯口头禅确认或纯运行时流水日志。无文件修改且无实质性目标的纯噪音会话被提前判定并跳过，节省 LLM Token；有任何实质性用户意图、修改文件或不确定的内容均保守 Fail-Open 放行；
   - **Prompt Hardening（防注入加固）**：基于 `SESSION_DISTILLATION_PROMPT_V2`，明确将会话转录作为不可信输入，严禁将 Transcript 中的 Prompt Injection / 指令覆盖持久化为规则；明确区分日志中的稳定架构配置（提取为干净事实）与运行时流水（忽略）；
   - **Post-audit（落库前质检）**：挂载在真实持久化调用入口（`HippoEngine._hook_memory_persistence` 拦截的 `vector_store.insert` 与 `update`）。只对 `source == "session_distillation"` 的后台写入生效，对提取后的记忆执行 `ACCEPT / DROP` 审查。被拒绝的项直接从批量写入中剔除或阻断更新，并记录到 `skipped_ids` 阻断 History 与 Entity 副作用，绝不篡改已生成向量的文本，且 Hot Path（`infer=False` / `add_explicit()`）零开销绕过；
+  - **Concurrency Conflict & Retry（并发冲突与重试，#80）**：在持有写锁并持久化前对 Phase 1 检索到的前提记忆重验版本指纹。若观察上下文在提炼期间被并发修改、废弃或删除，`HippoEngine` 显式抛出类型化 `ContextConflictError`，`SpoolWorker` 将其识别为可重试冲突并通过指数退避重新放回 `pending`，绝不记录伪成功收据，待重试耗尽后方进入 `dead` 保留诊断现场；而合法的真正空提取或质量门禁空过滤仍作为终端成功处理；
   - 记忆带有完整的 provenance（宿主来源、会话 ID、确认时间戳），便于后续追溯。
 
 ---
 
-## 3. Cold Path：记忆整理与生命周期治理
+## 3. Retrieval & Scope Isolation：强制身份边界与过滤器合取 (#80)
+
+- **核心目标**：防范调用方传入自定义业务过滤条件时越权穿透或丢失用户/项目隔离边界，严格保证跨租户数据隔离（Forbidden Leakage = 0）。
+- **机制与实现**：
+  - **Mandatory Scope（强制身份范围）**：由 `ScopeRouter.resolve_search_scope()` 依据选定用户及 `project`/`global`/`all` 生成基准范围，不可被外部替换或绕过；
+  - **Conjunction Composition（严格合取组合）**：通过 `compose_scope_filters()` 将 mandatory scope 与调用方传入的任意 business filters（含分类、嵌套 `AND`/`OR`/`NOT`）通过顶层 `AND` 强制合取；若调用方传入冲突的身份约束，逻辑合取返回 0 结果；
+  - **Production & Trace Parity**：生产环境 `search()` 与评测诊断 `search_with_trace()` 共享同一套范围解析与过滤器组合路径，并统一在底层推下 `add_lifecycle_exclusion()` 废弃排除过滤。
+
+---
+
+## 4. Cold Path：记忆整理与生命周期治理
 
 - **核心目标**：长期运行后，记忆库中不可避免地会出现重复事实、互相冲突的偏好（例如“采用 Poetry”与后来的“迁移到 uv”），以及过期失效的技术计划。
 - **机制与实现**：
