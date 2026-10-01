@@ -2,10 +2,13 @@
 
 import unittest
 from typing import Any, Dict, List
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+from mem0.memory.main import Memory
 
 from hippo_memory.config import HippoConfig
 from hippo_memory.engine import HippoEngine
+from hippo_memory.router import ScopeRouter, compose_scope_filters
 
 
 def _eval_filter(item: Dict[str, Any], filt: Dict[str, Any]) -> bool:
@@ -33,7 +36,10 @@ def _eval_filter(item: Dict[str, Any], filt: Dict[str, Any]) -> bool:
             actual_val = item.get(k)
             if actual_val is None and isinstance(meta, dict):
                 actual_val = meta.get(k)
-            if actual_val != v:
+            if isinstance(v, dict) and "in" in v:
+                if actual_val not in v["in"]:
+                    return False
+            elif actual_val != v:
                 return False
     return True
 
@@ -249,6 +255,104 @@ class TestScopeIsolation(unittest.TestCase):
             self.assertEqual(prod_ids, trace.final_stage_ids)
             self.assertEqual(prod_ids, [str(r["id"]) for r in trace_res])
             self.assertEqual(prod_call_filters, trace_call_filters)
+
+
+class TestMem0ScopeFilterContract(unittest.TestCase):
+    """Exercise composed filters through Mem0's real search/get_all validation layer."""
+
+    def setUp(self):
+        self.router = ScopeRouter(default_user_id="userA")
+
+    @staticmethod
+    def _bare_memory():
+        memory = object.__new__(Memory)
+        memory.api_version = "v1.1"
+        memory.reranker = None
+        memory._search_vector_store = MagicMock(return_value=[])
+        memory._get_all_from_vector_store = MagicMock(return_value=[])
+        return memory
+
+    def test_search_accepts_scope_all_plus_custom_or(self):
+        mandatory = self.router.resolve_search_scope(
+            user_id="userA",
+            scope="all",
+            project_id="proj1",
+        )
+        filters = compose_scope_filters(
+            mandatory,
+            {"OR": [{"category": "tech"}, {"category": "other"}]},
+        )
+
+        # Mem0 validates entity selectors before processing logical filters.
+        # The mandatory user must therefore remain visible at the root.
+        self.assertEqual(filters.get("user_id"), "userA")
+
+        memory = self._bare_memory()
+        with (
+            patch("mem0.memory.main.capture_event"),
+            patch("mem0.memory.main.display_first_run_notice"),
+        ):
+            Memory.search(memory, "query", filters=filters, top_k=5)
+
+        forwarded = memory._search_vector_store.call_args.args[1]
+        self.assertEqual(forwarded["user_id"], "userA")
+        self.assertEqual(
+            forwarded["agent_id"],
+            {"in": ["global", "proj1"]},
+        )
+        self.assertIn("OR", forwarded)
+
+    def test_get_all_accepts_project_scope_plus_custom_filter(self):
+        mandatory = self.router.resolve_search_scope(
+            user_id="userA",
+            scope="project",
+            project_id="proj1",
+        )
+        filters = compose_scope_filters(mandatory, {"category": "tech"})
+
+        self.assertEqual(filters.get("user_id"), "userA")
+
+        memory = self._bare_memory()
+        with (
+            patch("mem0.memory.main.capture_event"),
+            patch("mem0.memory.main.display_first_run_notice"),
+        ):
+            Memory.get_all(memory, filters=filters, top_k=5)
+
+        forwarded = memory._get_all_from_vector_store.call_args.args[0]
+        self.assertEqual(forwarded["user_id"], "userA")
+        self.assertEqual(
+            forwarded["AND"][0],
+            {"agent_id": "proj1"},
+        )
+
+    def test_conflicting_identity_stays_conjunctive_through_mem0(self):
+        mandatory = self.router.resolve_search_scope(
+            user_id="userA",
+            agent_id="proj1",
+        )
+        filters = compose_scope_filters(
+            mandatory,
+            {"user_id": "userB"},
+        )
+
+        memory = self._bare_memory()
+        with (
+            patch("mem0.memory.main.capture_event"),
+            patch("mem0.memory.main.display_first_run_notice"),
+        ):
+            Memory.search(memory, "query", filters=filters, top_k=5)
+
+        forwarded = memory._search_vector_store.call_args.args[1]
+        # Mandatory root identity survives normalization; the conflicting
+        # caller selector remains inside a separate OR clause and therefore
+        # cannot overwrite it.
+        self.assertEqual(forwarded["user_id"], "userA")
+        self.assertEqual(forwarded["agent_id"], "proj1")
+        self.assertEqual(
+            forwarded["OR"],
+            [{"user_id": "userB"}],
+        )
 
 
 if __name__ == "__main__":
