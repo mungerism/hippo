@@ -79,7 +79,7 @@
 
 为解决入队断电/崩溃导致的半成品目录假死与同事件重放丢弃：
 1. **进程间发布锁**：引入 `publish.lock`（基于 `fcntl.flock`），排他保护作业发布原子 `rename` 与 prune 墓碑协调，杜绝并发发布与清理竞态；
-2. **完整性校验**：定义 `validate_published_job` 校验 `job.json`（合法 JSON、非空 `id` 与 `session_id`）与 `transcript.jsonl`，对于非法目录统一隔离至 `quarantine/`；
+2. **完整性校验**：定义 `validate_published_job` 校验 `payload.json` 可构造 `CapturedPayload`、`payload.job_id` 与目录名一致，并校验 `state.json` 的 `state` 属于 `JobState`；非法目录统一隔离至 `quarantine/`；
 3. **断电自愈机制**：Worker 在 `drain()` 与常驻 `daemon()` 启动前自动执行 `recover_spool_publication()`，原子提升具备 `READY.json` 的孤儿 staging 为可消费作业，退役死 staging，支持断电后 same-event redelivery。
 
 ---
@@ -89,7 +89,7 @@
 ### 收益 (Positive Consequences)
 - **零延迟全天候消费**：常驻 Worker 实现真正的异步流式消费，会话结束后记忆秒级提纯，无需等待下一次交互；
 - **生产级运维闭环**：提供批量重试、状态修剪、服务启停、三态健康巡检（fallback / running / broken）的完整工具链；
-- **高并发零竞争与断电安全**：基于内核锁、原子 staging 重命名与 fsync，即使面对多 Agent 并发写入、断电崩溃、重试与清理交叉执行，依然具备数学级幂等与数据零丢失保证；
+- **高并发协调与断电恢复**：基于内核锁、原子 staging 重命名与 fail-closed fsync，在本地 Spool publication / prune / redelivery 边界内维持可恢复的幂等语义；不宣称跨 Qdrant 与 Spool 的分布式 exactly-once；
 - **极致轻量**：全量代码仅基于 Python 标准库与系统原生能力，未增加任何第三方重依赖。
 
 ### 负面影响与折衷 (Trade-offs)
