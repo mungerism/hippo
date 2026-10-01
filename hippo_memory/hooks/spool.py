@@ -7,7 +7,11 @@ import json
 import logging
 import os
 import re
+import shutil
+import signal
 import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -32,6 +36,38 @@ from hippo_memory.persistence_quality import (
     clean_transient_text,
     should_skip_session,
 )
+
+
+def fsync_dir(path: Path) -> None:
+    """Best-effort fsync on directory descriptor to flush directory entry mutations."""
+    if not path.exists():
+        return
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def durable_write_json(file_path: Path, data: Any, tmp_suffix: str = ".tmp") -> None:
+    """Write JSON data to disk durably with fsync on file, atomic rename, and fsync on parent directory."""
+    parent_dir = file_path.parent
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = parent_dir / f"{file_path.name}{tmp_suffix}"
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+    os.replace(tmp_path, file_path)
+    fsync_dir(parent_dir)
 
 # Backward compatibility alias
 TRANSIENT_PATTERNS = [
@@ -101,7 +137,7 @@ RETRYABLE_STATES: set[str] = {
 
 
 class SpoolStorage:
-    """Filesystem-based atomic spool queue and state store."""
+    """Filesystem-based atomic spool queue and state store with crash-resilient staging."""
 
     def __init__(self, base_dir: Optional[Path] = None):
         if base_dir is None:
@@ -109,49 +145,230 @@ class SpoolStorage:
             base_dir = DEFAULT_SPOOL_DIR
         self.base_dir = Path(base_dir).expanduser()
         self.jobs_dir = self.base_dir / "jobs"
+        self.staging_dir = self.base_dir / "staging"
+        self.quarantine_dir = self.base_dir / "quarantine"
         self.receipts_dir = self.base_dir / "receipts"
         self.tombstones_dir = self.base_dir / "tombstones"
         self.lock_path = self.base_dir / "worker.lock"
+        self.publish_lock_path = self.base_dir / "publish.lock"
 
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
+        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
         self.tombstones_dir.mkdir(parents=True, exist_ok=True)
 
-    def enqueue(self, payload: CapturedPayload) -> Tuple[bool, str]:
-        """Atomically enqueue a job using mkdir as create-if-absent.
+    @contextmanager
+    def publish_lock(self, timeout: float = 10.0):
+        """Cross-process mutual exclusion lock for atomic publication, prune, and recovery."""
+        start = time.time()
+        fd = os.open(str(self.publish_lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        acquired = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except (BlockingIOError, OSError):
+                    if time.time() - start >= timeout:
+                        raise TimeoutError(f"Timed out acquiring publish lock after {timeout}s")
+                    time.sleep(0.01)
+            yield
+        finally:
+            if acquired:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
+    def validate_published_job(self, path: Path) -> bool:
+        """Validate whether a published job directory is complete, intact, and well-formed."""
+        if not path.is_dir():
+            return False
+        payload_file = path / "payload.json"
+        state_file = path / "state.json"
+        if not payload_file.exists() or not state_file.exists():
+            return False
+
+        try:
+            with open(payload_file, "r", encoding="utf-8") as f:
+                p_data = json.load(f)
+            payload = CapturedPayload.from_dict(p_data)
+            if payload.job_id != path.name:
+                return False
+        except Exception:
+            return False
+
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                s_data = json.load(f)
+            if not isinstance(s_data, dict):
+                return False
+            st = s_data.get("state")
+            if st not in [s.value for s in JobState]:
+                return False
+        except Exception:
+            return False
+
+        return True
+
+    def quarantine_entry(self, path: Path, reason: str = "") -> Optional[Path]:
+        """Safely move an invalid, corrupted, or dead staging/final entry to quarantine directory."""
+        if not path.exists():
+            return None
+        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.quarantine_dir / f"{path.name}.{int(time.time() * 1000)}"
+        try:
+            os.replace(path, dest)
+            if reason:
+                try:
+                    with open(dest / ".quarantine_reason", "w", encoding="utf-8") as f:
+                        f.write(reason)
+                except Exception:
+                    pass
+            fsync_dir(path.parent)
+            fsync_dir(self.quarantine_dir)
+            logger.warning(f"Quarantined {path.name} -> {dest.name} (reason: {reason})")
+            return dest
+        except OSError as e:
+            logger.error(f"Failed to quarantine {path}: {e}")
+            return None
+
+    def _cleanup_staging_dir(self, staging_job_dir: Path, owner_fd: Optional[int] = None) -> None:
+        """Helper to unlock and delete staging directory upon rejected enqueue."""
+        if owner_fd is not None:
+            try:
+                fcntl.flock(owner_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(owner_fd)
+            except OSError:
+                pass
+        shutil.rmtree(staging_job_dir, ignore_errors=True)
+
+    def enqueue(self, payload: CapturedPayload) -> Tuple[bool, str]:
+        """Atomically prepare payload in staging and publish to final jobs directory.
+
+        Follows strict durable staging -> READY -> publication lock -> atomic rename -> parent fsync.
         Returns:
             (is_new, job_id)
         """
-        # Check tombstones for pruned job-id idempotency
+        # Quick non-authoritative tombstone pre-check
         tombstone_file = self.tombstones_dir / f"{payload.job_id}.json"
         if tombstone_file.exists():
             return False, payload.job_id
 
-        job_dir = self.jobs_dir / payload.job_id
+        # 1. Create unique staging directory
+        token = f"{payload.job_id}.{uuid.uuid4().hex[:8]}"
+        staging_job_dir = self.staging_dir / token
+        staging_job_dir.mkdir(parents=True, exist_ok=False)
+
+        owner_lock_path = staging_job_dir / ".owner.lock"
+        owner_fd = os.open(str(owner_lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            job_dir.mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
-            # Already queued or processed
-            return False, payload.job_id
+            fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            pass
 
-        # We own this job directory, write temporary payload then atomic rename
-        tmp_payload = job_dir / "payload.tmp"
-        final_payload = job_dir / "payload.json"
-        with open(tmp_payload, "w", encoding="utf-8") as f:
-            json.dump(payload.to_dict(), f, ensure_ascii=False, indent=2)
-        os.replace(tmp_payload, final_payload)
+        try:
+            # Test failpoint
+            fp = getattr(self, "_test_failpoint", None)
+            if fp == "before_fsync":
+                os.kill(os.getpid(), signal.SIGKILL)
 
-        # Initial state file
-        state_data = {
-            "state": JobState.PENDING.value,
-            "attempt": 0,
-            "updated_at": time.time(),
-        }
-        with open(job_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump(state_data, f, ensure_ascii=False, indent=2)
+            # Write payload.tmp -> payload.json and state.tmp -> state.json
+            payload_tmp = staging_job_dir / "payload.tmp"
+            payload_final = staging_job_dir / "payload.json"
+            with open(payload_tmp, "w", encoding="utf-8") as f:
+                json.dump(payload.to_dict(), f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(payload_tmp, payload_final)
 
-        return True, payload.job_id
+            state_data = {
+                "state": JobState.PENDING.value,
+                "attempt": 0,
+                "updated_at": time.time(),
+                "not_before": 0.0,
+            }
+            state_tmp = staging_job_dir / "state.tmp"
+            state_final = staging_job_dir / "state.json"
+            with open(state_tmp, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(state_tmp, state_final)
+
+            ready_tmp = staging_job_dir / "READY.tmp"
+            ready_final = staging_job_dir / "READY.json"
+            with open(ready_tmp, "w", encoding="utf-8") as f:
+                json.dump({"job_id": payload.job_id, "version": 1, "created_at": time.time()}, f)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(ready_tmp, ready_final)
+
+            fsync_dir(staging_job_dir)
+
+            if fp == "after_ready_before_rename":
+                os.kill(os.getpid(), signal.SIGKILL)
+
+            # 2. Enter publication critical section under publish_lock
+            with self.publish_lock():
+                # Authoritative tombstone check
+                if tombstone_file.exists():
+                    self._cleanup_staging_dir(staging_job_dir, owner_fd)
+                    owner_fd = None
+                    return False, payload.job_id
+
+                final_dir = self.jobs_dir / payload.job_id
+                if final_dir.exists():
+                    if self.validate_published_job(final_dir):
+                        # Existing accepted valid job: do not overwrite!
+                        self._cleanup_staging_dir(staging_job_dir, owner_fd)
+                        owner_fd = None
+                        return False, payload.job_id
+                    else:
+                        # Incomplete/corrupted ghost directory: quarantine it!
+                        self.quarantine_entry(final_dir, reason="Invalid/ghost final directory detected during enqueue")
+
+                if fp == "after_rename_before_parent_fsync":
+                    os.rename(staging_job_dir, final_dir)
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+                # Atomic rename staging -> final job directory
+                os.rename(staging_job_dir, final_dir)
+                fsync_dir(self.jobs_dir)
+
+                if fp == "after_parent_fsync_before_return":
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+                return True, payload.job_id
+
+        finally:
+            if owner_fd is not None:
+                try:
+                    fcntl.flock(owner_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                try:
+                    os.close(owner_fd)
+                except OSError:
+                    pass
 
     def load_payload(self, job_id: str) -> Optional[CapturedPayload]:
         """Load CapturedPayload from a job directory."""
@@ -274,18 +491,15 @@ class SpoolStorage:
         return True
 
     def complete_job(self, job_id: str, semantic_cursor: str, receipt: Dict[str, Any]) -> None:
-        """Mark job completed and record receipt for semantic deduplication."""
+        """Mark job completed and record receipt for semantic deduplication durably."""
         receipt_path = self.receipts_dir / f"{semantic_cursor}.json"
-        tmp_receipt = self.receipts_dir / f"{semantic_cursor}.tmp"
         data = {
             "job_id": job_id,
             "semantic_cursor": semantic_cursor,
             "processed_at": time.time(),
             "receipt": receipt,
         }
-        with open(tmp_receipt, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_receipt, receipt_path)
+        durable_write_json(receipt_path, data)
 
         self.update_state(job_id, JobState.COMPLETED, semantic_cursor=semantic_cursor)
 
@@ -462,19 +676,16 @@ class SpoolStorage:
                         pass
                     continue
 
-                # Write tombstone before deleting directory
+                # Write tombstone durably before deleting directory
                 tombstone_data = {
                     "job_id": job_id,
                     "final_state": disk_state or verify_state,
                     "pruned_at": now,
                     "semantic_cursor": st_disk.get("semantic_cursor") or st_verify.get("semantic_cursor"),
                 }
-                tmp_tombstone = self.tombstones_dir / f"{job_id}.tmp"
                 final_tombstone = self.tombstones_dir / f"{job_id}.json"
                 try:
-                    with open(tmp_tombstone, "w", encoding="utf-8") as f:
-                        json.dump(tombstone_data, f, ensure_ascii=False, indent=2)
-                    os.replace(tmp_tombstone, final_tombstone)
+                    durable_write_json(final_tombstone, tombstone_data)
                 except Exception as e:
                     logger.error(f"Failed to write tombstone for {job_id}: {e}")
                     try:
@@ -485,6 +696,7 @@ class SpoolStorage:
 
                 try:
                     shutil.rmtree(staging_entry)
+                    fsync_dir(self.jobs_dir)
                 except Exception as e:
                     logger.error(f"Failed to remove staging job dir {staging_entry}: {e}")
                     continue
@@ -496,6 +708,109 @@ class SpoolStorage:
             })
 
         return pruned
+
+    def recover_spool_publication(self, grace_period: float = 10.0) -> Tuple[int, int]:
+        """Recover prepared READY staging jobs or quarantine incomplete/corrupted entries.
+
+        Returns:
+            (recovered_count, quarantined_count)
+        """
+        recovered = 0
+        quarantined = 0
+        now = time.time()
+
+        # 1. Scan staging directories
+        if self.staging_dir.exists():
+            for entry in list(self.staging_dir.iterdir()):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+
+                owner_lock_file = entry / ".owner.lock"
+                is_locked = False
+                if owner_lock_file.exists():
+                    try:
+                        fd = os.open(str(owner_lock_file), os.O_RDWR)
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                        except (BlockingIOError, OSError):
+                            is_locked = True
+                        finally:
+                            os.close(fd)
+                    except OSError:
+                        pass
+
+                if is_locked:
+                    # Live publisher is still active, never touch regardless of age
+                    continue
+
+                # Check if it has a valid READY marker and intact files
+                ready_file = entry / "READY.json"
+                is_ready = False
+                job_id = None
+                if ready_file.exists():
+                    try:
+                        with open(ready_file, "r", encoding="utf-8") as f:
+                            r_data = json.load(f)
+                        job_id = r_data.get("job_id")
+                        if job_id and (entry / "payload.json").exists() and (entry / "state.json").exists():
+                            # Validate payload matches job_id
+                            with open(entry / "payload.json", "r", encoding="utf-8") as f:
+                                p_data = json.load(f)
+                            if p_data.get("job_id") == job_id:
+                                is_ready = True
+                    except Exception:
+                        is_ready = False
+
+                if is_ready and job_id:
+                    with self.publish_lock():
+                        # Check tombstone
+                        tombstone_file = self.tombstones_dir / f"{job_id}.json"
+                        if tombstone_file.exists():
+                            self.quarantine_entry(entry, reason="Job already tombstoned")
+                            quarantined += 1
+                            continue
+
+                        final_dir = self.jobs_dir / job_id
+                        if final_dir.exists():
+                            if self.validate_published_job(final_dir):
+                                # Already published in jobs_dir, clean up redundant staging
+                                shutil.rmtree(entry, ignore_errors=True)
+                                continue
+                            else:
+                                self.quarantine_entry(final_dir, reason="Invalid final directory during recovery")
+                                quarantined += 1
+
+                        # Publish to final_dir
+                        try:
+                            os.rename(entry, final_dir)
+                            fsync_dir(self.jobs_dir)
+                            recovered += 1
+                            logger.info(f"Successfully recovered READY staging job -> {job_id}")
+                        except OSError as e:
+                            logger.error(f"Failed to publish recovered staging job {job_id}: {e}")
+                else:
+                    # Incomplete staging: check grace period
+                    try:
+                        mtime = entry.stat().st_mtime
+                    except OSError:
+                        mtime = now
+                    if now - mtime >= grace_period:
+                        self.quarantine_entry(entry, reason="Incomplete staging abandoned after grace period")
+                        quarantined += 1
+
+        # 2. Scan jobs directory for invalid/ghost entries
+        if self.jobs_dir.exists():
+            for entry in list(self.jobs_dir.iterdir()):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                if not self.validate_published_job(entry):
+                    with self.publish_lock():
+                        if entry.exists() and not self.validate_published_job(entry):
+                            self.quarantine_entry(entry, reason="Invalid published job directory")
+                            quarantined += 1
+
+        return recovered, quarantined
 
     def is_semantic_cursor_processed(self, cursor: str) -> bool:
         """Check if this semantic state has already been successfully distilled."""
@@ -725,6 +1040,7 @@ class SpoolWorker:
             logger.debug("Another worker holds lock, skipping drain.")
             return 0
 
+        self.storage.recover_spool_publication()
         processed = 0
         try:
             while True:
@@ -790,6 +1106,7 @@ class SpoolWorker:
             pass
 
         try:
+            self.storage.recover_spool_publication()
             while not stop_requested:
                 self.storage.recover_expired_leases()
                 self.storage.coalesce_pending_jobs()

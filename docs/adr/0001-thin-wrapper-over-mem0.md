@@ -15,7 +15,13 @@
    - 基于本地 Git 目录的智能作用域路由（自动隔离项目级与全局记忆）。
    - 本地常驻单二进制 Qdrant Server 解决文件锁并发痛点。
    - 人类友好的极简命令行 CLI (`hippo`)。
+4. **实例级非侵入式适配与状态隔离 (修订 / Issue #80)**：
+   - 严禁对 Mem0 全局类（如 `Memory.entity_store`）进行类级 monkey-patch，杜绝多引擎实例间的全局状态污染与测试互相干扰；
+   - 采用实例级动态派生子类（`HippoInstanceMemory`）与专有适配器（`Mem0PersistenceAdapter`），仅拦截当前 `HippoEngine` 绑定的 `Memory` 实例；
+   - 引入所属权守卫（`holder.engine is adapter.engine`），各引擎实例拥有独立的 vector_store 拦截、observed versions 缓存及 skipped IDs 集合；
+   - 严格维系 ADR-0003 锁语义：同 namespace + 同 identity 跨实例安全互斥，异 namespace / 异 identity 互不干扰。
 
 ## 收益与影响 (Consequences)
 - **零心智负担**：Agent 与人类开发者可直接复用 Mem0 官方文档、官方 Prompts 与生态工具。
 - **极低升级成本**：当 Mem0 升级时，Hippo 可以无缝跟进最新特性，无架构包袱。
+- **多实例绝对隔离**：多租户并发、子智能体派生及自动化测试场景下，实例生命周期与拦截器完全解耦，消除状态泄漏隐患。

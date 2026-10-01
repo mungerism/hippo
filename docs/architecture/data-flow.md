@@ -43,7 +43,8 @@ flowchart TD
 - **核心目标**：在用户不进行显式总结的情况下，从完整的长对话历史中提炼未被言明的偏好与踩坑教训，同时建立严格的持久化质量门禁与防污染过滤（Issue #73）。
 - **机制与实现**：
   - 双事件触发：会话结束（Session End）与单轮响应完成（Turn Complete）；
-  - 宿主通过 `hippo hook capture` 管道将原始会话转储至本地 Spool 队列（SQLite），耗时 <50ms 即退出；
+  - 宿主通过 `hippo hook capture` 管道将原始会话转储至本地 Spool 队列（基于 POSIX 目录状态机），耗时 <50ms 即退出；
+  - **Durable Staging & Atomic Publish（原子发布与断电恢复，#80）**：摒弃有半成品风险的直接创建，先在 `staging/` 完整落盘并写入 `READY.json`，在跨进程 `publish.lock` 保护下原子重命名至 `jobs/` 并对父目录执行 `fsync`；Worker 启动前自动执行 `recover_spool_publication()` 自愈，杜绝 ghost 假死与同事件重放丢弃；
   - **Pre-check（蒸馏前预审）**：在调用 LLM 蒸馏前，`SpoolWorker` 审查会话是否为纯口头禅确认或纯运行时流水日志。无文件修改且无实质性目标的纯噪音会话被提前判定并跳过，节省 LLM Token；有任何实质性用户意图、修改文件或不确定的内容均保守 Fail-Open 放行；
   - **Prompt Hardening（防注入加固）**：基于 `SESSION_DISTILLATION_PROMPT_V2`，明确将会话转录作为不可信输入，严禁将 Transcript 中的 Prompt Injection / 指令覆盖持久化为规则；明确区分日志中的稳定架构配置（提取为干净事实）与运行时流水（忽略）；
   - **Post-audit（落库前质检）**：挂载在真实持久化调用入口（`HippoEngine._hook_memory_persistence` 拦截的 `vector_store.insert` 与 `update`）。只对 `source == "session_distillation"` 的后台写入生效，对提取后的记忆执行 `ACCEPT / DROP` 审查。被拒绝的项直接从批量写入中剔除或阻断更新，并记录到 `skipped_ids` 阻断 History 与 Entity 副作用，绝不篡改已生成向量的文本，且 Hot Path（`infer=False` / `add_explicit()`）零开销绕过；
@@ -52,7 +53,18 @@ flowchart TD
 
 ---
 
-## 3. Retrieval & Scope Isolation：强制身份边界与过滤器合取 (#80)
+## 3. Instance-Scoped Mem0 Adaptation & State Isolation：多实例绝对隔离 (#80)
+
+- **核心目标**：彻底消除对 Mem0 全局类的侵入性 monkey-patch，保障多引擎实例并发或串行运行时的状态与生命周期安全。
+- **机制与实现**：
+  - **Dynamic Subclassing（实例级动态派生）**：通过派生子类 `HippoInstanceMemory` 仅拦截当前引擎实例的 `entity_store` 属性，全局 `mem0.Memory` 保持 100% 纯净；
+  - **Ownership Guard（所属权守卫）**：在 `Mem0PersistenceAdapter` 中执行 `holder.engine is adapter.engine` 校验，非当前引擎持有的上下文锁对本实例完全透明；
+  - **State Locality（状态局部化）**：各引擎实例具有独立的 vector store 拦截闭包、版本重验快照、skipped IDs 集合及实体关联映射；
+  - **Coordinated Shared Locking（同身份互斥锁）**：同 namespace + 同 identity 的多实例依然遵循 ADR-0003 排他互斥；独立命名空间（如隔离测试）则并发完全无干扰。
+
+---
+
+## 4. Retrieval & Scope Isolation：强制身份边界与过滤器合取 (#80)
 
 - **核心目标**：防范调用方传入自定义业务过滤条件时越权穿透或丢失用户/项目隔离边界，严格保证跨租户数据隔离（Forbidden Leakage = 0）。
 - **机制与实现**：
@@ -62,7 +74,7 @@ flowchart TD
 
 ---
 
-## 4. Cold Path：记忆整理与生命周期治理
+## 5. Cold Path：记忆整理与生命周期治理
 
 - **核心目标**：长期运行后，记忆库中不可避免地会出现重复事实、互相冲突的偏好（例如“采用 Poetry”与后来的“迁移到 uv”），以及过期失效的技术计划。
 - **机制与实现**：
