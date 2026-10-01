@@ -206,12 +206,8 @@ class _LazyWriteLockHolder:
                 continue
 
             curr_payload = getattr(curr, "payload", None)
-            if type(curr).__name__ == "MagicMock" and type(curr_payload).__name__ == "MagicMock":
-                continue
             if not isinstance(curr_payload, Mapping):
                 curr_payload = curr if isinstance(curr, Mapping) else {}
-            if type(curr_payload).__name__ == "MagicMock":
-                continue
 
             if status_of(curr_payload) == STATUS_SUPERSEDED:
                 logger.warning(

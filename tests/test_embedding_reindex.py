@@ -137,11 +137,20 @@ class TestPayloadMatchingAndHelpers(unittest.TestCase):
         self.assertEqual(attempts, 1)
 
 
+def _make_valid_collection_info(dims: int = 768, distance: str = "Cosine", points_count: int = 0) -> SimpleNamespace:
+    mock_vectors = SimpleNamespace(size=dims, distance=distance)
+    mock_sparse = {"bm25": SimpleNamespace(modifier="idf")}
+    mock_params = SimpleNamespace(vectors=mock_vectors, sparse_vectors=mock_sparse)
+    mock_config = SimpleNamespace(params=mock_params)
+    return SimpleNamespace(config=mock_config, points_count=points_count)
+
+
 class TestEmbeddingMigratorWorkflow(unittest.TestCase):
     """Comprehensive test suite covering the full Reindex/Migration workflow."""
 
     def setUp(self):
         self.mock_client = MagicMock()
+        self.mock_client.get_collection.return_value = _make_valid_collection_info(dims=768, points_count=42)
         self.config = HippoConfig(user_id="test-user")
         self.migrator = EmbeddingMigrator(config=self.config, client=self.mock_client)
 
