@@ -14,7 +14,7 @@
 
 ## Checklist
 - [ ] My code adheres to the project coding and architecture guidelines
-- [ ] `uv run python -m unittest discover -s tests -v` passes cleanly with all tests green
+- [ ] `uv run python -m unittest discover -s tests -t . -v` passes cleanly with all tests green
 - [ ] `uvx ruff check --select E9,F63,F7,F82 hippo_memory tests` reports no syntax errors
 - [ ] Relevant documentation under `docs/` is updated if behavior or contracts changed
 - [ ] `pnpm --dir docs run build` passes with zero broken links
