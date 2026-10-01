@@ -167,20 +167,65 @@ def compose_scope_filters(
     mandatory_scope: Dict[str, Any],
     custom_filter: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Compose mandatory scope boundaries with caller-supplied custom business filters.
+    """Compose mandatory scope with caller filters while preserving Mem0's entity-root contract.
 
-    Contract (Issue #80 Decision 4):
-        - custom_filter can only narrow the results, cannot replace or broaden mandatory scope.
-        - If custom_filter is empty, returns a defensive copy of mandatory_scope.
-        - If custom_filter is provided, returns conjunction {"AND": [deepcopy(mandatory_scope), deepcopy(custom_filter)]}.
-        - Does not mutate input parameters.
+    Mem0 validates that user_id/agent_id/run_id exists at the top level before
+    it expands logical operators. Therefore a plain top-level AND containing
+    mandatory_scope is invalid even though it is logically correct.
+
+    Keep the mandatory user_id at the root, normalize Hippo's internal
+    scope=all OR into an agent_id "in" condition, and wrap the caller filter
+    in a single-item OR. The OR wrapper prevents Mem0's top-level AND
+    flattener from allowing caller identity keys to overwrite mandatory
+    identity keys while preserving nested AND/OR/NOT semantics.
     """
     if not custom_filter:
         return deepcopy(mandatory_scope)
 
+    scope_copy = deepcopy(mandatory_scope)
+    custom_copy = deepcopy(custom_filter)
+
+    uid = scope_copy.pop("user_id", None)
+    if uid is None:
+        return {
+            "AND": [
+                scope_copy,
+                {"OR": [custom_copy]},
+            ]
+        }
+
+    scope_clause: Dict[str, Any] = {}
+    mandatory_or = scope_copy.pop("OR", None)
+    if mandatory_or is not None:
+        agent_ids: list[Any] = []
+        if isinstance(mandatory_or, list):
+            for condition in mandatory_or:
+                if (
+                    isinstance(condition, dict)
+                    and set(condition) == {"agent_id"}
+                    and not isinstance(condition["agent_id"], dict)
+                ):
+                    agent_ids.append(condition["agent_id"])
+                else:
+                    agent_ids = []
+                    break
+        if agent_ids:
+            scope_clause["agent_id"] = {"in": agent_ids}
+        else:
+            scope_clause["OR"] = mandatory_or
+
+    scope_clause.update(scope_copy)
+
+    and_conditions: list[Dict[str, Any]] = []
+    if scope_clause:
+        and_conditions.append(scope_clause)
+
+    # The singleton OR is intentional. Mem0 flattens top-level AND conditions
+    # before handing them to the vector store; without this wrapper, caller
+    # user_id/agent_id fields could overwrite the mandatory identity.
+    and_conditions.append({"OR": [custom_copy]})
+
     return {
-        "AND": [
-            deepcopy(mandatory_scope),
-            deepcopy(custom_filter),
-        ]
+        "user_id": uid,
+        "AND": and_conditions,
     }
