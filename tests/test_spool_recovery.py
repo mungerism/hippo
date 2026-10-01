@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -240,6 +241,94 @@ class TestSpoolRecovery(unittest.TestCase):
         # Re-enqueuing must be rejected due to tombstone
         is_new, _ = self.storage.enqueue(payload)
         self.assertFalse(is_new)
+
+    def test_durability_failure_does_not_report_success(self):
+        """Failure to fsync the final jobs directory must fail closed, never return accepted=True."""
+        from hippo_memory.hooks import spool as spool_module
+
+        payload = self._sample_payload("job-fsync-fail")
+        real_fsync_dir = spool_module.fsync_dir
+
+        def fail_final_parent(path):
+            if Path(path) == self.storage.jobs_dir:
+                raise OSError("simulated jobs_dir fsync failure")
+            return real_fsync_dir(path)
+
+        with patch("hippo_memory.hooks.spool.fsync_dir", side_effect=fail_final_parent):
+            with self.assertRaises(OSError):
+                self.storage.enqueue(payload)
+
+        # Rename may already be visible in the running filesystem, but the failed
+        # call must never acknowledge durable acceptance to its caller.
+        final_dir = self.storage.jobs_dir / payload.job_id
+        self.assertTrue(final_dir.exists())
+        self.assertTrue(self.storage.validate_published_job(final_dir))
+
+        # A redelivery sees the complete final job and is deduplicated safely.
+        is_new, _ = self.storage.enqueue(payload)
+        self.assertFalse(is_new)
+
+    def test_owner_lock_failure_aborts_staging(self):
+        """Publisher ownership lock failure must abort instead of leaving an unprotected live staging writer."""
+        payload = self._sample_payload("job-owner-lock-fail")
+
+        with patch("hippo_memory.hooks.spool.fcntl.flock", side_effect=OSError("lock unavailable")):
+            with self.assertRaises(OSError):
+                self.storage.enqueue(payload)
+
+        self.assertFalse((self.storage.jobs_dir / payload.job_id).exists())
+        self.assertEqual(list(self.storage.staging_dir.iterdir()), [])
+
+    def test_prune_blocks_concurrent_enqueue_and_retry_until_tombstone_is_durable(self):
+        """Prune/enqueue/retry for the same job coordinate under publish.lock without a resurrection window."""
+        from hippo_memory.hooks import spool as spool_module
+
+        job_id = "job-prune-concurrent"
+        payload = self._sample_payload(job_id)
+        self.storage.enqueue(payload)
+        self.storage.update_state(job_id, JobState.DEAD)
+
+        entered_tombstone = threading.Event()
+        allow_tombstone = threading.Event()
+        real_durable_write = spool_module.durable_write_json
+
+        def blocking_durable_write(path, data, tmp_suffix=".tmp"):
+            if Path(path) == self.storage.tombstones_dir / f"{job_id}.json":
+                entered_tombstone.set()
+                self.assertTrue(allow_tombstone.wait(timeout=5.0))
+            return real_durable_write(path, data, tmp_suffix=tmp_suffix)
+
+        prune_result = []
+        enqueue_result = []
+        retry_result = []
+
+        with patch("hippo_memory.hooks.spool.durable_write_json", side_effect=blocking_durable_write):
+            prune_thread = threading.Thread(
+                target=lambda: prune_result.extend(self.storage.prune_jobs(states=[JobState.DEAD.value]))
+            )
+            prune_thread.start()
+            self.assertTrue(entered_tombstone.wait(timeout=5.0))
+
+            enqueue_thread = threading.Thread(target=lambda: enqueue_result.append(self.storage.enqueue(payload)))
+            retry_thread = threading.Thread(target=lambda: retry_result.append(self.storage.retry_job(job_id)))
+            enqueue_thread.start()
+            retry_thread.start()
+
+            # Both operations must be waiting on publish.lock while prune owns it.
+            time.sleep(0.1)
+            self.assertTrue(enqueue_thread.is_alive())
+            self.assertTrue(retry_thread.is_alive())
+
+            allow_tombstone.set()
+            prune_thread.join(timeout=5.0)
+            enqueue_thread.join(timeout=5.0)
+            retry_thread.join(timeout=5.0)
+
+        self.assertEqual(len(prune_result), 1)
+        self.assertEqual(enqueue_result, [(False, job_id)])
+        self.assertEqual(retry_result, [False])
+        self.assertTrue((self.storage.tombstones_dir / f"{job_id}.json").exists())
+        self.assertFalse((self.storage.jobs_dir / job_id).exists())
 
     def test_receipt_crash_window_deduplication(self):
         """If crash occurs after receipt is durable but before job state is terminal, semantic cursor dedup prevents redelivery."""
