@@ -169,18 +169,16 @@ def compose_scope_filters(
 ) -> Dict[str, Any]:
     """Compose mandatory scope without violating Mem0's filter normalization contract.
 
-    Mem0 requires an entity selector at the top level before logical operators
-    are expanded, and its telemetry path assumes top-level entity IDs are
-    scalar strings. Keep the mandatory user_id at the root. Project/global
-    scopes may also keep their scalar agent_id at the root; scope=all is
-    represented as NOT(agent_id NIN allowed_ids), which is equivalent to
-    agent_id IN allowed_ids without placing a structured agent_id value at the
-    root.
+    Mem0 requires a top-level entity selector before logical operators are
+    expanded. It also flattens top-level AND conditions, which means caller
+    user_id/agent_id keys can overwrite mandatory identity fields if the
+    conjunction is expressed directly at the root.
 
-    Caller filters are wrapped in a single-item OR beneath AND. This preserves
-    their exact nested AND/OR/NOT semantics while preventing caller user_id or
-    agent_id keys from overwriting mandatory root identity fields during
-    Mem0's top-level AND flattening.
+    Keep mandatory user_id at the root and place the complete mandatory scope
+    without user_id AND custom_filter expression inside a single-item OR.
+    Mem0 preserves that nested AND through normalization, so arbitrary nested
+    AND/OR/NOT filters remain conjunctive with the selected project/global
+    scope and cannot widen caller identity.
     """
     if not custom_filter:
         return deepcopy(mandatory_scope)
@@ -190,46 +188,30 @@ def compose_scope_filters(
 
     uid = scope_copy.pop("user_id", None)
     if uid is None:
+        # Hippo's search router always supplies user_id today. Keep a
+        # defensive fallback for non-router callers rather than fabricating an
+        # identity selector.
         return {
-            "AND": [
-                scope_copy,
-                {"OR": [custom_copy]},
+            "OR": [
+                {
+                    "AND": [
+                        scope_copy,
+                        custom_copy,
+                    ]
+                }
             ]
         }
 
-    result: Dict[str, Any] = {"user_id": uid}
-
-    agent_id = scope_copy.pop("agent_id", None)
-    if agent_id is not None and not isinstance(agent_id, dict):
-        result["agent_id"] = agent_id
-
-    mandatory_or = scope_copy.pop("OR", None)
-    if mandatory_or is not None:
-        agent_ids: list[Any] = []
-        if isinstance(mandatory_or, list):
-            for condition in mandatory_or:
-                if (
-                    isinstance(condition, dict)
-                    and set(condition) == {"agent_id"}
-                    and not isinstance(condition["agent_id"], dict)
-                ):
-                    agent_ids.append(condition["agent_id"])
-                else:
-                    agent_ids = []
-                    break
-        if agent_ids:
-            # Mem0 telemetry calls .encode() on top-level agent_id values, so
-            # keep this structured membership test under a logical operator.
-            result["NOT"] = [{"agent_id": {"nin": agent_ids}}]
-        else:
-            result.setdefault("AND", []).append({"OR": mandatory_or})
-
+    conditions: list[Dict[str, Any]] = []
     if scope_copy:
-        result.setdefault("AND", []).append(scope_copy)
+        conditions.append(scope_copy)
+    conditions.append(custom_copy)
 
-    # The singleton OR is intentional. Mem0 flattens top-level AND conditions
-    # before handing them to the vector store; without this wrapper, caller
-    # user_id/agent_id fields could overwrite the mandatory identity.
-    result.setdefault("AND", []).append({"OR": [custom_copy]})
-
-    return result
+    return {
+        "user_id": uid,
+        "OR": [
+            {
+                "AND": conditions,
+            }
+        ],
+    }
