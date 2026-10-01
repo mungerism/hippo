@@ -39,21 +39,18 @@ from hippo_memory.persistence_quality import (
 
 
 def fsync_dir(path: Path) -> None:
-    """Best-effort fsync on directory descriptor to flush directory entry mutations."""
+    """Fsync a directory entry mutation and fail closed on durability errors."""
     if not path.exists():
-        return
+        raise FileNotFoundError(path)
+    fd = os.open(str(path), os.O_RDONLY)
     try:
-        fd = os.open(str(path), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        pass
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def durable_write_json(file_path: Path, data: Any, tmp_suffix: str = ".tmp") -> None:
-    """Write JSON data to disk durably with fsync on file, atomic rename, and fsync on parent directory."""
+    """Write JSON durably; any fsync failure is a failed durability operation."""
     parent_dir = file_path.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = parent_dir / f"{file_path.name}{tmp_suffix}"
@@ -61,10 +58,7 @@ def durable_write_json(file_path: Path, data: Any, tmp_suffix: str = ".tmp") -> 
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
+        os.fsync(f.fileno())
 
     os.replace(tmp_path, file_path)
     fsync_dir(parent_dir)
@@ -237,7 +231,7 @@ class SpoolStorage:
             return dest
         except OSError as e:
             logger.error(f"Failed to quarantine {path}: {e}")
-            return None
+            raise
 
     def _cleanup_staging_dir(self, staging_job_dir: Path, owner_fd: Optional[int] = None) -> None:
         """Helper to unlock and delete staging directory upon rejected enqueue."""
@@ -274,7 +268,10 @@ class SpoolStorage:
         try:
             fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            pass
+            os.close(owner_fd)
+            owner_fd = None
+            shutil.rmtree(staging_job_dir, ignore_errors=True)
+            raise
 
         try:
             # Test failpoint
@@ -288,10 +285,7 @@ class SpoolStorage:
             with open(payload_tmp, "w", encoding="utf-8") as f:
                 json.dump(payload.to_dict(), f, ensure_ascii=False, indent=2)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+                os.fsync(f.fileno())
             os.replace(payload_tmp, payload_final)
 
             state_data = {
@@ -305,10 +299,7 @@ class SpoolStorage:
             with open(state_tmp, "w", encoding="utf-8") as f:
                 json.dump(state_data, f, ensure_ascii=False, indent=2)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+                os.fsync(f.fileno())
             os.replace(state_tmp, state_final)
 
             ready_tmp = staging_job_dir / "READY.tmp"
@@ -316,10 +307,7 @@ class SpoolStorage:
             with open(ready_tmp, "w", encoding="utf-8") as f:
                 json.dump({"job_id": payload.job_id, "version": 1, "created_at": time.time()}, f)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+                os.fsync(f.fileno())
             os.replace(ready_tmp, ready_final)
 
             fsync_dir(staging_job_dir)
@@ -553,33 +541,33 @@ class SpoolStorage:
             return False
 
     def retry_job(self, job_id: str, allowed_states: Optional[set[str]] = None) -> bool:
-        """Reset a job back to pending state, clearing stale execution state.
-
-        Only jobs in retryable states (by default DEAD or SKIPPED) can be retried.
-        Returns False if job does not exist or its current state is not retryable.
-        """
-        st = self.load_state(job_id)
-        if not st:
-            return False
+        """Reset a terminal job to pending under the publication coordination lock."""
         valid_states = allowed_states if allowed_states is not None else RETRYABLE_STATES
-        current_state = st.get("state")
-        if current_state not in valid_states:
-            logger.warning(
-                f"Cannot retry job {job_id} in state '{current_state}'; only {valid_states} allowed"
-            )
-            return False
+        with self.publish_lock():
+            job_dir = self.jobs_dir / job_id
+            tombstone_file = self.tombstones_dir / f"{job_id}.json"
+            if tombstone_file.exists() or not job_dir.exists():
+                return False
 
-        self.update_state(
-            job_id,
-            JobState.PENDING,
-            attempt=0,
-            not_before=0.0,
-            error=None,
-            worker_pid=None,
-            claimed_at=None,
-            skip_reason=None,
-        )
-        return True
+            st = self.load_state(job_id)
+            current_state = st.get("state")
+            if current_state not in valid_states:
+                logger.warning(
+                    f"Cannot retry job {job_id} in state '{current_state}'; only {valid_states} allowed"
+                )
+                return False
+
+            self.update_state(
+                job_id,
+                JobState.PENDING,
+                attempt=0,
+                not_before=0.0,
+                error=None,
+                worker_pid=None,
+                claimed_at=None,
+                skip_reason=None,
+            )
+            return True
 
     def retry_all_dead(self, dry_run: bool = False) -> List[str]:
         """Find all DEAD jobs and reset them to PENDING state."""
@@ -639,67 +627,53 @@ class SpoolStorage:
                 if now - updated_at < older_than_seconds:
                     continue
 
-            # Secondary verification and atomic deletion via staging directory to prevent race condition
+            # Publication lock coordinates prune with enqueue/recovery/retry for this namespace.
             if not dry_run:
-                st_verify = self.load_state(job_id)
-                verify_state = st_verify.get("state")
-                if verify_state not in target_states:
-                    logger.warning(
-                        f"Job {job_id} state changed from {current_state} to {verify_state} during prune, skipping"
-                    )
-                    continue
+                with self.publish_lock():
+                    if not entry.exists():
+                        continue
 
-                staging_entry = self.jobs_dir / f".prune_{job_id}_{os.getpid()}_{int(now * 1000)}"
-                try:
-                    entry.rename(staging_entry)
-                except OSError:
-                    # Concurrently moved, deleted, or claimed
-                    continue
+                    st_verify = self.load_state(job_id)
+                    verify_state = st_verify.get("state")
+                    if verify_state not in target_states:
+                        logger.warning(
+                            f"Job {job_id} state changed from {current_state} to {verify_state} during prune, skipping"
+                        )
+                        continue
 
-                state_file = staging_entry / "state.json"
-                st_disk = {}
-                if state_file.exists():
+                    # Tombstone becomes durable BEFORE the canonical job path is moved.
+                    # If the process crashes after this point, redelivery/retry remains blocked.
+                    tombstone_data = {
+                        "job_id": job_id,
+                        "final_state": verify_state,
+                        "pruned_at": now,
+                        "semantic_cursor": st_verify.get("semantic_cursor"),
+                    }
+                    final_tombstone = self.tombstones_dir / f"{job_id}.json"
                     try:
-                        with open(state_file, "r", encoding="utf-8") as f:
-                            st_disk = json.load(f)
-                    except Exception:
-                        pass
+                        durable_write_json(final_tombstone, tombstone_data)
+                    except Exception as e:
+                        logger.error(f"Failed to write tombstone for {job_id}: {e}")
+                        continue
 
-                disk_state = st_disk.get("state")
-                if disk_state and disk_state not in target_states:
-                    logger.warning(
-                        f"Job {job_id} state changed from {current_state} to {disk_state} during prune, skipping"
-                    )
+                    staging_entry = self.jobs_dir / f".prune_{job_id}_{os.getpid()}_{int(now * 1000)}"
                     try:
-                        staging_entry.rename(entry)
-                    except OSError:
-                        pass
-                    continue
+                        entry.rename(staging_entry)
+                        fsync_dir(self.jobs_dir)
+                    except OSError as e:
+                        # Tombstone is already durable. Keep it fail-closed rather than
+                        # permitting redelivery against an uncertain prune state.
+                        logger.error(f"Failed to move job {job_id} after durable tombstone: {e}")
+                        continue
 
-                # Write tombstone durably before deleting directory
-                tombstone_data = {
-                    "job_id": job_id,
-                    "final_state": disk_state or verify_state,
-                    "pruned_at": now,
-                    "semantic_cursor": st_disk.get("semantic_cursor") or st_verify.get("semantic_cursor"),
-                }
-                final_tombstone = self.tombstones_dir / f"{job_id}.json"
-                try:
-                    durable_write_json(final_tombstone, tombstone_data)
-                except Exception as e:
-                    logger.error(f"Failed to write tombstone for {job_id}: {e}")
                     try:
-                        staging_entry.rename(entry)
-                    except OSError:
-                        pass
-                    continue
-
-                try:
-                    shutil.rmtree(staging_entry)
-                    fsync_dir(self.jobs_dir)
-                except Exception as e:
-                    logger.error(f"Failed to remove staging job dir {staging_entry}: {e}")
-                    continue
+                        shutil.rmtree(staging_entry)
+                        fsync_dir(self.jobs_dir)
+                    except Exception as e:
+                        # Hidden .prune entry may remain, but durable tombstone preserves
+                        # idempotency and later maintenance can safely remove it.
+                        logger.error(f"Failed to remove pruned job dir {staging_entry}: {e}")
+                        continue
 
             pruned.append({
                 "job_id": job_id,
