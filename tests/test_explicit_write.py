@@ -356,10 +356,11 @@ class TestExplicitWriteIntegration(unittest.TestCase):
         self.assertEqual(metadata.get("category"), "decision")
 
         search_results = self.engine.search(
-            query="真实存储零LLM调用",
+            query=test_fact,
             scope="project",
             project_id=test_proj,
             limit=5,
+            threshold=0.0,
         )
         self.assertIn(saved_id, [result.get("id") for result in search_results])
 
