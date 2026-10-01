@@ -54,7 +54,7 @@ uv run python -m compileall hippo_memory tests
 uvx ruff check --select E9,F63,F7,F82 hippo_memory tests
 
 # 2. 运行全量单元与离线契约测试
-uv run python -m unittest discover -s tests -v
+uv run python -m unittest discover -s tests -t . -v
 
 # 3. 验证构建包完整性
 uv build
@@ -63,6 +63,19 @@ uv build
 pnpm --dir docs install
 pnpm --dir docs run build
 ```
+
+默认测试会在导入 Hippo 配置前切换到临时 `HIPPO_HOME`、屏蔽本地/项目 dotenv 与 provider 凭据，并拒绝未声明的网络访问。
+
+真实 Qdrant 契约测试单独启用，只允许显式声明的本机 loopback 目标：
+
+```bash
+HIPPO_ENABLE_REAL_QDRANT_TESTS=1 \
+HIPPO_TEST_QDRANT_HOST=127.0.0.1 \
+HIPPO_TEST_QDRANT_PORT=6333 \
+uv run python -m unittest tests.test_explicit_write.TestExplicitWriteIntegration -v
+```
+
+该测试使用 `hippo_test_owned_<uuid>` 独占 collection 前缀、临时 history DB 和 deterministic LLM/embedder，并在结束时只清理本次测试拥有的 collection。
 
 ---
 
