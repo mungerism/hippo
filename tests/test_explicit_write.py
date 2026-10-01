@@ -2,25 +2,26 @@
 
 import unittest
 from unittest.mock import MagicMock, patch
+from hippo_memory.config import HippoConfig
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
 
 
-def is_qdrant_running() -> bool:
-    """Check if local Qdrant server is available for integration tests."""
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:6333/healthz", timeout=1) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+import os
+from tests.test_support import allow_network
+
+
+def is_real_qdrant_test_enabled() -> bool:
+    """Real storage integration is opt-in via HIPPO_ENABLE_REAL_QDRANT_TESTS."""
+    return os.getenv("HIPPO_ENABLE_REAL_QDRANT_TESTS") == "1"
 
 
 class TestExplicitWrite(unittest.TestCase):
     """Test suite for HippoEngine.add_explicit and tightened MCP add_memory tool."""
 
     def setUp(self):
-        self.engine = HippoEngine()
+        with patch("hippo_memory.config.ensure_qdrant_server"):
+            self.engine = HippoEngine()
         self.mock_mem0 = MagicMock()
         self.mock_mem0.add.return_value = {
             "results": [{"id": "mem-uuid-123", "memory": "项目使用 uv 进行依赖管理", "event": "ADD"}]
@@ -258,58 +259,89 @@ class TestExplicitWrite(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(is_qdrant_running(), "Integration test requires local Qdrant server")
+import tempfile
+import uuid
+
+
+@unittest.skipUnless(
+    is_real_qdrant_test_enabled(),
+    "Opt-in integration test requires HIPPO_ENABLE_REAL_QDRANT_TESTS=1 and isolated target configuration",
+)
 class TestExplicitWriteIntegration(unittest.TestCase):
     """Real storage integration test verifying zero LLM calls and readback via search/get."""
 
     def setUp(self):
-        self.engine = HippoEngine()
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.test_col = f"hippo_test_owned_{uuid.uuid4().hex[:8]}"
+        self.orig_col = os.environ.get("HIPPO_COLLECTION_NAME")
+        os.environ["HIPPO_COLLECTION_NAME"] = self.test_col
+
+        with allow_network():
+            cfg = HippoConfig()
+            self.engine = HippoEngine(config=cfg)
         self.created_ids = []
 
     def tearDown(self):
-        for mid in self.created_ids:
-            try:
-                self.engine.delete(mid)
-            except Exception:
-                pass
+        try:
+            with allow_network():
+                for mid in self.created_ids:
+                    try:
+                        self.engine.delete(mid)
+                    except Exception:
+                        pass
+                # Safe cleanup of the isolated test-owned collection
+                try:
+                    if hasattr(self.engine, "_client") and self.engine._client:
+                        if self.test_col.startswith("hippo_test_owned_"):
+                            self.engine._client.delete_collection(self.test_col)
+                except Exception:
+                    pass
+        finally:
+            if self.orig_col is not None:
+                os.environ["HIPPO_COLLECTION_NAME"] = self.orig_col
+            else:
+                os.environ.pop("HIPPO_COLLECTION_NAME", None)
+            self.tmp_dir.cleanup()
 
     def test_real_write_zero_llm_and_readback(self):
         """Verify real infer=False write triggers 0 LLM calls and can be read back via get and search."""
         test_proj = "integration_test_explicit_write"
         test_fact = "[Integration Test] 验证真实存储零LLM调用与读回"
 
-        # Spy on LLM generate_response seam to prove zero LLM calls
-        with patch.object(self.engine.memory.llm, "generate_response", wraps=self.engine.memory.llm.generate_response) as spy_llm:
-            res = self.engine.add_explicit(
-                text=test_fact,
+        with allow_network():
+            # Spy on LLM generate_response seam to prove zero LLM calls
+            with patch.object(self.engine.memory.llm, "generate_response", wraps=self.engine.memory.llm.generate_response) as spy_llm:
+                res = self.engine.add_explicit(
+                    text=test_fact,
+                    scope="project",
+                    project_id=test_proj,
+                    category="decision",
+                )
+                saved_id = res["id"]
+                self.created_ids.append(saved_id)
+
+                # Assert zero LLM calls
+                self.assertEqual(spy_llm.call_count, 0)
+
+            # Verify read-back via get
+            fetched = self.engine.get(saved_id)
+            self.assertIsNotNone(fetched)
+            self.assertEqual(fetched.get("memory"), test_fact)
+            metadata = fetched.get("metadata", {})
+            self.assertEqual(metadata.get("source"), "agent_explicit")
+            self.assertEqual(metadata.get("category"), "decision")
+
+            # Verify read-back via search
+            search_results = self.engine.search(
+                query="真实存储零LLM调用",
                 scope="project",
                 project_id=test_proj,
-                category="decision",
+                limit=5,
             )
-            saved_id = res["id"]
-            self.created_ids.append(saved_id)
-
-            # Assert zero LLM calls
-            self.assertEqual(spy_llm.call_count, 0)
-
-        # Verify read-back via get
-        fetched = self.engine.get(saved_id)
-        self.assertIsNotNone(fetched)
-        self.assertEqual(fetched.get("memory"), test_fact)
-        metadata = fetched.get("metadata", {})
-        self.assertEqual(metadata.get("source"), "agent_explicit")
-        self.assertEqual(metadata.get("category"), "decision")
-
-        # Verify read-back via search
-        search_results = self.engine.search(
-            query="真实存储零LLM调用",
-            scope="project",
-            project_id=test_proj,
-            limit=5,
-        )
-        found_ids = [r.get("id") for r in search_results]
-        self.assertIn(saved_id, found_ids)
+            found_ids = [r.get("id") for r in search_results]
+            self.assertIn(saved_id, found_ids)
 
 
 if __name__ == "__main__":
     unittest.main()
+

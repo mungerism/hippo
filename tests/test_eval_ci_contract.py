@@ -217,16 +217,14 @@ class TestEvalCIContract(unittest.TestCase):
 
     def test_runner_cli_blocks_on_baseline_regression(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 1. Run baseline run to get valid manifest
-            report_path = Path(tmpdir) / "gold_run.json"
+            # 1. Run baseline run to get valid manifest with fast smoke fixture
+            report_path = Path(tmpdir) / "smoke_run.json"
             exit_code = runner_main(
                 [
-                    "--dataset",
-                    str(GOLD_DATASET_PATH),
                     "--output-dir",
                     tmpdir,
                     "--report-name",
-                    "gold_run",
+                    "smoke_run",
                 ]
             )
             self.assertEqual(exit_code, 0)
@@ -240,8 +238,6 @@ class TestEvalCIContract(unittest.TestCase):
             # 3. Runner against high baseline should detect regression and return exit code 2
             exit_code_regression = runner_main(
                 [
-                    "--dataset",
-                    str(GOLD_DATASET_PATH),
                     "--baseline",
                     str(baseline_path),
                     "--output-dir",
@@ -258,8 +254,6 @@ class TestEvalCIContract(unittest.TestCase):
 
             exit_code = runner_main(
                 [
-                    "--dataset",
-                    str(GOLD_DATASET_PATH),
                     "--baseline",
                     str(bad_baseline_path),
                     "--output-dir",

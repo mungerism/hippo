@@ -252,8 +252,6 @@ class EmbeddingMigrator:
             return
 
         info = self.client.get_collection(collection_name)
-        if type(info).__name__ == "MagicMock":
-            return
 
         params = getattr(getattr(info, "config", None), "params", None)
         if params is None:

@@ -134,8 +134,8 @@ class Mem0PersistenceAdapter:
         self.mem._hippo_adapter = self
 
         mem_type = type(self.mem)
-        # Check if already a dynamic subclass for this instance (skip subclassing MagicMock)
-        if not getattr(mem_type, "_is_hippo_instance_subclass", False) and mem_type.__name__ != "MagicMock":
+        # Check if already a dynamic subclass for this instance
+        if not getattr(mem_type, "_is_hippo_instance_subclass", False):
             orig_entity_store_prop = getattr(mem_type, "entity_store", None)
 
             # Create an instance-specific subclass
@@ -169,7 +169,7 @@ class Mem0PersistenceAdapter:
             self.hook_entity_store(self.mem.__dict__["entity_store"])
         else:
             es_inst = getattr(self.mem, "_entity_store", None)
-            if es_inst is not None and type(self.mem).__name__ != "MagicMock":
+            if es_inst is not None:
                 self.hook_entity_store(es_inst)
 
         # Hook mem-level entity helper methods
@@ -521,14 +521,13 @@ class Mem0PersistenceAdapter:
                                     old_rec = es.get(vector_id=v_id)
                                     if old_rec:
                                         old_payload = getattr(old_rec, "payload", None)
-                                        if type(old_rec).__name__ != "MagicMock" or type(old_payload).__name__ != "MagicMock":
-                                            if not isinstance(old_payload, Mapping):
-                                                old_payload = old_rec if isinstance(old_rec, Mapping) else {}
-                                            if type(old_payload).__name__ != "MagicMock":
-                                                existing_links = {
-                                                    str(x) for x in old_payload.get("linked_memory_ids", [])
-                                                    if str(x) not in holder.skipped_ids
-                                                }
+                                        if not isinstance(old_payload, Mapping):
+                                            old_payload = old_rec if isinstance(old_rec, Mapping) else {}
+                                        if isinstance(old_payload, Mapping):
+                                            existing_links = {
+                                                str(x) for x in old_payload.get("linked_memory_ids", [])
+                                                if str(x) not in holder.skipped_ids
+                                            }
                                 except Exception:
                                     existing_links = set()
 

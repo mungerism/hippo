@@ -53,8 +53,8 @@ cp .env.example ~/.hippo/.env
 uv run python -m compileall hippo_memory tests
 uvx ruff check --select E9,F63,F7,F82 hippo_memory tests
 
-# 2. 运行全量单元测试
-uv run pytest
+# 2. 运行全量单元与离线契约测试
+uv run python -m unittest discover -s tests -v
 
 # 3. 验证构建包完整性
 uv build

@@ -469,8 +469,9 @@ class TestRecoveryWakeupDisable(unittest.TestCase):
 class TestDoctorWorkerChecks(unittest.TestCase):
     """Tests for doctor.py Worker health check three-state semantics."""
 
+    @patch("hippo_memory.doctor.is_listening", return_value=False)
     @patch("hippo_memory.doctor.worker_service_status")
-    def test_worker_not_installed_is_healthy(self, mock_status):
+    def test_worker_not_installed_is_healthy(self, mock_status, mock_listen):
         mock_status.return_value = {
             "plist_exists": False, "loaded": False, "running": False,
             "pid": None, "last_exit_code": None,
@@ -482,8 +483,9 @@ class TestDoctorWorkerChecks(unittest.TestCase):
         self.assertTrue(worker_checks[0]["ok"])
         self.assertIn("按需消费模式", worker_checks[0]["detail"])
 
+    @patch("hippo_memory.doctor.is_listening", return_value=False)
     @patch("hippo_memory.doctor.worker_service_status")
-    def test_worker_running_is_healthy(self, mock_status):
+    def test_worker_running_is_healthy(self, mock_status, mock_listen):
         mock_status.return_value = {
             "plist_exists": True, "loaded": True, "running": True,
             "pid": 9999, "last_exit_code": None,
@@ -495,8 +497,9 @@ class TestDoctorWorkerChecks(unittest.TestCase):
         self.assertTrue(worker_checks[0]["ok"])
         self.assertIn("常驻运行中", worker_checks[0]["detail"])
 
+    @patch("hippo_memory.doctor.is_listening", return_value=False)
     @patch("hippo_memory.doctor.worker_service_status")
-    def test_worker_installed_not_running_is_failed(self, mock_status):
+    def test_worker_installed_not_running_is_failed(self, mock_status, mock_listen):
         mock_status.return_value = {
             "plist_exists": True, "loaded": True, "running": False,
             "pid": None, "last_exit_code": "78",
