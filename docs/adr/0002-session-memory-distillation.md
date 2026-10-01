@@ -26,7 +26,7 @@
 3. **异步 Spool 状态机与持久化原子发布 (修订 / Issue #80)**：
    - Hook 捕获层仅执行轻量级入队操作，必须在 `< 50ms` 内 `exit 0` 并保持 stdout 纯净，严禁阻塞宿主；
    - 彻底废弃早期易产生空目录半成品质押的 `mkdir` 占位设计，改为 **Durable Staging -> READY.json 标记 -> publish.lock 互斥锁 -> 原子 rename -> 父目录 fsync**：
-     1. 作业先在 `staging/<job_id>_<timestamp>_<pid>` 完整落地 `job.json`、`transcript.jsonl` 及 `READY.json` 标记，并执行 `fsync`；
+     1. 作业先在 `staging/<job_id>.<token>` 完整落地 `payload.json`、`state.json` 及 `READY.json` 标记，并对文件与 staging 目录执行 `fsync`；
      2. 在进程间排他发布锁 `publish.lock` 保护下，检查终态与 Tombstone 后执行 POSIX 原子 `rename` 迁至 `jobs/<job_id>` 并对父目录执行 `fsync`；
      3. 崩溃或断电重启时由 `recover_spool_publication()` 自动恢复已完成的 staging，并将不完整的死 staging 移至 `quarantine/` 隔离，彻底消除 ghost job，支持 same-event redelivery；
    - 后台 Worker 通过 `worker.lock` 内核级排他锁单进程消费，具备 Lease 超时回收、3 次指数退避重试与死信兜底。
