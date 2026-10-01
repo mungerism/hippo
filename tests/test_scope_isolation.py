@@ -301,10 +301,26 @@ class TestMem0ScopeFilterContract(unittest.TestCase):
         self.assertEqual(forwarded["user_id"], "userA")
         self.assertNotIn("agent_id", forwarded)
         self.assertEqual(
-            forwarded["$not"],
-            [{"agent_id": {"nin": ["global", "proj1"]}}],
+            forwarded["$or"],
+            [
+                {
+                    "AND": [
+                        {
+                            "OR": [
+                                {"agent_id": "global"},
+                                {"agent_id": "proj1"},
+                            ]
+                        },
+                        {
+                            "OR": [
+                                {"category": "tech"},
+                                {"category": "other"},
+                            ]
+                        },
+                    ]
+                }
+            ],
         )
-        self.assertIn("OR", forwarded)
 
     def test_get_all_accepts_project_scope_plus_custom_filter(self):
         mandatory = self.router.resolve_search_scope(
@@ -326,8 +342,15 @@ class TestMem0ScopeFilterContract(unittest.TestCase):
         forwarded = memory._get_all_from_vector_store.call_args.args[0]
         self.assertEqual(forwarded["user_id"], "userA")
         self.assertEqual(
-            forwarded["AND"][0],
-            {"agent_id": "proj1"},
+            forwarded["OR"],
+            [
+                {
+                    "AND": [
+                        {"agent_id": "proj1"},
+                        {"category": "tech"},
+                    ]
+                }
+            ],
         )
 
     def test_conflicting_identity_stays_conjunctive_through_mem0(self):
@@ -349,13 +372,19 @@ class TestMem0ScopeFilterContract(unittest.TestCase):
 
         forwarded = memory._search_vector_store.call_args.args[1]
         # Mandatory root identity survives normalization; the conflicting
-        # caller selector remains inside a separate OR clause and therefore
-        # cannot overwrite it.
+        # caller selector stays in a nested conjunction and cannot overwrite it.
         self.assertEqual(forwarded["user_id"], "userA")
-        self.assertEqual(forwarded["agent_id"], "proj1")
+        self.assertNotIn("agent_id", forwarded)
         self.assertEqual(
-            forwarded["OR"],
-            [{"user_id": "userB"}],
+            forwarded["$or"],
+            [
+                {
+                    "AND": [
+                        {"agent_id": "proj1"},
+                        {"user_id": "userB"},
+                    ]
+                }
+            ],
         )
 
 
