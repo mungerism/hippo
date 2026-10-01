@@ -30,8 +30,9 @@ _DETERMINISTIC_EXPORTS = {
 
 def __getattr__(name: str):
     if name in _DETERMINISTIC_EXPORTS:
-        from tests.test_support import deterministic_adapters
+        from importlib import import_module
 
+        deterministic_adapters = import_module("tests.test_support.deterministic_adapters")
         return getattr(deterministic_adapters, name)
     raise AttributeError(name)
 
