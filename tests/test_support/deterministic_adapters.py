@@ -178,7 +178,15 @@ def create_isolated_mem0(
         "history_db_path": history_db,
     }
     with _deterministic_factories():
-        return Memory.from_config(config)
+        memory = Memory.from_config(config)
+
+    # These contracts intentionally validate Mem0 orchestration and Qdrant storage
+    # without downloading FastEmbed's optional Qdrant/bm25 model. Mark the lazy
+    # encoder unavailable on this test-owned vector store so dense search remains
+    # deterministic and the network guard stays strict.
+    if hasattr(memory.vector_store, "_bm25_encoder"):
+        memory.vector_store._bm25_encoder = False
+    return memory
 
 
 def create_contract_engine(
