@@ -48,9 +48,6 @@ sanitize_google_application_credentials()
 
 def ensure_qdrant_server():
     """Ensure Qdrant server is running on 127.0.0.1:6333."""
-    if os.getenv("HIPPO_TEST_ISOLATION") == "1" and not os.getenv("HIPPO_ENABLE_REAL_QDRANT_TESTS"):
-        return
-
     import socket
     import subprocess
     import time
