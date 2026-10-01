@@ -57,7 +57,7 @@ flowchart TD
 - **核心目标**：防范调用方传入自定义业务过滤条件时越权穿透或丢失用户/项目隔离边界，严格保证跨租户数据隔离（Forbidden Leakage = 0）。
 - **机制与实现**：
   - **Mandatory Scope（强制身份范围）**：由 `ScopeRouter.resolve_search_scope()` 依据选定用户及 `project`/`global`/`all` 生成基准范围，不可被外部替换或绕过；
-  - **Conjunction Composition（严格合取组合）**：通过 `compose_scope_filters()` 将 mandatory scope 与调用方传入的任意 business filters（含分类、嵌套 `AND`/`OR`/`NOT`）通过顶层 `AND` 强制合取；若调用方传入冲突的身份约束，逻辑合取返回 0 结果；
+  - **Conjunction Composition（严格合取组合）**：通过 `compose_scope_filters()` 保留顶层 `user_id` 以满足 Mem0 的实体范围校验，并将剩余 mandatory scope 与调用方传入的任意 business filters（含分类、嵌套 `AND`/`OR`/`NOT`）作为受保护的嵌套合取表达式组合；调用方 filters 只能缩小结果集，不能覆盖或放宽身份边界，冲突身份约束返回 0 结果；
   - **Production & Trace Parity**：生产环境 `search()` 与评测诊断 `search_with_trace()` 共享同一套范围解析与过滤器组合路径，并统一在底层推下 `add_lifecycle_exclusion()` 废弃排除过滤。
 
 ---
