@@ -75,6 +75,13 @@
 5. **POSIX 原子 Staging 隔离**：删除前先将作业目录原子重命名为 `.prune_<job_id>_<pid>_<ts>` 暂存区。在暂存区内执行最终状态复核与墓碑写入；若检测到并发 `retry` 导致状态变为 pending，或墓碑写入异常，立即原子 `rename` 恢复原目录并放弃删除；
 6. **收据永不清理**：`~/.hippo/spool/receipts/` 保存会话级语义去重游标（Semantic Cursor），与作业生命周期彻底解耦，**永不被 prune 清理**。
 
+### 3.5 发布互斥锁与断电自愈恢复 (Publication Lock & Crash Recovery / Issue #80)
+
+为解决入队断电/崩溃导致的半成品目录假死与同事件重放丢弃：
+1. **进程间发布锁**：引入 `publish.lock`（基于 `fcntl.flock`），排他保护作业发布原子 `rename` 与 prune 墓碑协调，杜绝并发发布与清理竞态；
+2. **完整性校验**：定义 `validate_published_job` 校验 `payload.json` 可构造 `CapturedPayload`、`payload.job_id` 与目录名一致，并校验 `state.json` 的 `state` 属于 `JobState`；非法目录统一隔离至 `quarantine/`；
+3. **断电自愈机制**：Worker 在 `drain()` 与常驻 `daemon()` 启动前自动执行 `recover_spool_publication()`，原子提升具备 `READY.json` 的孤儿 staging 为可消费作业，退役死 staging，支持断电后 same-event redelivery。
+
 ---
 
 ## 4. 收益与影响 (Consequences)
@@ -82,7 +89,7 @@
 ### 收益 (Positive Consequences)
 - **零延迟全天候消费**：常驻 Worker 实现真正的异步流式消费，会话结束后记忆秒级提纯，无需等待下一次交互；
 - **生产级运维闭环**：提供批量重试、状态修剪、服务启停、三态健康巡检（fallback / running / broken）的完整工具链；
-- **高并发零竞争**：基于内核锁与原子目录重命名，即使面对多 Agent 并发写入、重试与清理交叉执行，依然具备数学级幂等与数据零丢失保证；
+- **高并发协调与断电恢复**：基于内核锁、原子 staging 重命名与 fail-closed fsync，在本地 Spool publication / prune / redelivery 边界内维持可恢复的幂等语义；不宣称跨 Qdrant 与 Spool 的分布式 exactly-once；
 - **极致轻量**：全量代码仅基于 Python 标准库与系统原生能力，未增加任何第三方重依赖。
 
 ### 负面影响与折衷 (Trade-offs)
@@ -97,4 +104,5 @@
 2. **Terminal-Only Pruning**：`prune_jobs` 绝不能删除任何非终态作业；
 3. **Tombstone Before Unlink**：任何物理删除作业目录的操作，必须在 Tombstone 成功落盘之后；若落盘失败必须放弃删除；
 4. **Receipts Preserved**：`receipts/` 目录严禁被 prune 遍历或清理；
-5. **Lock Exclusivity**：同一时刻在整个系统内只能有一个 Worker 进程持有 `worker.lock` 并消费队列。
+5. **Lock Exclusivity**：同一时刻在整个系统内只能有一个 Worker 进程持有 `worker.lock` 并消费队列；
+6. **Publish Exclusivity & Durability**：作业发布与清理必须由 `publish.lock` 互斥保护，发布内容在原子 rename 前必须已落盘并落地 `READY.json`，且父目录完成 `fsync`。
