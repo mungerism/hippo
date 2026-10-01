@@ -67,6 +67,65 @@ class TestInstanceIsolation(unittest.TestCase):
         engine._hook_memory_persistence(mem)
         return engine
 
+    def test_real_mem0_from_config_lazy_entity_contract_is_instance_scoped(self):
+        """Exercise Mem0 2.0.20's real from_config/__init__/entity_store path with deterministic factories."""
+        orig_descriptor = getattr(Memory, "entity_store")
+
+        vector_a = MagicMock(name="vector_a")
+        vector_b = MagicMock(name="vector_b")
+        entity_a = MagicMock(name="entity_a")
+        entity_b = MagicMock(name="entity_b")
+        db_a = MagicMock(name="db_a")
+        db_b = MagicMock(name="db_b")
+
+        # Mem0 itself runs its real config parsing, constructor, and lazy
+        # entity_store descriptor. Only external/provider factories are replaced.
+        with patch("mem0.memory.main.MEM0_TELEMETRY", False), \
+             patch("mem0.memory.main.EmbedderFactory.create", side_effect=[MagicMock(), MagicMock()]), \
+             patch("mem0.memory.main.LlmFactory.create", side_effect=[MagicMock(), MagicMock()]), \
+             patch("mem0.memory.main.SQLiteManager", side_effect=[db_a, db_b]), \
+             patch(
+                 "mem0.memory.main.VectorStoreFactory.create",
+                 side_effect=[vector_a, vector_b, entity_a, entity_b],
+             ) as vector_factory, \
+             patch("mem0.memory.main.capture_event"):
+
+            mem_a = Memory.from_config({})
+            mem_b = Memory.from_config({})
+
+            self.assertIsNone(mem_a._entity_store)
+            self.assertIsNone(mem_b._entity_store)
+
+            cfg_a = HippoConfig(
+                user_id="test_user",
+                storage_dir=self.base_dir / "real_a",
+                consolidation_lock_timeout=1.0,
+            )
+            cfg_b = HippoConfig(
+                user_id="test_user",
+                storage_dir=self.base_dir / "real_b",
+                consolidation_lock_timeout=1.0,
+            )
+            setattr(cfg_a, "consolidation_lock_dir", self.base_dir / "real_a_locks")
+            setattr(cfg_b, "consolidation_lock_dir", self.base_dir / "real_b_locks")
+
+            engine_a = HippoEngine(config=cfg_a)
+            engine_b = HippoEngine(config=cfg_b)
+            engine_a._memory = mem_a
+            engine_b._memory = mem_b
+            engine_a._hook_memory_persistence(mem_a)
+            engine_b._hook_memory_persistence(mem_b)
+
+            # Lazy entity initialization still comes from Mem0's original descriptor,
+            # but each resulting store is hooked only by its owning adapter.
+            self.assertIs(engine_a.memory.entity_store, entity_a)
+            self.assertIs(engine_b.memory.entity_store, entity_b)
+            self.assertIs(mem_a._entity_store, entity_a)
+            self.assertIs(mem_b._entity_store, entity_b)
+            self.assertEqual(vector_factory.call_count, 4)
+
+        self.assertIs(getattr(Memory, "entity_store"), orig_descriptor)
+
     def test_global_class_purity(self):
         """Memory.entity_store class descriptor must remain pure and unchanged after engine creation."""
         orig_descriptor = getattr(Memory, "entity_store")
