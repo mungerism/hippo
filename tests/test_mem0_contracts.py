@@ -202,6 +202,16 @@ class TestMem0Contracts(IsolatedTestCase):
         self.assertIsNotNone(updated_at)
         self.assertEqual(metadata.get("category"), "decision")
 
+    def test_contract_factory_overrides_are_restored(self) -> None:
+        """Creating deterministic Mem0 must not leak factory overrides to other tests."""
+        from mem0.utils.factory import EmbedderFactory, LlmFactory
+
+        original_embedder = EmbedderFactory.provider_to_class.get("openai")
+        original_llm = LlmFactory.provider_to_class.get("openai")
+        create_isolated_mem0(collection_name="factory_restore_contract")
+        self.assertEqual(EmbedderFactory.provider_to_class.get("openai"), original_embedder)
+        self.assertEqual(LlmFactory.provider_to_class.get("openai"), original_llm)
+
     def test_contract_hot_path_progress_under_paused_embedding(self) -> None:
         """Verify same-identity hot-path progress is not blocked when remote embedding is delayed."""
         embedder: DeterministicEmbedder = self.engine._memory.embedding_model
