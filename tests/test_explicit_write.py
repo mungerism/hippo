@@ -1,19 +1,36 @@
 """Tests for Issue #14: Agent Explicit Write low-latency Hot Path."""
 
+import os
+import tempfile
 import unittest
+import uuid
+from pathlib import Path
 from unittest.mock import MagicMock, patch
-from hippo_memory.config import HippoConfig
+
+from qdrant_client import QdrantClient
+
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
+from tests.test_support import create_contract_engine
 
 
-import os
-from tests.test_support import allow_network
+def _real_qdrant_target() -> tuple[str, int] | None:
+    """Return a declared loopback integration target, otherwise disable the test."""
+    if os.getenv("HIPPO_ENABLE_REAL_QDRANT_TESTS") != "1":
+        return None
+    host = os.getenv("HIPPO_TEST_QDRANT_HOST", "").strip()
+    port_raw = os.getenv("HIPPO_TEST_QDRANT_PORT", "").strip()
+    if host not in {"127.0.0.1", "localhost", "::1"} or not port_raw:
+        return None
+    try:
+        port = int(port_raw)
+    except ValueError:
+        return None
+    return (host, port) if 1 <= port <= 65535 else None
 
 
 def is_real_qdrant_test_enabled() -> bool:
-    """Real storage integration is opt-in via HIPPO_ENABLE_REAL_QDRANT_TESTS."""
-    return os.getenv("HIPPO_ENABLE_REAL_QDRANT_TESTS") == "1"
+    return _real_qdrant_target() is not None
 
 
 class TestExplicitWrite(unittest.TestCase):
@@ -259,87 +276,92 @@ class TestExplicitWrite(unittest.TestCase):
             )
 
 
-import tempfile
-import uuid
-
-
 @unittest.skipUnless(
     is_real_qdrant_test_enabled(),
-    "Opt-in integration test requires HIPPO_ENABLE_REAL_QDRANT_TESTS=1 and isolated target configuration",
+    "Requires HIPPO_ENABLE_REAL_QDRANT_TESTS=1 plus explicit loopback "
+    "HIPPO_TEST_QDRANT_HOST/HIPPO_TEST_QDRANT_PORT",
 )
 class TestExplicitWriteIntegration(unittest.TestCase):
-    """Real storage integration test verifying zero LLM calls and readback via search/get."""
+    """Real Qdrant + deterministic-provider storage contract."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.test_col = f"hippo_test_owned_{uuid.uuid4().hex[:8]}"
-        self.orig_col = os.environ.get("HIPPO_COLLECTION_NAME")
-        os.environ["HIPPO_COLLECTION_NAME"] = self.test_col
+        target = _real_qdrant_target()
+        assert target is not None
+        host, port = target
 
-        with allow_network():
-            cfg = HippoConfig()
-            self.engine = HippoEngine(config=cfg)
-        self.created_ids = []
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.test_col = f"hippo_test_owned_{uuid.uuid4().hex[:12]}"
+        self.qdrant = QdrantClient(host=host, port=port, prefer_grpc=False)
+
+        preexisting = {
+            collection.name for collection in self.qdrant.get_collections().collections
+        }
+        self.assertFalse(
+            any(name.startswith(self.test_col) for name in preexisting),
+            "Refusing to reuse an existing integration-test collection prefix",
+        )
+
+        self.engine = create_contract_engine(
+            collection_name=self.test_col,
+            storage_dir=self.tmp_dir.name,
+            qdrant_client=self.qdrant,
+        )
+        self.assertTrue(
+            Path(self.engine.config.history_db_path).is_relative_to(Path(self.tmp_dir.name))
+        )
 
     def tearDown(self):
         try:
-            with allow_network():
-                for mid in self.created_ids:
-                    try:
-                        self.engine.delete(mid)
-                    except Exception:
-                        pass
-                # Safe cleanup of the isolated test-owned collection
-                try:
-                    if hasattr(self.engine, "_client") and self.engine._client:
-                        if self.test_col.startswith("hippo_test_owned_"):
-                            self.engine._client.delete_collection(self.test_col)
-                except Exception:
-                    pass
+            owned = [
+                collection.name
+                for collection in self.qdrant.get_collections().collections
+                if collection.name.startswith(self.test_col)
+            ]
+            for name in owned:
+                self.qdrant.delete_collection(name)
+
+            remaining = [
+                collection.name
+                for collection in self.qdrant.get_collections().collections
+                if collection.name.startswith(self.test_col)
+            ]
+            self.assertEqual(remaining, [], "Test-owned Qdrant collections were not cleaned up")
         finally:
-            if self.orig_col is not None:
-                os.environ["HIPPO_COLLECTION_NAME"] = self.orig_col
-            else:
-                os.environ.pop("HIPPO_COLLECTION_NAME", None)
+            self.qdrant.close()
             self.tmp_dir.cleanup()
 
     def test_real_write_zero_llm_and_readback(self):
-        """Verify real infer=False write triggers 0 LLM calls and can be read back via get and search."""
         test_proj = "integration_test_explicit_write"
         test_fact = "[Integration Test] 验证真实存储零LLM调用与读回"
 
-        with allow_network():
-            # Spy on LLM generate_response seam to prove zero LLM calls
-            with patch.object(self.engine.memory.llm, "generate_response", wraps=self.engine.memory.llm.generate_response) as spy_llm:
-                res = self.engine.add_explicit(
-                    text=test_fact,
-                    scope="project",
-                    project_id=test_proj,
-                    category="decision",
-                )
-                saved_id = res["id"]
-                self.created_ids.append(saved_id)
-
-                # Assert zero LLM calls
-                self.assertEqual(spy_llm.call_count, 0)
-
-            # Verify read-back via get
-            fetched = self.engine.get(saved_id)
-            self.assertIsNotNone(fetched)
-            self.assertEqual(fetched.get("memory"), test_fact)
-            metadata = fetched.get("metadata", {})
-            self.assertEqual(metadata.get("source"), "agent_explicit")
-            self.assertEqual(metadata.get("category"), "decision")
-
-            # Verify read-back via search
-            search_results = self.engine.search(
-                query="真实存储零LLM调用",
+        with patch.object(
+            self.engine.memory.llm,
+            "generate_response",
+            wraps=self.engine.memory.llm.generate_response,
+        ) as spy_llm:
+            res = self.engine.add_explicit(
+                text=test_fact,
                 scope="project",
                 project_id=test_proj,
-                limit=5,
+                category="decision",
             )
-            found_ids = [r.get("id") for r in search_results]
-            self.assertIn(saved_id, found_ids)
+            saved_id = res["id"]
+            self.assertEqual(spy_llm.call_count, 0)
+
+        fetched = self.engine.get(saved_id)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched.get("memory"), test_fact)
+        metadata = fetched.get("metadata", {})
+        self.assertEqual(metadata.get("source"), "agent_explicit")
+        self.assertEqual(metadata.get("category"), "decision")
+
+        search_results = self.engine.search(
+            query="真实存储零LLM调用",
+            scope="project",
+            project_id=test_proj,
+            limit=5,
+        )
+        self.assertIn(saved_id, [result.get("id") for result in search_results])
 
 
 if __name__ == "__main__":
