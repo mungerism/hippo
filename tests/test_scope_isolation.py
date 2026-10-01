@@ -39,6 +39,9 @@ def _eval_filter(item: Dict[str, Any], filt: Dict[str, Any]) -> bool:
             if isinstance(v, dict) and "in" in v:
                 if actual_val not in v["in"]:
                     return False
+            elif isinstance(v, dict) and "nin" in v:
+                if actual_val in v["nin"]:
+                    return False
             elif actual_val != v:
                 return False
     return True
@@ -296,9 +299,10 @@ class TestMem0ScopeFilterContract(unittest.TestCase):
 
         forwarded = memory._search_vector_store.call_args.args[1]
         self.assertEqual(forwarded["user_id"], "userA")
+        self.assertNotIn("agent_id", forwarded)
         self.assertEqual(
-            forwarded["agent_id"],
-            {"in": ["global", "proj1"]},
+            forwarded["$not"],
+            [{"agent_id": {"nin": ["global", "proj1"]}}],
         )
         self.assertIn("OR", forwarded)
 
