@@ -1,5 +1,6 @@
 import os
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -140,3 +141,77 @@ class ScopeRouter:
                     {"agent_id": resolved_proj},
                 ],
             }
+
+    def resolve_search_scope(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        scope: str = "all",
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve the mandatory caller identity and project/global scope boundaries."""
+        uid = user_id or self.default_user_id
+        if agent_id:
+            if agent_id == "global":
+                return {"user_id": uid, "agent_id": "global"}
+            return {"user_id": uid, "agent_id": agent_id}
+
+        return self.build_search_filters(
+            scope=scope,
+            user_id=uid,
+            project_id=project_id,
+        )
+
+
+def compose_scope_filters(
+    mandatory_scope: Dict[str, Any],
+    custom_filter: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compose mandatory scope without violating Mem0's filter normalization contract.
+
+    Mem0 requires a top-level entity selector before logical operators are
+    expanded. It also flattens top-level AND conditions, which means caller
+    user_id/agent_id keys can overwrite mandatory identity fields if the
+    conjunction is expressed directly at the root.
+
+    Keep mandatory user_id at the root and place the complete mandatory scope
+    without user_id AND custom_filter expression inside a single-item OR.
+    Mem0 preserves that nested AND through normalization, so arbitrary nested
+    AND/OR/NOT filters remain conjunctive with the selected project/global
+    scope and cannot widen caller identity.
+    """
+    if not custom_filter:
+        return deepcopy(mandatory_scope)
+
+    scope_copy = deepcopy(mandatory_scope)
+    custom_copy = deepcopy(custom_filter)
+
+    uid = scope_copy.pop("user_id", None)
+    if uid is None:
+        # Hippo's search router always supplies user_id today. Keep a
+        # defensive fallback for non-router callers rather than fabricating an
+        # identity selector.
+        return {
+            "OR": [
+                {
+                    "AND": [
+                        scope_copy,
+                        custom_copy,
+                    ]
+                }
+            ]
+        }
+
+    conditions: list[Dict[str, Any]] = []
+    if scope_copy:
+        conditions.append(scope_copy)
+    conditions.append(custom_copy)
+
+    return {
+        "user_id": uid,
+        "OR": [
+            {
+                "AND": conditions,
+            }
+        ],
+    }

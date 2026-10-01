@@ -19,6 +19,7 @@ from hippo_memory.hooks.models import (
     JobState,
     calculate_semantic_cursor,
 )
+from hippo_memory.exceptions import ContextConflictError
 from hippo_memory.prompts import SESSION_DISTILLATION_PROMPT_V1
 
 if TYPE_CHECKING:
@@ -702,6 +703,14 @@ class SpoolWorker:
             logger.info(f"Successfully distilled job {extracted.job_id} (cursor: {cursor[:12]})")
             return True
 
+        except ContextConflictError as e:
+            err_msg = str(e)
+            logger.warning(
+                f"Warm Path concurrency conflict for job {payload.job_id}: {err_msg}; "
+                "returning job to pending for retry with backoff"
+            )
+            self.storage.fail_job(payload.job_id, err_msg, retryable=True)
+            return False
         except Exception as e:
             err_msg = str(e)
             logger.error(f"Error processing job {payload.job_id}: {err_msg}", exc_info=True)

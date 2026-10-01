@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from hippo_memory.apply import consolidation_lock, identity_lock_path
 from hippo_memory.config import HippoConfig
 from hippo_memory.engine import HippoEngine, _LazyWriteLockHolder, _current_write_lock_holder
-from hippo_memory.exceptions import HippoError, HippoLockTimeoutError
+from hippo_memory.exceptions import ContextConflictError, HippoError, HippoLockTimeoutError
 
 
 class TestLockTimeoutConfiguration(unittest.TestCase):
@@ -427,17 +427,17 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "run update"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with self.assertRaises(ContextConflictError):
+            self.engine.add(
+                messages=[{"role": "user", "content": "run update"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
 
-        # Stale mutations must be skipped and filtered from returned results
+        # Stale mutations must be skipped and never persisted
         raw_update.assert_not_called()
         raw_delete.assert_not_called()
-        self.assertEqual(res["results"], [])
 
     def test_entity_store_cleans_duplicate_linked_memory_ids(self):
         """When duplicates are pruned during vector_store.insert, entity_store payloads must have
@@ -551,15 +551,15 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "delete"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with self.assertRaises(ContextConflictError):
+            self.engine.add(
+                messages=[{"role": "user", "content": "delete"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
         raw_vs_delete.assert_not_called()
         raw_es_delete.assert_not_called()
-        self.assertEqual(res["results"], [])
 
     def test_empty_linked_entity_not_inserted(self):
         """When all linked_memory_ids are skipped, the entity must not be inserted."""
@@ -1585,14 +1585,14 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
             payload={"updated_at": t2, "data": "intervening update"}
         )
         with patch.object(_LazyWriteLockHolder, "__init__", patched_init):
-            res = self.engine.add(
-                messages=[{"role": "user", "content": "updated fact"}],
-                scope="project",
-                project_id="test_proj",
-                infer=True,
-            )
+            with self.assertRaises(ContextConflictError):
+                self.engine.add(
+                    messages=[{"role": "user", "content": "updated fact"}],
+                    scope="project",
+                    project_id="test_proj",
+                    infer=True,
+                )
             raw_update.assert_not_called()
-            self.assertEqual(len(res["results"]), 0)
 
         # Case 3: Intervening writer with clock rollback or non-UTC offset (t3 < t1) ->
         # Still rejected because version fingerprint (record_version) changed!
@@ -1602,14 +1602,14 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
             payload={"updated_at": t3, "data": "skewed update"}
         )
         with patch.object(_LazyWriteLockHolder, "__init__", patched_init):
-            res = self.engine.add(
-                messages=[{"role": "user", "content": "updated fact"}],
-                scope="project",
-                project_id="test_proj",
-                infer=True,
-            )
+            with self.assertRaises(ContextConflictError):
+                self.engine.add(
+                    messages=[{"role": "user", "content": "updated fact"}],
+                    scope="project",
+                    project_id="test_proj",
+                    infer=True,
+                )
             raw_update.assert_not_called()
-            self.assertEqual(len(res["results"]), 0)
 
     def test_insert_aborted_when_observed_context_concurrently_mutated(self):
         """Warm Path insert must be aborted if memories observed in Phase 1 were mutated concurrently."""
@@ -1646,16 +1646,16 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "insert new derived fact"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with self.assertRaises(ContextConflictError):
+            self.engine.add(
+                messages=[{"role": "user", "content": "insert new derived fact"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
 
-        # Because observed context changed, insert is blocked and results pruned
+        # Because observed context changed, insert is blocked and conflict raised
         raw_insert.assert_not_called()
-        self.assertEqual(res["results"], [])
 
     def test_insert_aborted_when_observed_context_concurrently_superseded(self):
         """Warm Path insert must be aborted if memories observed in Phase 1 were superseded concurrently."""
@@ -1687,15 +1687,15 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "insert"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with self.assertRaises(ContextConflictError):
+            self.engine.add(
+                messages=[{"role": "user", "content": "insert"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
 
         raw_insert.assert_not_called()
-        self.assertEqual(res["results"], [])
 
     def test_insert_aborted_when_observed_context_concurrently_deleted(self):
         """Warm Path insert must be aborted if memories observed in Phase 1 were deleted concurrently."""
@@ -1725,15 +1725,15 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(
-            messages=[{"role": "user", "content": "insert"}],
-            scope="project",
-            project_id="test_proj",
-            infer=True,
-        )
+        with self.assertRaises(ContextConflictError):
+            self.engine.add(
+                messages=[{"role": "user", "content": "insert"}],
+                scope="project",
+                project_id="test_proj",
+                infer=True,
+            )
 
         raw_insert.assert_not_called()
-        self.assertEqual(res["results"], [])
 
     def test_insert_succeeds_when_observed_context_unchanged(self):
         """Warm Path insert proceeds normally when observed context remains unchanged under write lock."""
@@ -2055,8 +2055,8 @@ class TestWriteLockCriticalSectionNarrowing(unittest.TestCase):
         self.engine._memory = mock_mem0
         self.engine._hook_memory_persistence(mock_mem0)
 
-        res = self.engine.add(text="x", project_id="p", infer=True)
-        self.assertEqual(res.get("results"), [])
+        with self.assertRaises(ContextConflictError):
+            self.engine.add(text="x", project_id="p", infer=True)
         self.assertFalse(raw_del.called, "Primary memory should NOT be deleted!")
         self.assertFalse(raw_ed.called, "Entity should NOT be deleted when primary delete was stale!")
 
