@@ -14,3 +14,4 @@
 | [Mem0 内部机制与边界剖析](/knowledge/mem0-deep-dive) | Mem0 源码机制 | 深入剖析 Mem0 的 Graph/VectorStore 架构与开源版工程短板 |
 | [Cold Path 记忆合并与生命周期设计](/knowledge/cold-path-consolidation-design) | 离线记忆治理 | 详细推导基于 ANN 相似度、LLM 分类与行版本号的合并算法 |
 | [Jev Cold Path 显式旁路观察](/knowledge/jev-shadow) | Jev 旁路 | allowlist、预算、匿名差异及默认零出网边界 |
+| [Jev 成对关系离线评测](/knowledge/jev-evaluation) | Jev 离线评测流水线 | 成对样本规范、合成录制回放、事实簇物理隔离与多维度质量报告 |
