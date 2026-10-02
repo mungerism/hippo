@@ -2,19 +2,23 @@
 
 import copy
 import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from hippo_memory.jev_evaluation import evaluate
 
-FIXTURES = Path(__file__).resolve().parents[1] / "benchmarks"
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "benchmarks"
+DATASET = FIXTURES / "jev_pairs_v1.json"
+RECORDINGS = FIXTURES / "jev_recordings_synthetic_v1.json"
+CLI = FIXTURES / "jev_relationships.py"
 
 
 def load_fixtures():
-    dataset = json.loads((FIXTURES / "jev_pairs_v1.json").read_text(encoding="utf-8"))
-    recordings = json.loads(
-        (FIXTURES / "jev_recordings_synthetic_v1.json").read_text(encoding="utf-8")
-    )
+    dataset = json.loads(DATASET.read_text(encoding="utf-8"))
+    recordings = json.loads(RECORDINGS.read_text(encoding="utf-8"))
     return dataset, recordings
 
 
@@ -37,8 +41,34 @@ class JevEvaluationTests(unittest.TestCase):
         self.assertIn("probability_buckets", test["by_language"]["zh"])
         self.assertEqual(report["backends"]["jev"]["model"], "jev-1.13.0")
         serialized = json.dumps(report, ensure_ascii=False)
-        self.assertNotIn("生产发布", serialized)
-        self.assertNotIn("Ignore the rubric", serialized)
+        for sample in dataset["samples"]:
+            with self.subTest(sample=sample["id"]):
+                self.assertNotIn(sample["memory_a"], serialized)
+                self.assertNotIn(sample["memory_b"], serialized)
+
+    def test_cli_smoke_emits_valid_report_without_raw_facts(self):
+        dataset, _ = load_fixtures()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(CLI),
+                "--dataset",
+                str(DATASET),
+                "--recordings",
+                str(RECORDINGS),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["report_schema"], "relationship-report-v1")
+        serialized = json.dumps(report, ensure_ascii=False)
+        for sample in dataset["samples"]:
+            with self.subTest(sample=sample["id"]):
+                self.assertNotIn(sample["memory_a"], serialized)
+                self.assertNotIn(sample["memory_b"], serialized)
 
     def test_fact_cluster_cannot_cross_splits(self):
         dataset, recordings = load_fixtures()
