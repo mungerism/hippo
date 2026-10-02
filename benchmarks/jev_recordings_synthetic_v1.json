@@ -1,0 +1,45 @@
+{
+  "schema_version": "relationship-recordings-v1",
+  "backends": {
+    "baseline": {
+      "model": "existing-llm-synthetic-fixture",
+      "rubric_version": "existing-llm-contract-v1",
+      "origin": "synthetic_fixture_not_model_measurement",
+      "defaults": {"latency_ms": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
+      "observations": {
+        "zh-c1":{"relation":"EQUIVALENT"},
+        "zh-c2":{"relation":"CONFLICT"},
+        "en-c1":{"relation":"DISTINCT"},
+        "en-c2":{"relation":"EQUIVALENT"},
+        "mix-c1":{"relation":"CONFLICT"},
+        "mix-c2":{"relation":"DISTINCT"},
+        "zh-t1":{"relation":"CONFLICT"},
+        "zh-t2":{"relation":"CONFLICT"},
+        "en-t1":{"relation":"EQUIVALENT"},
+        "en-t2":{"relation":null,"abstain_reason":"injection_fixture"},
+        "mix-t1":{"relation":"EQUIVALENT"},
+        "mix-t2":{"relation":"CONFLICT"}
+      }
+    },
+    "jev": {
+      "model": "jev-1.13.0",
+      "rubric_version": "memory-relation-v1",
+      "origin": "synthetic_fixture_not_model_measurement",
+      "defaults": {"latency_ms": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
+      "observations": {
+        "zh-c1":{"relation":"EQUIVALENT","probabilities":{"EQUIVALENT":0.85,"CONFLICT":0.05,"DISTINCT":0.1},"provider_confidence":0.75},
+        "zh-c2":{"relation":"CONFLICT","probabilities":{"EQUIVALENT":0.05,"CONFLICT":0.8,"DISTINCT":0.15},"provider_confidence":0.7},
+        "en-c1":{"relation":"DISTINCT","probabilities":{"EQUIVALENT":0.2,"CONFLICT":0.05,"DISTINCT":0.75},"provider_confidence":0.6},
+        "en-c2":{"relation":"EQUIVALENT","probabilities":{"EQUIVALENT":0.9,"CONFLICT":0.02,"DISTINCT":0.08},"provider_confidence":0.82},
+        "mix-c1":{"relation":"CONFLICT","probabilities":{"EQUIVALENT":0.05,"CONFLICT":0.85,"DISTINCT":0.1},"provider_confidence":0.76},
+        "mix-c2":{"relation":"DISTINCT","probabilities":{"EQUIVALENT":0.2,"CONFLICT":0.1,"DISTINCT":0.7},"provider_confidence":0.55},
+        "zh-t1":{"relation":"DISTINCT","probabilities":{"EQUIVALENT":0.15,"CONFLICT":0.25,"DISTINCT":0.6},"provider_confidence":0.4},
+        "zh-t2":{"relation":"CONFLICT","probabilities":{"EQUIVALENT":0.05,"CONFLICT":0.85,"DISTINCT":0.1},"provider_confidence":0.76},
+        "en-t1":{"relation":"EQUIVALENT","probabilities":{"EQUIVALENT":0.8,"CONFLICT":0.05,"DISTINCT":0.15},"provider_confidence":0.68},
+        "en-t2":{"relation":null,"abstain_reason":"injection_fixture"},
+        "mix-t1":{"relation":"EQUIVALENT","probabilities":{"EQUIVALENT":0.52,"CONFLICT":0.08,"DISTINCT":0.4},"provider_confidence":0.2},
+        "mix-t2":{"relation":"CONFLICT","probabilities":{"EQUIVALENT":0.05,"CONFLICT":0.75,"DISTINCT":0.2},"provider_confidence":0.6}
+      }
+    }
+  }
+}
