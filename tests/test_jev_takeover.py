@@ -131,7 +131,7 @@ class _FakeJevClient:
 class TestJevTakeoverPolicyValidation(unittest.TestCase):
     def test_empty_allowed_projects_rejected(self):
         artifact = _make_qualified_artifact()
-        with self.assertRaisesRegex(ValueError, "allowed_projects must not be empty"):
+        with self.assertRaisesRegex(ValueError, "non-empty frozenset"):
             JevTakeoverPolicy(allowed_projects=frozenset(), calibration_artifact=artifact)
 
     def test_disqualified_artifact_rejected(self):
@@ -162,6 +162,48 @@ class TestJevTakeoverPolicyValidation(unittest.TestCase):
         )
         self.assertEqual(policy.allowed_projects, frozenset({"hippo", "personal"}))
         self.assertEqual(policy.max_calls, 200)
+
+    def test_blank_project_id_rejected(self):
+        artifact = _make_qualified_artifact()
+        with self.assertRaisesRegex(ValueError, "non-empty frozenset"):
+            JevTakeoverPolicy(
+                allowed_projects=frozenset({""}),
+                calibration_artifact=artifact,
+            )
+
+    def test_invalid_runtime_budgets_rejected(self):
+        artifact = _make_qualified_artifact()
+        cases = (
+            {"max_calls": True},
+            {"max_calls": -1},
+            {"max_elapsed_seconds": 0},
+            {"max_elapsed_seconds": float("nan")},
+            {"deadline_per_call": 0},
+            {"deadline_per_call": float("inf")},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    JevTakeoverPolicy(
+                        allowed_projects=frozenset({"hippo"}),
+                        calibration_artifact=artifact,
+                        **kwargs,
+                    )
+
+    def test_nonfinite_or_out_of_range_thresholds_rejected(self):
+        bad_values = (float("nan"), float("inf"), -0.01, 1.01, True, "0.80")
+        for bad_value in bad_values:
+            with self.subTest(value=bad_value):
+                artifact = _make_qualified_artifact()
+                artifact["thresholds"]["EQUIVALENT"]["min_probability"] = bad_value
+                artifact["active_configuration"]["thresholds"]["EQUIVALENT"][
+                    "min_probability"
+                ] = bad_value
+                with self.assertRaises(CalibrationMismatchError):
+                    JevTakeoverPolicy(
+                        allowed_projects=frozenset({"hippo"}),
+                        calibration_artifact=artifact,
+                    )
 
 
 class TestJevTakeoverClassifierScopeAndBudget(unittest.TestCase):
@@ -240,6 +282,43 @@ class TestJevTakeoverClassifierScopeAndBudget(unittest.TestCase):
         self.assertEqual(res.relation, RELATION_DISTINCT)
         self.assertEqual(res.evidence.get("failure_code"), "jev_failure")
         self.assertNotIn("secret_token", json.dumps(res.evidence))
+
+    def test_secret_bearing_input_abstains_without_calling_jev(self):
+        classifier = JevTakeoverClassifier(
+            self.client, self.policy, scope="project", project_id="hippo"
+        )
+        secret_memory = _memory(
+            "secret",
+            "production api_key=sk-abcdefghijklmnopqrstuvwxyz012345",
+        )
+        res = classifier.classify(secret_memory, self.mem_b)
+        self.assertEqual(res.relation, RELATION_DISTINCT)
+        self.assertEqual(res.reason, "input_requires_redaction")
+        self.assertEqual(
+            res.evidence.get("failure_code"), "input_requires_redaction"
+        )
+        self.assertEqual(self.client.calls, [])
+
+    def test_empty_input_abstains_without_calling_jev(self):
+        classifier = JevTakeoverClassifier(
+            self.client, self.policy, scope="project", project_id="hippo"
+        )
+        res = classifier.classify(_memory("empty", "   "), self.mem_b)
+        self.assertEqual(res.relation, RELATION_DISTINCT)
+        self.assertEqual(res.reason, "input_empty")
+        self.assertEqual(res.evidence.get("failure_code"), "invalid_input")
+        self.assertEqual(self.client.calls, [])
+
+    def test_oversized_input_is_reported_as_input_abstention(self):
+        client = _FakeJevClient(failure=JevFailure("request_too_large"))
+        classifier = JevTakeoverClassifier(
+            client, self.policy, scope="project", project_id="hippo"
+        )
+        res = classifier.classify(self.mem_a, self.mem_b)
+        self.assertEqual(res.relation, RELATION_DISTINCT)
+        self.assertEqual(res.reason, "input_budget_exceeded")
+        self.assertEqual(res.evidence.get("failure_code"), "request_too_large")
+        self.assertEqual(classifier.stats()["failures"], 0)
 
 
 class TestJevTakeoverThresholds(unittest.TestCase):
@@ -644,7 +723,7 @@ class TestTargetedReversalAndDisablingJev(unittest.TestCase):
         # 3. Memory store inspection
         loser = harness.store.records["a"]
         winner = harness.store.records["b"]
-        self.assertEqual(loser["metadata"]["status"], STATUS_ACTIVE)
+        self.assertIn(loser["metadata"].get("status"), (None, STATUS_ACTIVE))
         self.assertNotIn("superseded_by", loser["metadata"])
         self.assertNotIn("supersede_reason", loser["metadata"])
         self.assertNotIn("a", winner["metadata"].get("merged_ids", []))
@@ -653,6 +732,115 @@ class TestTargetedReversalAndDisablingJev(unittest.TestCase):
         recalled_after = [m["id"] for m in harness.recall("uv")]
         self.assertIn("a", recalled_after)
         self.assertIn("b", recalled_after)
+
+    def test_revert_restores_nested_lineage_sources_and_freshness_exactly(self):
+        client = _FakeJevClient(choice="EQUIVALENT")
+        records = [
+            _memory(
+                "a",
+                "数据库使用 PostgreSQL",
+                confirmation_count=5,
+                confirmed_at="2026-09-10T00:00:00+00:00",
+                source="agent_explicit",
+            ),
+            _memory(
+                "b",
+                "项目数据库是 PostgreSQL",
+                confirmation_count=2,
+                confirmed_at="2026-09-08T00:00:00+00:00",
+                source="session_distillation",
+                status=STATUS_ACTIVE,
+                merged_ids=["c"],
+                merged_contributions={"b": 1, "c": 1},
+                merged_sources=["session_distillation", "tool"],
+            ),
+            _memory(
+                "c",
+                "PG 是项目数据库",
+                source="tool",
+                status=STATUS_SUPERSEDED,
+                superseded_by="b",
+                supersede_reason="equivalent_merged",
+            ),
+        ]
+        harness = _Harness(
+            records,
+            semantic_scores={frozenset(("a", "b")): 0.95},
+            takeover_backend=client,
+            takeover_policy=self.policy,
+        )
+        self.addCleanup(harness.cleanup)
+        before_a = copy.deepcopy(harness.store.records["a"]["metadata"])
+        before_b = copy.deepcopy(harness.store.records["b"]["metadata"])
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        self.assertEqual(result.merged, 1)
+        op_id = result.details[0]["operation_id"]
+        self.assertIn("c", harness.store.records["a"]["metadata"]["merged_ids"])
+
+        reverted = harness.consolidator.applier.revert(op_id)
+        self.assertEqual(reverted["status"], "reverted")
+        self.assertEqual(harness.store.records["a"]["metadata"], before_a)
+        self.assertEqual(harness.store.records["b"]["metadata"], before_b)
+        self.assertEqual(
+            harness.store.records["c"]["metadata"]["superseded_by"], "b"
+        )
+
+    def test_revert_refuses_to_clobber_post_apply_winner_write(self):
+        client = _FakeJevClient(choice="EQUIVALENT")
+        harness = _Harness(
+            [
+                _memory("a", "Fact A", confirmation_count=3),
+                _memory("b", "Fact B", confirmation_count=1),
+            ],
+            semantic_scores={frozenset(("a", "b")): 0.95},
+            takeover_backend=client,
+            takeover_policy=self.policy,
+        )
+        self.addCleanup(harness.cleanup)
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        op_id = result.details[0]["operation_id"]
+        harness.engine.update("a", metadata={"post_apply_note": "newer write"})
+
+        with self.assertRaisesRegex(ValueError, "winner changed since apply"):
+            harness.consolidator.applier.revert(op_id)
+        self.assertEqual(
+            harness.store.records["b"]["metadata"]["status"], STATUS_SUPERSEDED
+        )
+
+    def test_revert_resumes_after_crash_between_restore_steps(self):
+        client = _FakeJevClient(choice="EQUIVALENT")
+        harness = _Harness(
+            [
+                _memory("a", "Fact A", confirmation_count=3),
+                _memory("b", "Fact B", confirmation_count=1),
+            ],
+            semantic_scores={frozenset(("a", "b")): 0.95},
+            takeover_backend=client,
+            takeover_policy=self.policy,
+        )
+        self.addCleanup(harness.cleanup)
+        before_a = copy.deepcopy(harness.store.records["a"]["metadata"])
+        before_b = copy.deepcopy(harness.store.records["b"]["metadata"])
+
+        result = harness.consolidator.consolidate(scope="project", project_id="hippo")
+        op_id = result.details[0]["operation_id"]
+        harness.store.fail_on = {"b"}
+        with self.assertRaises(RuntimeError):
+            harness.consolidator.applier.revert(op_id)
+
+        entry = harness.consolidator.applier.journal.load(op_id)
+        self.assertEqual(entry["status"], "reverting")
+        self.assertTrue(entry["revert_steps"]["winner_restore"])
+        self.assertFalse(entry["revert_steps"]["loser_restore"])
+        self.assertEqual(harness.store.records["a"]["metadata"], before_a)
+
+        harness.store.fail_on = None
+        reverted = harness.consolidator.applier.revert(op_id)
+        self.assertEqual(reverted["status"], "reverted")
+        self.assertEqual(harness.store.records["a"]["metadata"], before_a)
+        self.assertEqual(harness.store.records["b"]["metadata"], before_b)
 
     def test_disabling_jev_preserves_applied_merges_and_completes_recovery(self):
         client = _FakeJevClient(choice="EQUIVALENT")

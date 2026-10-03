@@ -18,11 +18,13 @@ Jev 接管执行模式（`JevTakeoverClassifier`）对运行环境执行严格�
 3. **合格校准产物准入**：
    - 校准产物状态必须为 `status == "GO"`；
    - `qualification.is_qualified_for_takeover` 必须为 `True`；
-   - 产物内部的 `active_configuration` 必须与运行时参数完全对齐。
+   - 产物内部的 `active_configuration` 必须与运行时参数完全对齐；
+   - 两类破坏性关系的 `min_probability` / `min_margin` 必须是 `[0, 1]` 内的有限数值；NaN、Infinity、布尔值、字符串或越界值均拒绝加载，避免阈值比较 fail-open。
 4. **硬性运行预算截断**：
    - 单次治理运行支持设置最大调用次数（`max_calls`，默认 200）与运行时间截止期（`max_elapsed_seconds`，默认 60s）；
    - 达到任一预算阈值后，后续候选对全部安全弃权为 `DISTINCT`，并标记运行状态为 `degraded`。
 5. **Fail-Closed 弃权与绝不静默回退**：
+   - 本地输入门禁先于任何 Jev 调用：空事实直接弃权；若秘密检测命中、意味着清洗会改变原文，则以 `input_requires_redaction` 弃权并保持零出网；JevClient 本地输入预算超限则以 `input_budget_exceeded` 弃权；
    - 当概率低于校准阈值、Margin 低于门槛、Top-1 概率并列（Tie）、服务异常或网络超时时，一律判定为 `DISTINCT` 并输出显式证据；
    - **严禁静默回退**：接管模式下绝不隐式调用远程大模型兜底，确保运行成本与行为完全可控。
 
@@ -147,10 +149,11 @@ print(f"操作已回滚: 败者 {revert_summary['loser_id']} 已重新激活为 
 ```
 
 - **回滚保障**：
-  - 败者记忆元数据中的 `status` 恢复为 `active`，清除 `superseded_by` 等标记；
-  - 胜者记忆的 `merged_ids` 中剔除该败者，并重新计算修正确认计票；
-  - 日志条目标记为 `status: "reverted"`；
-  - 下游 `engine.search()` 即刻重新能够召回被恢复的败者记忆。
+  - Apply 在首次写入前冻结 winner/loser 的完整原始 metadata，并记录两侧 post-version；回滚不做不可逆的 lineage 反向猜算；
+  - 回滚会精确恢复合并前的 lineage、`confirmation_count`、`merged_sources`、`last_confirmed_at` 与 lifecycle 元数据，因此 loser 已包含嵌套 lineage 时也不会把其后代残留在 winner；
+  - 若任一记录在 Apply 完成后又被 Hot/Warm Path 或其他治理操作修改，version guard 会拒绝回滚，避免覆盖较新的事实；
+  - winner/loser 两个恢复步骤以 `reverting -> reverted` 写入 journal；中途崩溃后可安全重试并续做未完成步骤；
+  - 下游 `engine.search()` 在回滚完成后重新能够召回被恢复的败者记忆。
 
 ### 场景三：平滑停用 Jev 接管
 若需紧急停用 Jev：
