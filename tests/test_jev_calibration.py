@@ -216,8 +216,16 @@ class JevCalibrationTests(unittest.TestCase):
         artifact = calibrate(
             dataset, changed, gate_policy=policy, thresholds=floors
         )
-        self.assertGreaterEqual(
-            artifact["thresholds"]["EQUIVALENT"]["min_probability"], 0.85
+        selected = artifact["thresholds"]["EQUIVALENT"]
+        self.assertTrue(
+            selected["min_probability"] > floors["EQUIVALENT"].min_probability
+            or selected["min_margin"] > floors["EQUIVALENT"].min_margin
+        )
+        self.assertEqual(
+            artifact["metrics"]["calibration_split"]["overall"]["false_merge"], 0
+        )
+        self.assertEqual(
+            artifact["threshold_selection"]["EQUIVALENT"]["accepted"], 2
         )
         self.assertEqual(
             artifact["threshold_selection"]["EQUIVALENT"]["source"],
