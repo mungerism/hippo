@@ -592,6 +592,30 @@ def validate_calibration(
             f"artifact disqualified from takeover: {'; '.join(reasons) if reasons else 'NO_GO status'}"
         )
 
+    thresholds = artifact.get("thresholds")
+    expected_relations = {"EQUIVALENT", "CONFLICT"}
+    if not isinstance(thresholds, Mapping) or set(thresholds) != expected_relations:
+        raise CalibrationMismatchError(
+            "calibration thresholds must contain exactly EQUIVALENT and CONFLICT"
+        )
+    for relation in sorted(expected_relations):
+        relation_thresholds = thresholds.get(relation)
+        if not isinstance(relation_thresholds, Mapping):
+            raise CalibrationMismatchError(
+                f"{relation} thresholds must be a mapping"
+            )
+        for threshold_name in ("min_probability", "min_margin"):
+            raw_value = relation_thresholds.get(threshold_name)
+            if (
+                isinstance(raw_value, bool)
+                or not isinstance(raw_value, (int, float))
+                or not math.isfinite(float(raw_value))
+                or not 0 <= float(raw_value) <= 1
+            ):
+                raise CalibrationMismatchError(
+                    f"{relation}.{threshold_name} must be a finite number in [0, 1]"
+                )
+
     active = artifact.get("active_configuration")
     if not isinstance(active, Mapping):
         raise CalibrationNotQualifiedError("active configuration absent in calibration artifact")

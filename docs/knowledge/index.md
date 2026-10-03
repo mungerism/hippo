@@ -16,3 +16,4 @@
 | [Jev Cold Path 显式旁路观察](/knowledge/jev-shadow) | Jev 旁路 | allowlist、预算、匿名差异及默认零出网边界 |
 | [Jev 成对关系离线评测](/knowledge/jev-evaluation) | Jev 离线评测流水线 | 成对样本规范、合成录制回放、事实簇物理隔离与多维度质量报告 |
 | [Jev 分类校准与门禁](/knowledge/jev-calibration) | Jev 分类校准与安全门禁 | 破坏性关系双阈值独立约束、RFC Go/No-Go 判定与合格配置导出 |
+| [Jev 关系分类受控接管](/knowledge/jev-takeover) | Jev 治理接管与排障 | 严格准入门禁、Fail-closed 保活、完整证据链与误合并定向回滚 |

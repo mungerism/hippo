@@ -179,6 +179,7 @@ class _ColdStore:
         if metadata:
             merged = dict(record.get("metadata", {}))
             merged.update(metadata)
+            merged = {k: v for k, v in merged.items() if v is not None}
             record["metadata"] = merged
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         self.update_calls.append({"id": memory_id, "text": text, "metadata": metadata})
@@ -233,7 +234,8 @@ class _ScriptedLLM:
 
 class _Harness:
     def __init__(self, records, *, semantic_scores=None, scripted="EQUIVALENT", classifier=None,
-                 shadow_backend=None, shadow_policy=None):
+                 shadow_backend=None, shadow_policy=None,
+                 takeover_backend=None, takeover_policy=None):
         self.tmp = tempfile.TemporaryDirectory()
         self.lock_dir = Path(self.tmp.name) / "locks"
         self.operations_dir = Path(self.tmp.name) / "operations"
@@ -255,6 +257,8 @@ class _Harness:
             classifier_llm=self.classifier_llm,
             shadow_backend=shadow_backend,
             shadow_policy=shadow_policy,
+            takeover_backend=takeover_backend,
+            takeover_policy=takeover_policy,
             applier=ConsolidationApplier(
                 self.engine,
                 journal=OperationJournal(self.operations_dir),

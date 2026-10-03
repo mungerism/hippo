@@ -58,6 +58,8 @@ STATUS_APPLYING = "applying"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_STALE = "stale"
+STATUS_REVERTING = "reverting"
+STATUS_REVERTED = "reverted"
 
 # Journal statuses a crash-recovery pass still has to deal with. Completed
 # entries are done; stale entries are terminal for their operation_id by
@@ -98,6 +100,7 @@ class OperationPlan:
     observed_winner_version: str
     observed_loser_version: str
     reason: str
+    evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +112,7 @@ class OperationPlan:
             "observed_winner_version": self.observed_winner_version,
             "observed_loser_version": self.observed_loser_version,
             "reason": self.reason,
+            "evidence": dict(self.evidence) if self.evidence else {},
         }
 
 
@@ -201,6 +205,7 @@ def build_operation_plan(
         observed_winner_version=observed_winner_version,
         observed_loser_version=observed_loser_version,
         reason=decision.reason,
+        evidence=dict(decision.evidence) if decision.evidence else {},
     )
 
 
@@ -525,7 +530,11 @@ class ConsolidationApplier:
         if loser_pending and _already_superseded_by(
             loser, plan.winner_id, self._supersede_reason(plan)
         ):
+            # The loser mutation may have landed before a crash but before
+            # its journal step was persisted. Adopt that exact post-state so
+            # a later targeted revert can still version-guard the rollback.
             steps["loser_supersede"] = True
+            entry.setdefault("post_loser_version", record_version(loser))
             loser_pending = False
             self._save(entry)
 
@@ -557,6 +566,16 @@ class ConsolidationApplier:
         if loser_pending and record_version(loser) != plan.observed_loser_version:
             return self._mark_stale(entry, plan, "loser", loser)
 
+        # Freeze the exact pre-operation metadata before the first mutation.
+        # Revert uses these snapshots rather than trying to reverse lineage
+        # arithmetic, which is not generally invertible once nested members,
+        # sources and freshness have been aggregated.
+        if "pre_winner_metadata" not in entry:
+            entry["pre_winner_metadata"] = dict(metadata_of(winner))
+        if "pre_loser_metadata" not in entry:
+            entry["pre_loser_metadata"] = dict(metadata_of(loser))
+        self._save(entry)
+
         if winner_pending:
             winner_patch = self._equivalent_winner_patch(plan, winner, loser)
             entry["winner_patch"] = winner_patch
@@ -583,10 +602,14 @@ class ConsolidationApplier:
                 },
             )
             loser_superseded = True
+            updated_loser = self.engine.get(plan.loser_id)
+            entry["post_loser_version"] = (
+                record_version(updated_loser) if updated_loser is not None else None
+            )
             steps["loser_supersede"] = True
-            # No post-apply fingerprint needed here: supersede is the final
-            # step, no pending mutation remains that a later retry could
-            # misapply against a further-touched loser.
+            # The post fingerprint is needed by targeted revert: rollback
+            # must refuse to overwrite any Hot/Warm write that happened after
+            # this operation completed.
             self._save(entry)
 
         entry["status"] = STATUS_COMPLETED
@@ -827,3 +850,239 @@ class ConsolidationApplier:
             status=RESULT_FAILED,
             error=error,
         )
+
+    def revert(self, operation_id: str) -> dict[str, Any]:
+        """Crash-resumable, version-guarded reversal of one completed operation.
+
+        Apply freezes the exact pre-operation metadata for both records and
+        post-operation fingerprints. Revert restores those snapshots under the
+        same per-identity lock. If either record changed after apply, rollback
+        fails closed instead of clobbering newer Hot/Warm or consolidation
+        writes. The two restore steps are journaled so a crash can be retried
+        without double-applying either side.
+        """
+        entry = self.journal.load(operation_id)
+        if entry is None:
+            raise ValueError(f"operation {operation_id} not found in journal")
+
+        status = entry.get("status")
+        if status == STATUS_REVERTED:
+            return {
+                "operation_id": operation_id,
+                "status": STATUS_REVERTED,
+                "winner_id": str(entry["winner_id"]),
+                "loser_id": str(entry["loser_id"]),
+            }
+        if status not in (STATUS_COMPLETED, STATUS_REVERTING):
+            raise ValueError(
+                f"operation {operation_id} is in status '{status}', "
+                "only completed/reverting operations can be reverted"
+            )
+
+        identity = entry.get("identity")
+        if not identity or len(identity) < 2:
+            raise ValueError(f"operation {operation_id} missing identity in journal")
+        user_id, agent_id = str(identity[0]), str(identity[1])
+        winner_id = str(entry["winner_id"])
+        loser_id = str(entry["loser_id"])
+        relation = str(entry.get("relation") or "")
+
+        pre_winner = entry.get("pre_winner_metadata")
+        pre_loser = entry.get("pre_loser_metadata")
+        if not isinstance(pre_winner, Mapping) or not isinstance(pre_loser, Mapping):
+            raise ValueError(
+                f"operation {operation_id} lacks rollback metadata snapshots"
+            )
+
+        def _restore_patch(
+            record: Mapping[str, Any], snapshot: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            current = dict(metadata_of(record))
+            target = dict(snapshot)
+            # Metadata updates are merge-based. Explicit None removes keys that
+            # were introduced by the consolidation but absent before it.
+            patch = {key: None for key in current if key not in target}
+            patch.update(target)
+            return patch
+
+        def _metadata_matches(
+            record: Mapping[str, Any], snapshot: Mapping[str, Any]
+        ) -> bool:
+            return dict(metadata_of(record)) == dict(snapshot)
+
+        def _read_for_write(memory_id: str) -> Optional[Mapping[str, Any]]:
+            strict = getattr(self.engine, "_get_for_write", None)
+            return strict(memory_id) if strict is not None else self.engine.get(memory_id)
+
+        with consolidation_lock(
+            user_id, agent_id, base_dir=self.lock_dir, timeout=self.lock_timeout
+        ):
+            # Another caller may have completed the same revert while this
+            # caller was waiting for the identity lock. Reload the journal
+            # inside the lock so concurrent reversals are idempotent instead
+            # of acting on a stale pre-lock status snapshot.
+            latest_entry = self.journal.load(operation_id)
+            if latest_entry is None:
+                raise ValueError(
+                    f"operation {operation_id} vanished from journal during revert"
+                )
+            entry = latest_entry
+            status = entry.get("status")
+            if status == STATUS_REVERTED:
+                return {
+                    "operation_id": operation_id,
+                    "status": STATUS_REVERTED,
+                    "winner_id": str(entry["winner_id"]),
+                    "loser_id": str(entry["loser_id"]),
+                }
+            if status not in (STATUS_COMPLETED, STATUS_REVERTING):
+                raise ValueError(
+                    f"operation {operation_id} changed to status '{status}' "
+                    "while waiting for the revert lock"
+                )
+            latest_identity = list(entry.get("identity") or [])
+            if latest_identity != [user_id, agent_id]:
+                raise ValueError(
+                    f"operation {operation_id} identity changed in journal"
+                )
+            relation = str(entry.get("relation") or "")
+            pre_winner = entry.get("pre_winner_metadata")
+            pre_loser = entry.get("pre_loser_metadata")
+            if not isinstance(pre_winner, Mapping) or not isinstance(pre_loser, Mapping):
+                raise ValueError(
+                    f"operation {operation_id} lacks rollback metadata snapshots"
+                )
+
+            winner = _read_for_write(winner_id)
+            loser = _read_for_write(loser_id)
+            if winner is None or loser is None:
+                missing = "winner" if winner is None else "loser"
+                raise ValueError(
+                    f"operation {operation_id} cannot be reverted: {missing} not found"
+                )
+
+            steps = entry.setdefault(
+                "revert_steps",
+                {
+                    "winner_restore": relation != RELATION_EQUIVALENT,
+                    "loser_restore": False,
+                },
+            )
+
+            if status == STATUS_COMPLETED:
+                expected_winner_version = (
+                    entry.get("post_winner_version")
+                    if relation == RELATION_EQUIVALENT
+                    else entry.get("observed_winner_version")
+                )
+                expected_loser_version = entry.get("post_loser_version")
+                if not expected_winner_version or not expected_loser_version:
+                    raise ValueError(
+                        f"operation {operation_id} lacks rollback post-state versions"
+                    )
+                if record_version(winner) != expected_winner_version:
+                    raise ValueError(
+                        f"operation {operation_id} cannot be reverted: "
+                        "winner changed since apply"
+                    )
+                if record_version(loser) != expected_loser_version:
+                    raise ValueError(
+                        f"operation {operation_id} cannot be reverted: "
+                        "loser changed since apply"
+                    )
+                entry["status"] = STATUS_REVERTING
+                self._save(entry)
+            else:
+                # Retry after a crash in revert. Completed restore steps are
+                # guarded by their own post-restore fingerprints; an update
+                # that landed before its step flag was saved is adopted only
+                # when the metadata already equals the frozen snapshot.
+                if relation == RELATION_EQUIVALENT:
+                    if steps.get("winner_restore"):
+                        expected = entry.get("reverted_winner_version")
+                        if expected and record_version(winner) != expected:
+                            raise ValueError(
+                                f"operation {operation_id} cannot resume revert: "
+                                "winner changed after restore"
+                            )
+                    else:
+                        expected = entry.get("post_winner_version")
+                        if (
+                            expected
+                            and record_version(winner) != expected
+                            and not _metadata_matches(winner, pre_winner)
+                        ):
+                            raise ValueError(
+                                f"operation {operation_id} cannot resume revert: "
+                                "winner changed"
+                            )
+                elif record_version(winner) != str(entry["observed_winner_version"]):
+                    raise ValueError(
+                        f"operation {operation_id} cannot resume revert: "
+                        "winner changed"
+                    )
+
+                if steps.get("loser_restore"):
+                    expected = entry.get("reverted_loser_version")
+                    if expected and record_version(loser) != expected:
+                        raise ValueError(
+                            f"operation {operation_id} cannot resume revert: "
+                            "loser changed after restore"
+                        )
+                else:
+                    expected = entry.get("post_loser_version")
+                    if (
+                        expected
+                        and record_version(loser) != expected
+                        and not _metadata_matches(loser, pre_loser)
+                    ):
+                        raise ValueError(
+                            f"operation {operation_id} cannot resume revert: "
+                            "loser changed"
+                        )
+
+            if relation == RELATION_EQUIVALENT and not steps.get("winner_restore"):
+                if not _metadata_matches(winner, pre_winner):
+                    self.engine.update(
+                        winner_id, metadata=_restore_patch(winner, pre_winner)
+                    )
+                winner = _read_for_write(winner_id)
+                if winner is None:
+                    raise ValueError(
+                        f"operation {operation_id} cannot resume revert: winner vanished"
+                    )
+                entry["reverted_winner_version"] = record_version(winner)
+                steps["winner_restore"] = True
+                self._save(entry)
+
+            if not steps.get("loser_restore"):
+                # Re-read because winner restoration may call through the
+                # engine and release/re-enter the process-local RLock.
+                loser = _read_for_write(loser_id)
+                if loser is None:
+                    raise ValueError(
+                        f"operation {operation_id} cannot resume revert: loser vanished"
+                    )
+                if not _metadata_matches(loser, pre_loser):
+                    self.engine.update(
+                        loser_id, metadata=_restore_patch(loser, pre_loser)
+                    )
+                loser = _read_for_write(loser_id)
+                if loser is None:
+                    raise ValueError(
+                        f"operation {operation_id} cannot resume revert: loser vanished"
+                    )
+                entry["reverted_loser_version"] = record_version(loser)
+                steps["loser_restore"] = True
+                self._save(entry)
+
+            entry["status"] = STATUS_REVERTED
+            entry["reverted_at"] = _utc_now_iso()
+            self._save(entry)
+
+            return {
+                "operation_id": operation_id,
+                "status": STATUS_REVERTED,
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+            }
