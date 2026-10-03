@@ -57,7 +57,9 @@ class JevCalibrationTests(unittest.TestCase):
             "EQUIVALENT": RelationThreshold(min_probability=0.5, min_margin=0.05),
             "CONFLICT": RelationThreshold(min_probability=0.5, min_margin=0.05),
         }
-        policy = CalibrationGatePolicy(min_test_samples=5)
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
         artifact = calibrate(
             dataset, recordings, gate_policy=policy, thresholds=low_thresholds
         )
@@ -75,8 +77,11 @@ class JevCalibrationTests(unittest.TestCase):
 
     def test_qualified_calibration_yields_go_and_active_configuration(self):
         dataset, recordings = load_fixtures()
-        policy = CalibrationGatePolicy(min_test_samples=5)
-        # Standard conservative thresholds will abstain on mix-t1 (prob 0.52 < 0.80)
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
+        # Standard conservative floors remain safe on the calibration split and
+        # abstain on mix-t1 (prob 0.52 < 0.80).
         artifact = calibrate(dataset, recordings, gate_policy=policy)
 
         self.assertEqual(artifact["status"], "GO")
@@ -95,7 +100,9 @@ class JevCalibrationTests(unittest.TestCase):
 
     def test_model_and_rubric_mismatch_detection(self):
         dataset, recordings = load_fixtures()
-        policy = CalibrationGatePolicy(min_test_samples=5)
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
         artifact = calibrate(dataset, recordings, gate_policy=policy)
 
         # 1. Model mismatch
@@ -108,7 +115,13 @@ class JevCalibrationTests(unittest.TestCase):
             validate_calibration(artifact, expected_rubric="memory-relation-v2")
         self.assertIn("rubric mismatch", str(ctx.exception))
 
-        # 3. Disqualified artifact raises CalibrationNotQualifiedError
+        # 3. Rubric hash mismatch is independently detected.
+        tampered_hash = copy.deepcopy(artifact)
+        tampered_hash["metadata"]["rubric_hash"] = "deadbeefdeadbeef"
+        with self.assertRaisesRegex(CalibrationMismatchError, "rubric hash mismatch"):
+            validate_calibration(tampered_hash)
+
+        # 4. Disqualified artifact raises CalibrationNotQualifiedError
         disqualified = copy.deepcopy(artifact)
         disqualified["status"] = "NO_GO"
         disqualified["qualification"]["is_qualified_for_takeover"] = False
@@ -117,7 +130,9 @@ class JevCalibrationTests(unittest.TestCase):
 
     def test_language_slices_and_rule_of_three_error_upper_bound(self):
         dataset, recordings = load_fixtures()
-        policy = CalibrationGatePolicy(min_test_samples=5)
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
         artifact = calibrate(dataset, recordings, gate_policy=policy)
 
         test_metrics = artifact["metrics"]["test_split"]
@@ -129,6 +144,7 @@ class JevCalibrationTests(unittest.TestCase):
         self.assertEqual(zh["false_supersede"], 0)
         self.assertEqual(zh["coverage"], 1.0)
         self.assertIsNotNone(zh["error_upper_bound_95"])
+        self.assertEqual(zh["destructive_accepted"], 1)
         self.assertIn("latency_ms", zh)
         self.assertIn("tokens", zh)
         self.assertIn("cost_usd", zh)
@@ -138,14 +154,24 @@ class JevCalibrationTests(unittest.TestCase):
         self.assertEqual(mixed["false_supersede"], 0)
         self.assertEqual(mixed["coverage"], 0.5)  # 1 accepted out of 2
         self.assertIsNotNone(mixed["error_upper_bound_95"])
+        self.assertEqual(mixed["destructive_accepted"], 1)
 
-        # Rule of three calculation
+        overall = test_metrics["overall"]
+        self.assertEqual(overall["accepted"], 4)
+        self.assertEqual(overall["destructive_accepted"], 3)
+        self.assertAlmostEqual(overall["error_upper_bound_95"], 0.9986, places=4)
+        self.assertIn("brier_score", overall)
+
+        # Rule of three calculation is a probability bound and is capped at 1.
         self.assertAlmostEqual(calculate_error_upper_bound(10), 0.3, places=2)
+        self.assertEqual(calculate_error_upper_bound(1), 1.0)
         self.assertIsNone(calculate_error_upper_bound(0))
 
     def test_load_calibration_file(self):
         dataset, recordings = load_fixtures()
-        policy = CalibrationGatePolicy(min_test_samples=5)
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
         artifact = calibrate(dataset, recordings, gate_policy=policy)
 
         with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as f:
@@ -158,6 +184,54 @@ class JevCalibrationTests(unittest.TestCase):
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
+    def test_calibration_split_can_raise_relation_threshold(self):
+        dataset, recordings = load_fixtures()
+        changed = copy.deepcopy(recordings)
+        changed["backends"]["jev"]["observations"]["en-c1"].update(
+            relation="EQUIVALENT",
+            probabilities={"EQUIVALENT": 0.6, "CONFLICT": 0.1, "DISTINCT": 0.3},
+            provider_confidence=0.3,
+        )
+        floors = {
+            "EQUIVALENT": RelationThreshold(min_probability=0.5, min_margin=0.05),
+            "CONFLICT": RelationThreshold(min_probability=0.5, min_margin=0.05),
+        }
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
+        artifact = calibrate(
+            dataset, changed, gate_policy=policy, thresholds=floors
+        )
+        self.assertGreaterEqual(
+            artifact["thresholds"]["EQUIVALENT"]["min_probability"], 0.85
+        )
+        self.assertEqual(
+            artifact["threshold_selection"]["EQUIVALENT"]["source"],
+            "calibration_split",
+        )
+
+    def test_recording_rubric_hash_mismatch_fails_closed(self):
+        dataset, recordings = load_fixtures()
+        recordings["backends"]["jev"]["rubric_hash"] = "stale-rubric"
+        with self.assertRaisesRegex(CalibrationMismatchError, "rubric hash mismatch"):
+            calibrate(dataset, recordings)
+
+    def test_distinct_probability_tie_is_an_abstention(self):
+        dataset, recordings = load_fixtures()
+        changed = copy.deepcopy(recordings)
+        changed["backends"]["jev"]["observations"]["zh-t1"].update(
+            relation="DISTINCT",
+            probabilities={"EQUIVALENT": 0.0, "CONFLICT": 0.5, "DISTINCT": 0.5},
+            provider_confidence=0.0,
+        )
+        policy = CalibrationGatePolicy(
+            min_test_samples=5, require_takeover_evidence=False
+        )
+        artifact = calibrate(dataset, changed, gate_policy=policy)
+        zh = artifact["metrics"]["test_split"]["by_language"]["zh"]
+        self.assertEqual(zh["accepted"], 1)
+        self.assertEqual(zh["abstentions"], 1)
+
     def test_live_benchmark_recording_with_mock_client(self):
         dataset, _ = load_fixtures()
         mock_client = MagicMock()
@@ -165,6 +239,8 @@ class JevCalibrationTests(unittest.TestCase):
             choice="EQUIVALENT",
             probabilities={"EQUIVALENT": 0.88, "CONFLICT": 0.04, "DISTINCT": 0.08},
             provider_confidence=0.82,
+            input_tokens=318,
+            output_tokens=34,
         )
 
         live_recordings = run_live_benchmark(
@@ -181,7 +257,13 @@ class JevCalibrationTests(unittest.TestCase):
         self.assertEqual(obs["relation"], "EQUIVALENT")
         self.assertEqual(obs["probabilities"]["EQUIVALENT"], 0.88)
         self.assertGreater(obs["latency_ms"], 0)
-        self.assertGreater(obs["input_tokens"], 0)
+        self.assertEqual(obs["input_tokens"], 318)
+        self.assertEqual(obs["output_tokens"], 34)
+        self.assertGreater(obs["cost_usd"], 0)
+        baseline = live_recordings["backends"]["baseline"]
+        self.assertEqual(baseline["origin"], "not_measured_live_benchmark")
+        self.assertIsNone(baseline["observations"]["zh-c1"]["relation"])
+        self.assertIn("rubric_hash", live_recordings["backends"]["jev"])
 
 
 if __name__ == "__main__":
