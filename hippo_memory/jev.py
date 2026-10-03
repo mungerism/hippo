@@ -51,8 +51,8 @@ class JevChoice:
     choice: str
     probabilities: Mapping[str, float]
     provider_confidence: float
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def _probability(value: Any) -> float:
