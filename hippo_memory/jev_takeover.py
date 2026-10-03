@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -53,8 +54,34 @@ class JevTakeoverPolicy:
     deadline_per_call: float = 5.0
 
     def __post_init__(self) -> None:
-        if not self.allowed_projects:
-            raise ValueError("allowed_projects must not be empty for Jev takeover")
+        if (
+            not isinstance(self.allowed_projects, frozenset)
+            or not self.allowed_projects
+            or any(
+                not isinstance(project, str) or not project.strip()
+                for project in self.allowed_projects
+            )
+        ):
+            raise ValueError(
+                "allowed_projects must be a non-empty frozenset of project IDs"
+            )
+        if (
+            isinstance(self.max_calls, bool)
+            or not isinstance(self.max_calls, int)
+            or self.max_calls < 0
+        ):
+            raise ValueError("max_calls must be a nonnegative integer")
+        for field_name, value in (
+            ("max_elapsed_seconds", self.max_elapsed_seconds),
+            ("deadline_per_call", self.deadline_per_call),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{field_name} must be finite and positive")
         validate_calibration(
             self.calibration_artifact,
             expected_model=JEV_MODEL,
@@ -78,7 +105,28 @@ _SAFE_FAILURE_CODES = {
     "retry_exhausted",
     "not_allowed",
     "budget_exhausted",
+    "invalid_input",
+    "input_requires_redaction",
 }
+
+
+_SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\b(?:sk|rk)-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"),
+    re.compile(
+        r"(?i)\b(?:api[_ -]?key|access[_ -]?token|secret|password|passwd|pwd)"
+        r"\b\s*[:=]\s*[\"']?[^\s\"';]{8,}"
+    ),
+)
+
+
+def _requires_redaction(text: str) -> bool:
+    """Return True when local secret scrubbing would alter the fact text."""
+    return any(pattern.search(text) is not None for pattern in _SECRET_PATTERNS)
 
 
 def _safe_failure_code(code: str) -> str:
@@ -171,7 +219,25 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
         ):
             return self._abstain("project_not_allowed", failure_code="not_allowed")
 
-        # 2. Budget Guards: max calls and time elapsed
+        # 2. Input guard. RFC-0001 forbids sending a pair when local secret
+        # cleaning would alter semantic text; empty fields also abstain. No
+        # redacted/truncated text is ever promoted to a destructive decision.
+        memory_a_text = memory_a.get("memory")
+        memory_b_text = memory_b.get("memory")
+        if (
+            not isinstance(memory_a_text, str)
+            or not memory_a_text.strip()
+            or not isinstance(memory_b_text, str)
+            or not memory_b_text.strip()
+        ):
+            return self._abstain("input_empty", failure_code="invalid_input")
+        if _requires_redaction(memory_a_text) or _requires_redaction(memory_b_text):
+            return self._abstain(
+                "input_requires_redaction",
+                failure_code="input_requires_redaction",
+            )
+
+        # 3. Budget Guards: max calls and time elapsed
         if self.calls >= self.policy.max_calls:
             return self._abstain(
                 "call_budget_exhausted", failure_code="budget_exhausted"
@@ -186,11 +252,11 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
         remaining_time = max(0.1, self.policy.max_elapsed_seconds - elapsed)
         deadline = min(self.policy.deadline_per_call, remaining_time)
 
-        # 3. Canonical sort for deterministic ordering
+        # 4. Canonical sort for deterministic ordering
         first, second = sorted(
             (
-                (str(memory_a.get("id", "")), str(memory_a.get("memory", ""))),
-                (str(memory_b.get("id", "")), str(memory_b.get("memory", ""))),
+                (str(memory_a.get("id", "")), memory_a_text),
+                (str(memory_b.get("id", "")), memory_b_text),
             )
         )
 
@@ -200,8 +266,16 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
                 first[1], second[1], deadline_seconds=deadline
             )
         except JevFailure as exc:
+            failure_code = str(exc)
+            if failure_code == "request_too_large":
+                # JevClient rejects this locally before any HTTP request.
+                return self._abstain(
+                    "input_budget_exceeded", failure_code=failure_code
+                )
             self.failures += 1
-            return self._abstain("jev_service_failure", failure_code=str(exc))
+            return self._abstain(
+                "jev_service_failure", failure_code=failure_code
+            )
         except Exception:
             self.failures += 1
             return self._abstain(
