@@ -263,6 +263,11 @@ def evaluate(
                 if backend_name == "jev" and relation is not None
                 else None
             )
+            margin = None
+            if backend_name == "jev" and observation.get("probabilities"):
+                probs = sorted(observation["probabilities"].values(), reverse=True)
+                if len(probs) >= 2:
+                    margin = round(probs[0] - probs[1], 6)
             rows.append(
                 {
                     "id": sample["id"],
@@ -274,6 +279,10 @@ def evaluate(
                     "prediction": relation,
                     "abstain_reason": observation.get("abstain_reason"),
                     "selected_probability": probability,
+                    "margin": margin,
+                    "probabilities": (
+                        observation.get("probabilities") if backend_name == "jev" else None
+                    ),
                     "provider_confidence": observation.get("provider_confidence")
                     if backend_name == "jev"
                     else None,

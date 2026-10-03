@@ -18,7 +18,13 @@ from hippo_memory.jev import (
 
 
 def response(
-    *, choice="EQUIVALENT", probabilities=None, confidence=0.71, model=JEV_MODEL
+    *,
+    choice="EQUIVALENT",
+    probabilities=None,
+    confidence=0.71,
+    model=JEV_MODEL,
+    input_tokens=296,
+    output_tokens=20,
 ):
     return {
         "model": model,
@@ -31,6 +37,7 @@ def response(
                 "confidence": confidence,
             }
         },
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
     }
 
 
@@ -105,6 +112,7 @@ class JevClientTests(unittest.TestCase):
             {},
             response(model="jev-latest"),
             response(confidence=float("nan")),
+            response(input_tokens=-1),
             response(
                 probabilities={"EQUIVALENT": 0.9, "CONFLICT": 0.9, "DISTINCT": 0.1}
             ),
