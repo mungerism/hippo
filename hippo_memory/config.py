@@ -286,7 +286,7 @@ class HippoConfig:
         self.lexical_semantic_threshold = float(
             os.getenv("HIPPO_LEXICAL_SEMANTIC_THRESHOLD", "0.48")
         )
-        self.max_injected = int(os.getenv("HIPPO_MAX_INJECTED", "3"))
+        self.max_injected = int(os.getenv("HIPPO_MAX_INJECTED", "5"))
         self.gate_enabled = os.getenv("HIPPO_GATE_ENABLED", "1").lower() in ("1", "true", "yes")
 
         from hippo_memory.gate import SearchGateConfig

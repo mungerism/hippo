@@ -144,8 +144,8 @@ def search_memories(
         Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
     ] = None,
     limit: Annotated[
-        int, Field(description="Maximum number of results to return (default 3).")
-    ] = 3,
+        int, Field(description="Maximum number of results to return (default 5).")
+    ] = 5,
     user_id: Annotated[
         Optional[str], Field(description="Optional user identifier.")
     ] = None,
@@ -176,7 +176,7 @@ def search_memories(
     Args:
         query: Natural language question or search query (e.g. 'tech stack choices', 'CQRS architecture', 'coding standards').
         filters: Optional structured filters dictionary.
-        limit: Maximum number of results to return (default: 3).
+        limit: Maximum number of results to return (default: 5).
         user_id: Optional user identifier.
         agent_id: Optional agent or project identifier.
         scope: Search scope: 'all' (default, project + global) | 'global' (personal habits) | 'project' (current project).
@@ -198,7 +198,7 @@ def search_memories(
 
     try:
         engine = get_engine()
-        max_injected = getattr(engine.config, "max_injected", 3)
+        max_injected = getattr(engine.config, "max_injected", 5)
         effective_limit = min(limit, max_injected)
         if temporal_window is not None:
             recent_scope = scope
