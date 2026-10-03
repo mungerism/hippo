@@ -50,11 +50,12 @@
 - 崩溃恢复（`_recover_unfinished`）直接重放日志中冻结的 `OperationPlan`，**严禁在恢复阶段重新调用 Jev**，确保重放行为具有确定性，免受重放时外部服务可用性波动的干扰。
 
 ### 5. 定向误合并回滚与平滑停用演练
-- 在 `ConsolidationApplier` 中提供原子回滚 Seam `revert(operation_id)`：
-  - 校验操作是否为已完成状态；
-  - 在 Per-identity 互斥锁下，将软删除败者恢复为 `status="active"` 并清除其 `superseded_*` 元数据；
-  - 从胜者中剔除被合并项的引用与计票贡献；
-  - 将操作日志状态更新为 `reverted`，使误合并事实即时重新具备召回可见性；
+- 在 `ConsolidationApplier` 中提供版本保护、可断点续跑的定向回滚 Seam `revert(operation_id)`：
+  - Apply 首次写入前冻结 winner/loser 的完整原始 metadata，并在写入后记录两侧 post-version；
+  - 回滚在同一 Per-identity 互斥锁下先校验 post-version；若任一侧已被后续 Hot/Warm Path 或其他治理写入修改，则 Fail-Closed 拒绝覆盖；
+  - EQUIVALENT 回滚直接恢复冻结快照，因此嵌套 lineage、确认计数、来源集合与 freshness 都精确回到操作前状态，不依赖不可逆的反向计票；
+  - winner/loser 恢复步骤通过 `reverting -> reverted` journal 状态分别持久化，中途崩溃后重复调用可继续未完成步骤；
+  - CONFLICT 回滚同样恢复 loser 的操作前 metadata，使误替代事实重新具备召回可见性；
 - 随时可通过移除接管参数安全停用 Jev；停用 Jev 不会影响或回退已成功落地的历史治理结果。
 
 ---
