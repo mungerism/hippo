@@ -53,6 +53,9 @@ uv run python benchmarks/jev_calibration.py \
 === Calibration Status: NO_GO ===
 Disqualification reasons:
   - sample_size_insufficient: test split has 6 samples, minimum required by policy is 30
+  - non_decision_grade_measurements: takeover requires real or approved recordings for both baseline and Jev
+  - baseline_cost_missing: measured baseline cost is required for takeover
+  - latency_evidence_missing: measured baseline and Jev p95 are required
 Test split: count=6, accepted=4, coverage=0.8, false_merge=0, false_supersede=0, error_upper_bound_95=0.9986
 Wrote calibration artifact to benchmarks/reports/calibration_jev_v1.json
 ```
