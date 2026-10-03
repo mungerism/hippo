@@ -98,6 +98,7 @@ class OperationPlan:
     observed_winner_version: str
     observed_loser_version: str
     reason: str
+    evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +110,7 @@ class OperationPlan:
             "observed_winner_version": self.observed_winner_version,
             "observed_loser_version": self.observed_loser_version,
             "reason": self.reason,
+            "evidence": dict(self.evidence) if self.evidence else {},
         }
 
 
@@ -201,6 +203,7 @@ def build_operation_plan(
         observed_winner_version=observed_winner_version,
         observed_loser_version=observed_loser_version,
         reason=decision.reason,
+        evidence=dict(decision.evidence) if decision.evidence else {},
     )
 
 
@@ -827,3 +830,59 @@ class ConsolidationApplier:
             status=RESULT_FAILED,
             error=error,
         )
+
+    def revert(self, operation_id: str) -> dict[str, Any]:
+        """Revert a previously completed consolidation operation."""
+        entry = self.journal.load(operation_id)
+        if entry is None:
+            raise ValueError(f"operation {operation_id} not found in journal")
+        if entry.get("status") != STATUS_COMPLETED:
+            raise ValueError(
+                f"operation {operation_id} is in status '{entry.get('status')}', only completed operations can be reverted"
+            )
+
+        identity = entry.get("identity")
+        if not identity or len(identity) < 2:
+            raise ValueError(f"operation {operation_id} missing identity in journal")
+        user_id, agent_id = str(identity[0]), str(identity[1])
+        winner_id = str(entry["winner_id"])
+        loser_id = str(entry["loser_id"])
+
+        with consolidation_lock(
+            user_id, agent_id, base_dir=self.lock_dir, timeout=self.lock_timeout
+        ):
+            winner = self.engine.get(winner_id)
+            loser = self.engine.get(loser_id)
+
+            if loser is not None:
+                loser_meta = dict(metadata_of(loser))
+                loser_meta["superseded_by"] = None
+                loser_meta["superseded_at"] = None
+                loser_meta["supersede_reason"] = None
+                loser_meta["status"] = STATUS_ACTIVE
+                self.engine.update(loser_id, metadata=loser_meta)
+
+            if winner is not None:
+                winner_meta = dict(metadata_of(winner))
+                merged_ids = set(winner_meta.get("merged_ids", []))
+                merged_ids.discard(loser_id)
+                winner_meta["merged_ids"] = sorted(merged_ids)
+                contributions = dict(winner_meta.get("merged_contributions") or {})
+                if loser_id in contributions:
+                    contributions.pop(loser_id, None)
+                    winner_meta["merged_contributions"] = contributions
+                    winner_meta["confirmation_count"] = max(
+                        1, sum(contributions.values())
+                    )
+                self.engine.update(winner_id, metadata=winner_meta)
+
+            entry["status"] = "reverted"
+            entry["reverted_at"] = _utc_now_iso()
+            self._save(entry)
+
+            return {
+                "operation_id": operation_id,
+                "status": "reverted",
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+            }

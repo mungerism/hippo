@@ -50,7 +50,9 @@ from hippo_memory.decision import (
     RelationshipClassificationBackend,
     WinnerArbiter,
 )
+from hippo_memory.jev import JevClient
 from hippo_memory.jev_shadow import JevChoiceBackend, JevShadowPolicy, JevShadowRun
+from hippo_memory.jev_takeover import JevTakeoverClassifier, JevTakeoverPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ class ConsolidationResult:
     errors: List[str] = field(default_factory=list)
     details: List[Dict[str, Any]] = field(default_factory=list)
     shadow: Optional[Dict[str, Any]] = None
+    takeover: Optional[Dict[str, Any]] = None
 
     @property
     def is_success(self) -> bool:
@@ -124,6 +127,8 @@ class ConsolidationResult:
         }
         if self.shadow is not None:
             payload["shadow"] = self.shadow
+        if self.takeover is not None:
+            payload["takeover"] = self.takeover
         return payload
 
 
@@ -193,14 +198,22 @@ class MemoryConsolidator:
         classifier_llm: Optional[Any] = None,
         shadow_backend: Optional[JevChoiceBackend] = None,
         shadow_policy: Optional[JevShadowPolicy] = None,
+        takeover_backend: Optional[JevClient] = None,
+        takeover_policy: Optional[JevTakeoverPolicy] = None,
     ) -> None:
         if (shadow_backend is None) != (shadow_policy is None):
             raise ValueError("shadow_backend and shadow_policy must be supplied together")
+        if (takeover_backend is None) != (takeover_policy is None):
+            raise ValueError("takeover_backend and takeover_policy must be supplied together")
+        if takeover_backend is not None and classifier is not None:
+            raise ValueError("cannot specify both classifier and takeover_backend")
         self.engine = engine
         self._classifier_override = classifier
         self._classifier_llm = classifier_llm
         self._shadow_backend = shadow_backend
         self._shadow_policy = shadow_policy
+        self._takeover_backend = takeover_backend
+        self._takeover_policy = takeover_policy
         self.discovery = discovery or CandidateDiscovery(engine)
         self._classifier_degraded = False
         engine_cfg = getattr(engine, "config", None)
@@ -291,16 +304,30 @@ class MemoryConsolidator:
         result.seeds = candidate_set.seeds
         result.candidate_pairs = len(candidate_set.candidate_pairs)
 
-        decider = self._resolve_decider()
-        if self._classifier_degraded:
-            # Fail-closed deterministic mode is safe but means provider
-            # misconfiguration would silently stop conflict detection —
-            # surface it loudly instead of reporting a clean run.
-            result.errors.append(
-                "[classifier] isolated Cold Path LLM unavailable; "
-                "running deterministic exact-match-only mode "
-                "(non-exact pairs fail closed to DISTINCT)"
+        takeover_classifier: Optional[JevTakeoverClassifier] = None
+        if self._takeover_backend is not None and self._takeover_policy is not None:
+            takeover_classifier = JevTakeoverClassifier(
+                self._takeover_backend,
+                self._takeover_policy,
+                scope=scope,
+                project_id=project_id,
             )
+            decider = ConsolidationDecider(
+                classifier=takeover_classifier,
+                arbiter=WinnerArbiter(),
+            )
+            result.takeover = takeover_classifier.stats()
+        else:
+            decider = self._resolve_decider()
+            if self._classifier_degraded:
+                # Fail-closed deterministic mode is safe but means provider
+                # misconfiguration would silently stop conflict detection —
+                # surface it loudly instead of reporting a clean run.
+                result.errors.append(
+                    "[classifier] isolated Cold Path LLM unavailable; "
+                    "running deterministic exact-match-only mode "
+                    "(non-exact pairs fail closed to DISTINCT)"
+                )
 
         for edge in candidate_set.candidate_pairs:
             # Phase/operation context for the failure-report contract.
@@ -320,6 +347,14 @@ class MemoryConsolidator:
                 )
         if shadow_run is not None:
             result.shadow = shadow_run.report()
+        if takeover_classifier is not None:
+            takeover_stats = takeover_classifier.stats()
+            result.takeover = takeover_stats
+            if takeover_stats["status"] == "degraded":
+                result.errors.append(
+                    f"[takeover] Jev takeover run degraded "
+                    f"({takeover_stats['failures']} failure(s), {takeover_stats['abstentions']} abstention(s))"
+                )
         return result
 
     def _recover_unfinished(
@@ -344,6 +379,7 @@ class MemoryConsolidator:
                     observed_winner_version=str(entry["observed_winner_version"]),
                     observed_loser_version=str(entry["observed_loser_version"]),
                     reason=str(entry.get("reason") or ""),
+                    evidence=dict(entry.get("evidence") or {}),
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 result.errors.append(f"[recovery] malformed journal entry: {exc}")
