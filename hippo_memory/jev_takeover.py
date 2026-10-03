@@ -155,6 +155,7 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
         self._start_time = time.monotonic()
         self.calls = 0
         self.failures = 0
+        self.budget_exhausted = False
         self.abstentions = 0
         self.accepted_equivalent = 0
         self.accepted_conflict = 0
@@ -239,12 +240,14 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
 
         # 3. Budget Guards: max calls and time elapsed
         if self.calls >= self.policy.max_calls:
+            self.budget_exhausted = True
             return self._abstain(
                 "call_budget_exhausted", failure_code="budget_exhausted"
             )
 
         elapsed = time.monotonic() - self._start_time
         if elapsed >= self.policy.max_elapsed_seconds:
+            self.budget_exhausted = True
             return self._abstain(
                 "time_budget_exhausted", failure_code="budget_exhausted"
             )
@@ -389,11 +392,7 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
             or self.project_id not in self.policy.allowed_projects
         ):
             status = "not_allowed"
-        elif (
-            self.failures > 0
-            or self.calls >= self.policy.max_calls
-            or elapsed >= self.policy.max_elapsed_seconds
-        ):
+        elif self.failures > 0 or self.budget_exhausted:
             status = "degraded"
         else:
             status = "ok"
@@ -406,6 +405,7 @@ class JevTakeoverClassifier(RelationshipClassificationBackend):
             ),
             "calls": self.calls,
             "failures": self.failures,
+            "budget_exhausted": self.budget_exhausted,
             "abstentions": self.abstentions,
             "accepted_equivalent": self.accepted_equivalent,
             "accepted_conflict": self.accepted_conflict,

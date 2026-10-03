@@ -252,6 +252,10 @@ class TestJevTakeoverClassifierScopeAndBudget(unittest.TestCase):
         self.assertEqual(res1.relation, RELATION_EQUIVALENT)
         self.assertEqual(res2.relation, RELATION_EQUIVALENT)
         self.assertEqual(len(self.client.calls), 2)
+        # Reaching the numeric ceiling is not degradation when all required
+        # work completed; only an actually skipped subsequent pair exhausts it.
+        self.assertEqual(classifier.stats()["status"], "ok")
+        self.assertFalse(classifier.stats()["budget_exhausted"])
 
         # Call 3 exhausts budget
         res3 = classifier.classify(self.mem_a, self.mem_b)
@@ -260,6 +264,7 @@ class TestJevTakeoverClassifierScopeAndBudget(unittest.TestCase):
         self.assertEqual(res3.evidence.get("failure_code"), "budget_exhausted")
         self.assertEqual(len(self.client.calls), 2)
         self.assertEqual(classifier.stats()["status"], "degraded")
+        self.assertTrue(classifier.stats()["budget_exhausted"])
 
     def test_service_failure_fails_closed_to_distinct(self):
         client = _FakeJevClient(failure=JevFailure("http_503"))
