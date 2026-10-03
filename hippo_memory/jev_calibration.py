@@ -555,16 +555,13 @@ def validate_calibration(
     artifact: Mapping[str, Any],
     expected_model: str = JEV_MODEL,
     expected_rubric: str = JEV_RUBRIC_VERSION,
+    expected_rubric_hash: str | None = None,
 ) -> None:
-    """Validate a calibration artifact against runtime safety constraints.
-
-    Raises:
-        CalibrationMismatchError: If model or rubric differs from expected configuration.
-        CalibrationNotQualifiedError: If artifact is NO_GO or missing active configuration.
-    """
+    """Validate a calibration artifact against current runtime safety constraints."""
     if artifact.get("schema_version") != "calibration-artifact-v1":
         raise CalibrationMismatchError("unsupported calibration artifact schema")
 
+    expected_hash = expected_rubric_hash or compute_rubric_hash()
     meta = artifact.get("metadata", {})
     if meta.get("model") != expected_model:
         raise CalibrationMismatchError(
@@ -574,6 +571,11 @@ def validate_calibration(
         raise CalibrationMismatchError(
             f"rubric mismatch: artifact has '{meta.get('rubric_version')}', expected '{expected_rubric}'"
         )
+    if meta.get("rubric_hash") != expected_hash:
+        raise CalibrationMismatchError(
+            f"rubric hash mismatch: artifact has '{meta.get('rubric_hash')}', "
+            f"expected '{expected_hash}'"
+        )
 
     qualification = artifact.get("qualification", {})
     if not qualification.get("is_qualified_for_takeover") or artifact.get("status") != "GO":
@@ -582,23 +584,42 @@ def validate_calibration(
             f"artifact disqualified from takeover: {'; '.join(reasons) if reasons else 'NO_GO status'}"
         )
 
-    if not artifact.get("active_configuration"):
+    active = artifact.get("active_configuration")
+    if not isinstance(active, Mapping):
         raise CalibrationNotQualifiedError("active configuration absent in calibration artifact")
+    for field, expected in (
+        ("model", meta.get("model")),
+        ("rubric_version", meta.get("rubric_version")),
+        ("rubric_hash", meta.get("rubric_hash")),
+    ):
+        if active.get(field) != expected:
+            raise CalibrationMismatchError(
+                f"active configuration {field} does not match artifact metadata"
+            )
+    if active.get("thresholds") != artifact.get("thresholds"):
+        raise CalibrationMismatchError(
+            "active configuration thresholds do not match calibrated thresholds"
+        )
 
 
 def load_calibration(
     path: str | Path,
     expected_model: str = JEV_MODEL,
     expected_rubric: str = JEV_RUBRIC_VERSION,
+    expected_rubric_hash: str | None = None,
 ) -> dict[str, Any]:
     """Load and validate calibration artifact from disk."""
     file_path = Path(path)
     if not file_path.exists():
         raise FileNotFoundError(f"calibration file not found: {file_path}")
     data = json.loads(file_path.read_text(encoding="utf-8"))
-    validate_calibration(data, expected_model=expected_model, expected_rubric=expected_rubric)
+    validate_calibration(
+        data,
+        expected_model=expected_model,
+        expected_rubric=expected_rubric,
+        expected_rubric_hash=expected_rubric_hash,
+    )
     return data
-
 
 def run_live_benchmark(
     dataset: Mapping[str, Any],
@@ -607,17 +628,7 @@ def run_live_benchmark(
     client: JevClient | None = None,
     deadline_per_sample: float = 10.0,
 ) -> dict[str, Any]:
-    """Execute live classification requests against Jev API and record responses.
-
-    Args:
-        dataset: Mapping adhering to relationship-pairs-v1.
-        api_key: TypeSafe API key.
-        client: Optional pre-configured JevClient.
-        deadline_per_sample: Strict per-request deadline in seconds.
-
-    Returns:
-        Mapping adhering to relationship-recordings-v1 suitable for offline replay/calibration.
-    """
+    """Run Jev live and persist measured latency plus provider-reported token usage."""
     samples = dataset.get("samples", [])
     owns_client = False
     if client is None:
@@ -635,9 +646,11 @@ def run_live_benchmark(
                 deadline_seconds=deadline_per_sample,
             )
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            input_tokens = len(sample["memory_a"]) + len(sample["memory_b"]) + 200
-            output_tokens = 8
-            cost_usd = round((input_tokens / 1_000_000) * 0.042, 6)
+            input_tokens = choice.input_tokens
+            output_tokens = choice.output_tokens
+            cost_usd = round(
+                (input_tokens / 1_000_000) * JEV_INPUT_USD_PER_MILLION, 9
+            )
 
             observations[sample_id] = {
                 "relation": choice.choice,
@@ -652,27 +665,40 @@ def run_live_benchmark(
         if owns_client:
             client.close()
 
+    # This helper measures Jev only. A baseline must come from a separately recorded
+    # real baseline run; never substitute human gold labels for model predictions.
+    baseline_observations = {
+        sample["id"]: {
+            "relation": None,
+            "abstain_reason": "baseline_not_measured_by_jev_live_runner",
+        }
+        for sample in samples
+    }
+
     return {
         "schema_version": "relationship-recordings-v1",
         "backends": {
             "baseline": {
-                "model": "existing-llm-baseline",
-                "rubric_version": "existing-llm-contract-v1",
-                "origin": "live_baseline",
+                "model": "baseline-not-measured",
+                "rubric_version": "baseline-not-measured",
+                "origin": "not_measured_live_benchmark",
                 "defaults": {
                     "latency_ms": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "cost_usd": 0,
                 },
-                "observations": {
-                    s["id"]: {"relation": s["gold_relation"]} for s in samples
-                },
+                "observations": baseline_observations,
             },
             "jev": {
                 "model": JEV_MODEL,
                 "rubric_version": JEV_RUBRIC_VERSION,
+                "rubric_hash": compute_rubric_hash(),
                 "origin": "live_api_benchmark",
+                "pricing": {
+                    "input_usd_per_million_tokens": JEV_INPUT_USD_PER_MILLION,
+                    "output_usd_per_million_tokens": 0.0,
+                },
                 "defaults": {
                     "latency_ms": 0,
                     "input_tokens": 0,
@@ -683,3 +709,4 @@ def run_live_benchmark(
             },
         },
     }
+
