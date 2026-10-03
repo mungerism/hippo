@@ -51,6 +51,8 @@ class JevChoice:
     choice: str
     probabilities: Mapping[str, float]
     provider_confidence: float
+    input_tokens: int
+    output_tokens: int
 
 
 def _probability(value: Any) -> float:
@@ -81,7 +83,15 @@ def _parse_choice(data: Any) -> JevChoice:
     if parsed[choice] != max(parsed.values()):
         raise JevFailure("choice_probability_mismatch")
     confidence = _probability(answer.get("confidence"))
-    return JevChoice(choice, parsed, confidence)
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        raise JevFailure("invalid_usage")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    for value in (input_tokens, output_tokens):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise JevFailure("invalid_usage")
+    return JevChoice(choice, parsed, confidence, input_tokens, output_tokens)
 
 
 class JevClient:
