@@ -403,8 +403,8 @@ class TestMcpAndCliContracts(unittest.TestCase):
         for f in forbidden:
             self.assertNotIn(f, properties, f"MCP schema 不应暴露内部参数: {f}")
 
-        # Contract verification: default limit exposed to agents must match actual effective cap (3)
-        self.assertEqual(properties.get("limit", {}).get("default"), 3)
+        # Contract verification: default limit exposed to agents must match actual effective cap (5)
+        self.assertEqual(properties.get("limit", {}).get("default"), 5)
 
     def test_mcp_search_memories_clamps_limit_and_handles_zero(self):
         """MCP must clamp excessively large limit passed by agent to max_injected, and avoid calling engine when limit <= 0."""
@@ -412,7 +412,7 @@ class TestMcpAndCliContracts(unittest.TestCase):
         from hippo_memory.server import search_memories
 
         mock_engine = MagicMock()
-        mock_engine.config.max_injected = 3
+        mock_engine.config.max_injected = 5
         mock_engine.search.return_value = []
 
         with patch("hippo_memory.server.get_engine", return_value=mock_engine):
@@ -425,11 +425,18 @@ class TestMcpAndCliContracts(unittest.TestCase):
             self.assertIn("未找到与 'query' 相关的记忆事实", res_neg)
             mock_engine.search.assert_not_called()
 
-            # limit=100: automatically clamped to max_injected (3)
+            # limit=100: automatically clamped to max_injected (5)
             search_memories("query", limit=100)
             mock_engine.search.assert_called_once()
             _, kwargs = mock_engine.search.call_args
-            self.assertEqual(kwargs.get("limit"), 3)
+            self.assertEqual(kwargs.get("limit"), 5)
+
+            # default limit: calls engine with default 5
+            mock_engine.search.reset_mock()
+            search_memories("query")
+            mock_engine.search.assert_called_once()
+            _, kwargs = mock_engine.search.call_args
+            self.assertEqual(kwargs.get("limit"), 5)
 
     def test_cli_search_command_threshold_passthrough(self):
         """CLI search command must support --threshold parameter and forward it correctly to Engine."""
