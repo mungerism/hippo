@@ -7,13 +7,12 @@ gates across language slices, and generates verifiable calibration artifacts.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import math
 import time
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -313,6 +312,7 @@ def _is_decision_grade_origin(origin: str) -> bool:
         marker in lowered
         for marker in ("synthetic", "fixture", "not_measured", "gold_as_baseline")
     )
+
 
 def calibrate(
     dataset: Mapping[str, Any],
