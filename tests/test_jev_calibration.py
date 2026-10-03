@@ -50,6 +50,20 @@ class JevCalibrationTests(unittest.TestCase):
         self.assertIn("min_probability", thresh["CONFLICT"])
         self.assertIn("min_margin", thresh["CONFLICT"])
 
+    def test_synthetic_measurements_cannot_qualify_for_takeover(self):
+        dataset, recordings = load_fixtures()
+        artifact = calibrate(
+            dataset,
+            recordings,
+            gate_policy=CalibrationGatePolicy(min_test_samples=5),
+        )
+        self.assertEqual(artifact["status"], "NO_GO")
+        reasons = artifact["qualification"]["disqualification_reasons"]
+        self.assertTrue(any("non_decision_grade_measurements" in r for r in reasons))
+        self.assertTrue(any("baseline_cost_missing" in r for r in reasons))
+        self.assertTrue(any("latency_evidence_missing" in r for r in reasons))
+        self.assertIsNone(artifact["active_configuration"])
+
     def test_low_threshold_triggers_false_merge_and_language_slice_failure(self):
         dataset, recordings = load_fixtures()
         # mix-t1 has gold DISTINCT, Jev predicted EQUIVALENT with prob 0.52 and margin 0.12
