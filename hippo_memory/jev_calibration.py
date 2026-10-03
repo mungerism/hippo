@@ -548,6 +548,14 @@ def calibrate(
             "calibration_split": calib_metrics,
             "test_split": test_metrics,
         },
+        "calibration_diagnostics": {
+            "calibration_probability_buckets": jev_report["by_split"]["calibration"][
+                "overall"
+            ]["probability_buckets"],
+            "test_probability_buckets": jev_report["by_split"]["test"]["overall"][
+                "probability_buckets"
+            ],
+        },
         "active_configuration": active_configuration,
     }
 
