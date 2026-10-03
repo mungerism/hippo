@@ -24,6 +24,7 @@
     "jev": {
       "model": "jev-1.13.0",
       "rubric_version": "memory-relation-v1",
+      "rubric_hash": "1177fcb46a94daad",
       "origin": "synthetic_fixture_not_model_measurement",
       "defaults": {"latency_ms": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
       "observations": {
