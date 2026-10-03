@@ -52,7 +52,11 @@ class CalibrationGatePolicy:
     max_false_supersedes: int = 0
     max_must_abstain_violations: int = 0
     min_coverage: float = 0.5
+    max_recall_drop: float = 0.02
+    min_calibration_accepts_per_relation: int = 1
+    max_cost_ratio_vs_baseline: float = 0.5
     enforce_language_slices: bool = True
+    require_takeover_evidence: bool = True
 
 
 DEFAULT_GATE_POLICY = CalibrationGatePolicy()
@@ -61,6 +65,8 @@ DEFAULT_THRESHOLDS: dict[str, RelationThreshold] = {
     "EQUIVALENT": RelationThreshold(min_probability=0.80, min_margin=0.25),
     "CONFLICT": RelationThreshold(min_probability=0.75, min_margin=0.20),
 }
+
+JEV_INPUT_USD_PER_MILLION = 0.042
 
 
 def compute_rubric_hash(rubric: Mapping[str, Any] | None = None) -> str:
@@ -82,7 +88,7 @@ def calculate_error_upper_bound(
     if n_accepted <= 0:
         return None
     factor = -math.log(1.0 - confidence)
-    return round(factor / n_accepted, 4)
+    return round(min(1.0, factor / n_accepted), 4)
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:
@@ -92,6 +98,35 @@ def _percentile(values: list[float], fraction: float) -> float | None:
     return ordered[math.ceil(fraction * len(ordered)) - 1]
 
 
+def _accepted_prediction(
+    row: Mapping[str, Any],
+    thresholds: Mapping[str, RelationThreshold],
+) -> str | None:
+    """Apply takeover thresholds and reject ambiguous top-probability ties."""
+    raw_pred = row.get("prediction")
+    probability = row.get("selected_probability")
+    margin = row.get("margin")
+
+    if raw_pred in ("EQUIVALENT", "CONFLICT"):
+        threshold = thresholds[raw_pred]
+        if (
+            probability is not None
+            and margin is not None
+            and margin > 0
+            and probability >= threshold.min_probability
+            and margin >= threshold.min_margin
+        ):
+            return raw_pred
+        return None
+
+    if raw_pred == "DISTINCT":
+        # DISTINCT is non-destructive, but a tied top probability is still ambiguous
+        # and must remain an abstention rather than inflating coverage.
+        if margin is not None and margin > 0:
+            return "DISTINCT"
+    return None
+
+
 def _evaluate_thresholds_on_rows(
     rows: list[dict[str, Any]],
     thresholds: Mapping[str, RelationThreshold],
@@ -99,36 +134,23 @@ def _evaluate_thresholds_on_rows(
     """Evaluate calibrated thresholds on a slice of evaluation rows."""
     eligible = [r for r in rows if not r.get("must_abstain")]
     accepted_rows: list[dict[str, Any]] = []
+    destructive_accepted = 0
+    accepted_correct_by_relation = {"EQUIVALENT": 0, "CONFLICT": 0}
+    gold_support = {
+        relation: sum(
+            not r.get("must_abstain") and r.get("gold") == relation for r in rows
+        )
+        for relation in ("EQUIVALENT", "CONFLICT")
+    }
     abstention_count = 0
     must_abstain_violations = 0
     false_merges = 0
     false_supersedes = 0
 
-    for r in rows:
-        must_abstain = bool(r.get("must_abstain"))
-        raw_pred = r.get("prediction")
-        prob = r.get("selected_probability")
-        margin = r.get("margin")
-        gold = r.get("gold")
-
-        # Determine if threshold gate accepts the prediction
-        accepted_pred: str | None = None
-        if raw_pred in ("EQUIVALENT", "CONFLICT"):
-            thresh = thresholds[raw_pred]
-            if (
-                prob is not None
-                and margin is not None
-                and prob >= thresh.min_probability
-                and margin >= thresh.min_margin
-            ):
-                accepted_pred = raw_pred
-            else:
-                accepted_pred = None
-        elif raw_pred == "DISTINCT":
-            # DISTINCT is non-destructive, retained as long as model didn't abstain
-            accepted_pred = "DISTINCT"
-        else:
-            accepted_pred = None
+    for row in rows:
+        must_abstain = bool(row.get("must_abstain"))
+        accepted_pred = _accepted_prediction(row, thresholds)
+        gold = row.get("gold")
 
         if must_abstain:
             if accepted_pred is not None:
@@ -138,36 +160,76 @@ def _evaluate_thresholds_on_rows(
 
         if accepted_pred is None:
             abstention_count += 1
-        else:
-            accepted_rows.append(r)
-            if accepted_pred == "EQUIVALENT" and gold != "EQUIVALENT":
-                false_merges += 1
-            elif accepted_pred == "CONFLICT" and gold != "CONFLICT":
-                false_supersedes += 1
+            continue
+
+        accepted_rows.append(row)
+        if accepted_pred in ("EQUIVALENT", "CONFLICT"):
+            destructive_accepted += 1
+            if accepted_pred == gold:
+                accepted_correct_by_relation[accepted_pred] += 1
+        if accepted_pred == "EQUIVALENT" and gold != "EQUIVALENT":
+            false_merges += 1
+        elif accepted_pred == "CONFLICT" and gold != "CONFLICT":
+            false_supersedes += 1
 
     total_count = len(rows)
     eligible_count = len(eligible)
     accepted_count = len(accepted_rows)
+    destructive_gold = sum(gold_support.values())
     coverage = accepted_count / eligible_count if eligible_count > 0 else 0.0
+    destructive_coverage = (
+        destructive_accepted / destructive_gold if destructive_gold > 0 else 0.0
+    )
     abstention_rate = abstention_count / total_count if total_count > 0 else 0.0
 
     errors = false_merges + false_supersedes
     error_bound = (
-        calculate_error_upper_bound(accepted_count) if errors == 0 else None
+        calculate_error_upper_bound(destructive_accepted)
+        if errors == 0 and destructive_accepted > 0
+        else None
     )
+
+    brier_rows = [
+        r
+        for r in eligible
+        if isinstance(r.get("probabilities"), Mapping)
+        and r.get("gold") in VALID_RELATIONS
+    ]
+    brier_score = None
+    if brier_rows:
+        total = 0.0
+        for row in brier_rows:
+            probabilities = row["probabilities"]
+            total += sum(
+                (float(probabilities[relation]) - (1.0 if row["gold"] == relation else 0.0))
+                ** 2
+                for relation in VALID_RELATIONS
+            )
+        brier_score = round(total / len(brier_rows), 6)
 
     latencies = [r["latency_ms"] for r in rows if r.get("latency_ms") is not None]
     return {
         "count": total_count,
         "eligible": eligible_count,
         "accepted": accepted_count,
+        "destructive_accepted": destructive_accepted,
         "abstentions": abstention_count,
         "abstention_rate": round(abstention_rate, 4),
         "coverage": round(coverage, 4),
+        "destructive_coverage": round(destructive_coverage, 4),
         "false_merge": false_merges,
         "false_supersede": false_supersedes,
         "must_abstain_violations": must_abstain_violations,
+        "recall": {
+            relation: (
+                round(accepted_correct_by_relation[relation] / gold_support[relation], 4)
+                if gold_support[relation] > 0
+                else None
+            )
+            for relation in ("EQUIVALENT", "CONFLICT")
+        },
         "error_upper_bound_95": error_bound,
+        "brier_score": brier_score,
         "latency_ms": {
             "p50": _percentile(latencies, 0.5),
             "p95": _percentile(latencies, 0.95),
@@ -180,6 +242,78 @@ def _evaluate_thresholds_on_rows(
     }
 
 
+def _select_threshold_for_relation(
+    rows: list[dict[str, Any]],
+    relation: str,
+    floor: RelationThreshold,
+) -> tuple[RelationThreshold, dict[str, Any]]:
+    """Choose the least restrictive zero-error threshold pair on calibration data."""
+    relation_rows = [
+        row
+        for row in rows
+        if row.get("prediction") == relation
+        and row.get("selected_probability") is not None
+        and row.get("margin") is not None
+        and row.get("margin") > 0
+    ]
+    probabilities = sorted(
+        {floor.min_probability, 1.0}
+        | {
+            max(floor.min_probability, float(row["selected_probability"]))
+            for row in relation_rows
+        }
+    )
+    margins = sorted(
+        {floor.min_margin, 1.0}
+        | {max(floor.min_margin, float(row["margin"])) for row in relation_rows}
+    )
+
+    best: tuple[int, float, float, RelationThreshold, list[dict[str, Any]]] | None = None
+    for probability in probabilities:
+        for margin in margins:
+            threshold = RelationThreshold(probability, margin)
+            accepted = [
+                row
+                for row in relation_rows
+                if float(row["selected_probability"]) >= probability
+                and float(row["margin"]) >= margin
+            ]
+            unsafe = [
+                row
+                for row in accepted
+                if row.get("must_abstain") or row.get("gold") != relation
+            ]
+            if unsafe:
+                continue
+            correct = len(accepted)
+            candidate = (correct, -probability, -margin, threshold, accepted)
+            if best is None or candidate[:3] > best[:3]:
+                best = candidate
+
+    if best is None:
+        threshold = RelationThreshold(1.0, 1.0)
+        accepted: list[dict[str, Any]] = []
+    else:
+        threshold = best[3]
+        accepted = best[4]
+
+    return threshold, {
+        "relation": relation,
+        "source": "calibration_split",
+        "accepted": len(accepted),
+        "min_probability": threshold.min_probability,
+        "min_margin": threshold.min_margin,
+        "zero_error_on_calibration": bool(accepted),
+    }
+
+
+def _is_decision_grade_origin(origin: str) -> bool:
+    lowered = origin.lower()
+    return not any(
+        marker in lowered
+        for marker in ("synthetic", "fixture", "not_measured", "gold_as_baseline")
+    )
+
 def calibrate(
     dataset: Mapping[str, Any],
     recordings: Mapping[str, Any],
@@ -187,35 +321,50 @@ def calibrate(
     gate_policy: CalibrationGatePolicy | None = None,
     thresholds: Mapping[str, RelationThreshold] | None = None,
 ) -> dict[str, Any]:
-    """Run calibration pipeline and produce a Go/No-Go calibration artifact.
-
-    Args:
-        dataset: Mapping adhering to relationship-pairs-v1.
-        recordings: Mapping adhering to relationship-recordings-v1.
-        gate_policy: RFC safety gate policy (defaults to RFC-0001 criteria).
-        thresholds: Initial relation thresholds (defaults to standard conservative floors).
-
-    Returns:
-        Dictionary adhering to calibration-artifact-v1.
-    """
+    """Select thresholds on calibration data, then evaluate takeover gates on test data."""
     policy = gate_policy or DEFAULT_GATE_POLICY
-    applied_thresholds = dict(thresholds or DEFAULT_THRESHOLDS)
+    threshold_floors = dict(thresholds or DEFAULT_THRESHOLDS)
 
-    # 1. Run evaluation to get validated per-sample rows with probability & margin
     report = evaluate(dataset, recordings)
     jev_report = report["backends"].get("jev")
-    if not jev_report:
-        raise CalibrationError("recordings missing jev backend observations")
+    baseline_report = report["backends"].get("baseline")
+    if not jev_report or not baseline_report:
+        raise CalibrationError("recordings require baseline and jev backend observations")
 
     per_sample_rows = jev_report["per_sample"]
     model = jev_report["model"]
     rubric_version = jev_report["rubric_version"]
-    rubric_hash = compute_rubric_hash()
+    current_rubric_hash = compute_rubric_hash()
+    recorded_rubric_hash = (
+        recordings.get("backends", {}).get("jev", {}).get("rubric_hash")
+    )
+    if model != JEV_MODEL:
+        raise CalibrationMismatchError(
+            f"model mismatch: recordings have '{model}', expected '{JEV_MODEL}'"
+        )
+    if rubric_version != JEV_RUBRIC_VERSION:
+        raise CalibrationMismatchError(
+            f"rubric mismatch: recordings have '{rubric_version}', expected '{JEV_RUBRIC_VERSION}'"
+        )
+    if recorded_rubric_hash != current_rubric_hash:
+        raise CalibrationMismatchError(
+            "rubric hash mismatch: recordings were not produced by the current rubric"
+        )
 
     calib_rows = [r for r in per_sample_rows if r["split"] == "calibration"]
     test_rows = [r for r in per_sample_rows if r["split"] == "test"]
 
-    # 2. Compute metrics across calibration and test splits
+    applied_thresholds: dict[str, RelationThreshold] = {}
+    selection: dict[str, Any] = {}
+    for relation in ("EQUIVALENT", "CONFLICT"):
+        if relation not in threshold_floors:
+            raise CalibrationError(f"missing threshold floor for {relation}")
+        selected, diagnostics = _select_threshold_for_relation(
+            calib_rows, relation, threshold_floors[relation]
+        )
+        applied_thresholds[relation] = selected
+        selection[relation] = diagnostics
+
     def _slice_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         overall = _evaluate_thresholds_on_rows(rows, applied_thresholds)
         by_language = {
@@ -229,42 +378,45 @@ def calibrate(
     calib_metrics = _slice_metrics(calib_rows)
     test_metrics = _slice_metrics(test_rows)
 
-    # 3. Evaluate RFC safety gates on the test split
     disqualification_reasons: list[str] = []
+    for relation in ("EQUIVALENT", "CONFLICT"):
+        accepted = selection[relation]["accepted"]
+        if accepted < policy.min_calibration_accepts_per_relation:
+            disqualification_reasons.append(
+                f"calibration_evidence_insufficient: {relation} has {accepted} safe "
+                f"accepted calibration sample(s), minimum is "
+                f"{policy.min_calibration_accepts_per_relation}"
+            )
+
     test_overall = test_metrics["overall"]
     test_count = test_overall["count"]
-
     if test_count < policy.min_test_samples:
         disqualification_reasons.append(
             f"sample_size_insufficient: test split has {test_count} samples, "
             f"minimum required by policy is {policy.min_test_samples}"
         )
-
     if test_overall["false_merge"] > policy.max_false_merges:
         disqualification_reasons.append(
             f"false_merges_exceeded: found {test_overall['false_merge']} false merge(s) "
             f"on test split, maximum allowed is {policy.max_false_merges}"
         )
-
     if test_overall["false_supersede"] > policy.max_false_supersedes:
         disqualification_reasons.append(
-            f"false_supersedes_exceeded: found {test_overall['false_supersede']} false supersede(s) "
-            f"on test split, maximum allowed is {policy.max_false_supersedes}"
+            f"false_supersedes_exceeded: found {test_overall['false_supersede']} false "
+            f"supersede(s) on test split, maximum allowed is {policy.max_false_supersedes}"
         )
-
     if test_overall["must_abstain_violations"] > policy.max_must_abstain_violations:
         disqualification_reasons.append(
-            f"must_abstain_violated: found {test_overall['must_abstain_violations']} violation(s) "
-            f"on test split, maximum allowed is {policy.max_must_abstain_violations}"
+            f"must_abstain_violated: found {test_overall['must_abstain_violations']} "
+            f"violation(s) on test split, maximum allowed is "
+            f"{policy.max_must_abstain_violations}"
         )
-
     if test_overall["coverage"] < policy.min_coverage:
         disqualification_reasons.append(
             f"coverage_below_minimum: test coverage is {test_overall['coverage']:.2f}, "
             f"minimum required is {policy.min_coverage:.2f}"
         )
 
-    # Enforce Chinese and mixed language slice safety gates independently
     if policy.enforce_language_slices:
         for lang in ("zh", "mixed"):
             lang_metrics = test_metrics["by_language"][lang]
@@ -279,15 +431,80 @@ def calibrate(
                     f"false supersede(s) in {lang} slice"
                 )
 
+    if policy.require_takeover_evidence:
+        baseline_origin = str(baseline_report.get("origin", ""))
+        jev_origin = str(jev_report.get("origin", ""))
+        if not _is_decision_grade_origin(baseline_origin) or not _is_decision_grade_origin(
+            jev_origin
+        ):
+            disqualification_reasons.append(
+                "non_decision_grade_measurements: takeover requires real or approved "
+                "recordings for both baseline and Jev"
+            )
+
+        baseline_test = baseline_report["by_split"]["test"]
+        slices = [("overall", baseline_test["overall"], test_metrics["overall"])]
+        if policy.enforce_language_slices:
+            slices.extend(
+                (
+                    lang,
+                    baseline_test["by_language"][lang],
+                    test_metrics["by_language"][lang],
+                )
+                for lang in ("zh", "mixed")
+            )
+        for slice_name, baseline_metrics, jev_metrics in slices:
+            for relation in ("EQUIVALENT", "CONFLICT"):
+                baseline_recall = baseline_metrics["classes"][relation]["recall"]
+                jev_recall = jev_metrics["recall"][relation]
+                if baseline_recall is None:
+                    continue
+                if jev_recall is None:
+                    disqualification_reasons.append(
+                        f"recall_evidence_missing: {slice_name}/{relation} has no "
+                        "thresholded Jev support"
+                    )
+                elif jev_recall + policy.max_recall_drop < baseline_recall:
+                    disqualification_reasons.append(
+                        f"recall_drop_exceeded: {slice_name}/{relation} Jev recall "
+                        f"{jev_recall:.4f} vs baseline {baseline_recall:.4f}, maximum "
+                        f"drop is {policy.max_recall_drop:.4f}"
+                    )
+
+        baseline_overall = baseline_test["overall"]
+        baseline_cost = float(baseline_overall["cost_usd"])
+        jev_cost = float(test_overall["cost_usd"])
+        if baseline_cost <= 0:
+            disqualification_reasons.append(
+                "baseline_cost_missing: measured baseline cost is required for takeover"
+            )
+        elif jev_cost > baseline_cost * policy.max_cost_ratio_vs_baseline:
+            disqualification_reasons.append(
+                f"cost_gate_failed: Jev test cost {jev_cost:.6f} exceeds "
+                f"{policy.max_cost_ratio_vs_baseline:.2f}x baseline cost "
+                f"{baseline_cost:.6f}"
+            )
+
+        baseline_p95 = baseline_overall["latency_ms"]["p95"]
+        jev_p95 = test_overall["latency_ms"]["p95"]
+        if not baseline_p95 or not jev_p95:
+            disqualification_reasons.append(
+                "latency_evidence_missing: measured baseline and Jev p95 are required"
+            )
+        elif jev_p95 > baseline_p95:
+            disqualification_reasons.append(
+                f"latency_gate_failed: Jev p95 {jev_p95}ms exceeds baseline "
+                f"{baseline_p95}ms"
+            )
+
     is_qualified = len(disqualification_reasons) == 0
     status = "GO" if is_qualified else "NO_GO"
 
-    # Only export active configuration if qualified for takeover
     active_configuration = (
         {
             "model": model,
             "rubric_version": rubric_version,
-            "rubric_hash": rubric_hash,
+            "rubric_hash": current_rubric_hash,
             "thresholds": {
                 rel: {
                     "min_probability": thresh.min_probability,
@@ -313,10 +530,13 @@ def calibrate(
         "metadata": {
             "model": model,
             "rubric_version": rubric_version,
-            "rubric_hash": rubric_hash,
+            "rubric_hash": current_rubric_hash,
             "dataset_version": dataset.get("dataset_version", "unknown"),
             "label_provenance": dataset.get("label_provenance", "unknown"),
+            "baseline_origin": baseline_report.get("origin"),
+            "jev_origin": jev_report.get("origin"),
         },
+        "threshold_selection": selection,
         "thresholds": {
             rel: {
                 "min_probability": thresh.min_probability,
@@ -330,7 +550,6 @@ def calibrate(
         },
         "active_configuration": active_configuration,
     }
-
 
 def validate_calibration(
     artifact: Mapping[str, Any],
