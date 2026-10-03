@@ -917,6 +917,42 @@ class ConsolidationApplier:
         with consolidation_lock(
             user_id, agent_id, base_dir=self.lock_dir, timeout=self.lock_timeout
         ):
+            # Another caller may have completed the same revert while this
+            # caller was waiting for the identity lock. Reload the journal
+            # inside the lock so concurrent reversals are idempotent instead
+            # of acting on a stale pre-lock status snapshot.
+            latest_entry = self.journal.load(operation_id)
+            if latest_entry is None:
+                raise ValueError(
+                    f"operation {operation_id} vanished from journal during revert"
+                )
+            entry = latest_entry
+            status = entry.get("status")
+            if status == STATUS_REVERTED:
+                return {
+                    "operation_id": operation_id,
+                    "status": STATUS_REVERTED,
+                    "winner_id": str(entry["winner_id"]),
+                    "loser_id": str(entry["loser_id"]),
+                }
+            if status not in (STATUS_COMPLETED, STATUS_REVERTING):
+                raise ValueError(
+                    f"operation {operation_id} changed to status '{status}' "
+                    "while waiting for the revert lock"
+                )
+            latest_identity = list(entry.get("identity") or [])
+            if latest_identity != [user_id, agent_id]:
+                raise ValueError(
+                    f"operation {operation_id} identity changed in journal"
+                )
+            relation = str(entry.get("relation") or "")
+            pre_winner = entry.get("pre_winner_metadata")
+            pre_loser = entry.get("pre_loser_metadata")
+            if not isinstance(pre_winner, Mapping) or not isinstance(pre_loser, Mapping):
+                raise ValueError(
+                    f"operation {operation_id} lacks rollback metadata snapshots"
+                )
+
             winner = _read_for_write(winner_id)
             loser = _read_for_write(loser_id)
             if winner is None or loser is None:
