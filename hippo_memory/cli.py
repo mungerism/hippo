@@ -60,7 +60,12 @@ def add(
 def search(
     query: str = typer.Argument(..., help="检索的关键词或自然语言问题"),
     scope: str = typer.Option("all", "--scope", "-s", help="检索范围: all | global | project"),
-    limit: int = typer.Option(5, "--limit", "-n", help="返回的最大条数"),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="返回的最大条数（未指定时使用 HIPPO_MAX_INJECTED 部署预算）",
+    ),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="显式指定项目名"),
     threshold: Optional[float] = typer.Option(
         None,
@@ -71,13 +76,14 @@ def search(
 ):
     """Perform semantic and hybrid search across memories."""
     engine = _get_engine()
+    effective_limit = engine.config.max_injected if limit is None else limit
     with console.status(f"[bold cyan]正在检索与 '{query}' 相关的记忆 (Scope: {scope})...[/bold cyan]"):
         try:
             results = engine.search(
                 query=query,
                 scope=scope,
                 project_id=project,
-                limit=limit,
+                limit=effective_limit,
                 threshold=threshold,
             )
             if not results:
