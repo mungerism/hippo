@@ -13,7 +13,7 @@
 
 > [!IMPORTANT]
 > **Core Tenet**: **Hippo is a lightweight engineering wrapper over Mem0.**
-> 1. **100% Spec Alignment**: The MCP tools exposed to agents (`search_memories`, `add_memory`) strictly match official Mem0 naming and parameter semantics.
+> 1. **Agent Safety Subset & Spec Alignment**: The MCP tools exposed to agents (`search_memories`, `add_memory`) strictly align with official Mem0 naming while enforcing an agent safety subset (injection budget and gate thresholds are managed by the deployment rather than exposed to agents).
 > 2. **Focused Engineering Boundaries**: Hippo focuses strictly on multi-IDE MCP mounting, automatic Git repository routing (eliminating manual `agent_id` maintenance), and local single-binary Qdrant daemon management.
 
 ---

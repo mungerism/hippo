@@ -66,11 +66,6 @@ export default function (pi: ExtensionAPI) {
           description: "检索范围: 'all'(默认，同时检索全局和当前项目) | 'global'(仅全局习惯) | 'project'(仅当前项目)",
         })
       ),
-      limit: Type.Optional(
-        Type.Number({
-          description: "返回的最大条数，默认 5",
-        })
-      ),
       project: Type.Optional(
         Type.String({ description: "可选指定项目名，默认自动根据当前 Git 仓库探测" })
       ),
@@ -79,7 +74,6 @@ export default function (pi: ExtensionAPI) {
       try {
         const args = ["search", params.query];
         if (params.scope) args.push("--scope", params.scope);
-        if (params.limit) args.push("--limit", String(params.limit));
         if (params.project) args.push("--project", params.project);
 
         const { stdout } = await execFileAsync(hippoBin, args);

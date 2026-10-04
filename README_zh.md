@@ -13,7 +13,7 @@
 
 > [!IMPORTANT]
 > **项目重要原则（Core Philosophy）**：**Hippo 只是对 Mem0 的轻量工程封装（Thin Wrapper over Mem0）**。
-> 1. **100% 规范对标**：所有暴露的 MCP 工具名（`search_memories`、`add_memory`）与参数类型与 Mem0 官方规范完全一致，专为自主 Agent 极致精简。
+> 1. **Agent 安全子集与规范对标**：面向 Agent 暴露的 MCP 工具名（`search_memories`、`add_memory`）严格对齐 Mem0 命名，同时遵循 Agent 安全子集原则（注入预算与安全门禁由部署端统一把控，绝不对 Agent 暴露底层微调与条数参数）。
 > 2. **专注工程边界**：Hippo 仅专注于多端 IDE 的 MCP 协议挂载、Git 目录自动路由（无需手动管理 `agent_id`）以及本地单二进制 Qdrant 常驻服务。
 
 ---

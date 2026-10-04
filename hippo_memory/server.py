@@ -143,9 +143,6 @@ def search_memories(
     filters: Annotated[
         Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
     ] = None,
-    limit: Annotated[
-        int, Field(description="Maximum number of results to return (default 5).")
-    ] = 5,
     user_id: Annotated[
         Optional[str], Field(description="Optional user identifier.")
     ] = None,
@@ -176,7 +173,6 @@ def search_memories(
     Args:
         query: Natural language question or search query (e.g. 'tech stack choices', 'CQRS architecture', 'coding standards').
         filters: Optional structured filters dictionary.
-        limit: Maximum number of results to return (default: 5).
         user_id: Optional user identifier.
         agent_id: Optional agent or project identifier.
         scope: Search scope: 'all' (default, project + global) | 'global' (personal habits) | 'project' (current project).
@@ -186,20 +182,10 @@ def search_memories(
         Markdown-formatted memories enclosed inside an untrusted context envelope.
     """
     temporal_window = parse_temporal_query(query) if filters is None else None
-    if limit <= 0:
-        if temporal_window is not None:
-            return render_untrusted_recent_memories(
-                [],
-                hours=temporal_window.hours,
-                scope=scope,
-                window_label=temporal_window.label,
-            )
-        return render_untrusted_memories([], query=query, scope=scope)
 
     try:
         engine = get_engine()
         max_injected = getattr(engine.config, "max_injected", 5)
-        effective_limit = min(limit, max_injected)
         if temporal_window is not None:
             recent_scope = scope
             recent_project_id = project_id
@@ -213,7 +199,7 @@ def search_memories(
                 hours=temporal_window.hours,
                 scope=recent_scope,
                 project_id=recent_project_id,
-                limit=effective_limit,
+                limit=max_injected,
                 since=temporal_window.since,
                 until=temporal_window.until,
                 user_id=user_id,
@@ -229,7 +215,7 @@ def search_memories(
         results = engine.search(
             query=query,
             filters=filters,
-            limit=effective_limit,
+            limit=max_injected,
             user_id=user_id,
             agent_id=agent_id,
             scope=scope,
