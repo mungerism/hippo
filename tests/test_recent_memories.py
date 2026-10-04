@@ -659,7 +659,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
             patch.object(server_module, "parse_temporal_query", return_value=window),
         ):
             result = server_module.search_memories(
-                query="过去 48 小时新增了什么", scope="all", limit=30, user_id="u1"
+                query="过去 48 小时新增了什么", scope="all", user_id="u1"
             )
         self.assertIn('<hippo_retrieved_context boundary="untrusted_memory"', result)
         self.assertIn("[2026-09-14 19:50:00 | ADD | Project: sumproof]", result)

@@ -391,7 +391,7 @@ class TestMcpAndCliContracts(unittest.TestCase):
     """Tests for MCP minimalist safety contract and CLI debug options."""
 
     def test_mcp_search_memories_schema_has_no_threshold_or_gate_params(self):
-        """MCP interface must never expose threshold, explain, or internal gate configs to agents."""
+        """MCP interface must never expose threshold, explain, gate configs, or limit to agents (ADR-0008)."""
         import asyncio
         from hippo_memory.server import mcp_server
 
@@ -399,44 +399,34 @@ class TestMcpAndCliContracts(unittest.TestCase):
         search_tool = next(t for t in tools if t.name == "search_memories")
         properties = search_tool.input_schema.get("properties", {})
 
-        forbidden = {"threshold", "explain", "gate_config", "final_threshold", "dense_only_threshold"}
+        forbidden = {"threshold", "explain", "gate_config", "final_threshold", "dense_only_threshold", "limit"}
         for f in forbidden:
-            self.assertNotIn(f, properties, f"MCP schema 不应暴露内部参数: {f}")
+            self.assertNotIn(f, properties, f"MCP schema 不应暴露内部或预算控制参数: {f}")
 
-        # Contract verification: default limit exposed to agents must match actual effective cap (5)
-        self.assertEqual(properties.get("limit", {}).get("default"), 5)
-
-    def test_mcp_search_memories_clamps_limit_and_handles_zero(self):
-        """MCP must clamp excessively large limit passed by agent to max_injected, and avoid calling engine when limit <= 0."""
+    def test_mcp_search_memories_governed_by_max_injected_budget(self):
+        """MCP must always govern recall depth by max_injected budget and ignore extra client arguments (ADR-0008)."""
+        import asyncio
         from unittest.mock import patch, MagicMock
-        from hippo_memory.server import search_memories
+        from hippo_memory.server import search_memories, mcp_server
 
         mock_engine = MagicMock()
         mock_engine.config.max_injected = 5
         mock_engine.search.return_value = []
 
+        def assert_forwarded_with_budget(expected_budget: int = 5):
+            mock_engine.search.assert_called_once()
+            _, kwargs = mock_engine.search.call_args
+            self.assertEqual(kwargs.get("limit"), expected_budget)
+
         with patch("hippo_memory.server.get_engine", return_value=mock_engine):
-            # limit <= 0: return user-friendly message directly without calling engine.search
-            res_zero = search_memories("query", limit=0)
-            self.assertIn("未找到与 'query' 相关的记忆事实", res_zero)
-            mock_engine.search.assert_not_called()
-
-            res_neg = search_memories("query", limit=-5)
-            self.assertIn("未找到与 'query' 相关的记忆事实", res_neg)
-            mock_engine.search.assert_not_called()
-
-            # limit=100: automatically clamped to max_injected (5)
-            search_memories("query", limit=100)
-            mock_engine.search.assert_called_once()
-            _, kwargs = mock_engine.search.call_args
-            self.assertEqual(kwargs.get("limit"), 5)
-
-            # default limit: calls engine with default 5
-            mock_engine.search.reset_mock()
+            # 1. Direct invocation forwards configured max_injected budget
             search_memories("query")
-            mock_engine.search.assert_called_once()
-            _, kwargs = mock_engine.search.call_args
-            self.assertEqual(kwargs.get("limit"), 5)
+            assert_forwarded_with_budget(5)
+
+            # 2. Call tool via MCPServer with legacy extra arguments (e.g. limit=100)
+            mock_engine.search.reset_mock()
+            asyncio.run(mcp_server.call_tool("search_memories", {"query": "query", "limit": 100}))
+            assert_forwarded_with_budget(5)
 
     def test_cli_search_command_threshold_passthrough(self):
         """CLI search command must support --threshold parameter and forward it correctly to Engine."""
