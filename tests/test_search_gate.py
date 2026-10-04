@@ -428,14 +428,33 @@ class TestMcpAndCliContracts(unittest.TestCase):
             asyncio.run(mcp_server.call_tool("search_memories", {"query": "query", "limit": 100}))
             assert_forwarded_with_budget(5)
 
-    def test_cli_search_command_threshold_passthrough(self):
-        """CLI search command must support --threshold parameter and forward it correctly to Engine."""
+    def test_cli_search_defaults_to_deployment_max_injected_budget(self):
+        """CLI search without --limit must inherit max_injected so Agent adapters cannot bypass deployment budget."""
         from typer.testing import CliRunner
         from unittest.mock import patch, MagicMock
         from hippo_memory.cli import app
 
         runner = CliRunner()
         mock_engine = MagicMock()
+        mock_engine.config.max_injected = 2
+        mock_engine.search.return_value = []
+
+        with patch("hippo_memory.cli._get_engine", return_value=mock_engine):
+            result = runner.invoke(app, ["search", "test"])
+            self.assertEqual(result.exit_code, 0)
+            mock_engine.search.assert_called_once()
+            _, kwargs = mock_engine.search.call_args
+            self.assertEqual(kwargs.get("limit"), 2)
+
+    def test_cli_search_explicit_limit_and_threshold_passthrough(self):
+        """CLI keeps developer --limit/--threshold overrides while the default remains deployment-governed."""
+        from typer.testing import CliRunner
+        from unittest.mock import patch, MagicMock
+        from hippo_memory.cli import app
+
+        runner = CliRunner()
+        mock_engine = MagicMock()
+        mock_engine.config.max_injected = 2
         mock_engine.search.return_value = [
             {
                 "id": "m1",
@@ -446,10 +465,14 @@ class TestMcpAndCliContracts(unittest.TestCase):
         ]
 
         with patch("hippo_memory.cli._get_engine", return_value=mock_engine):
-            result = runner.invoke(app, ["search", "test", "--threshold", "0.2"])
+            result = runner.invoke(
+                app,
+                ["search", "test", "--limit", "7", "--threshold", "0.2"],
+            )
             self.assertEqual(result.exit_code, 0)
             mock_engine.search.assert_called_once()
             _, kwargs = mock_engine.search.call_args
+            self.assertEqual(kwargs.get("limit"), 7)
             self.assertEqual(kwargs.get("threshold"), 0.2)
             # Verify output contains relevance score column or value
             self.assertIn("0.55", result.output)
