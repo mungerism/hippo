@@ -15,6 +15,29 @@ Hippo 支持两种 Qdrant 运行模式：
 
 ---
 
+## MCP 项目路由与排障 {#mcp-project-routing}
+
+`hippo-mcp` 的工作目录可能是安装仓库；客户端通过 `uv --directory` 启动服务时，这个目录也不代表当前聊天项目。MCP 的 `search_memories`（包括时间线查询）和 `add_memory` 优先使用显式 `project_id`，省略时读取当前请求所属客户端的 MCP roots，并仅在能够确定唯一 Git 仓库时自动路由。
+
+- `scope='project'` 只使用已解析项目；`scope='all'` 加入当前用户的全局偏好，两者都需要可靠的项目身份。
+- `scope='global'` 无需项目。搜索的旧 `agent_id` 继续优先覆盖范围，`agent_id='global'` 仅查全局。
+- roots 缺失、不支持、不可访问、非 Git、涉及多个仓库，或客户端 2 秒内未返回时，工具会提示显式选择项目，且不会访问记忆后端。服务不会用自己的目录或 `default_project` 猜测项目。
+- 同仓库的多个子目录可自动解析；多仓库列表无法说明聊天属于哪一个，需要显式选择。roots 的显示名称不会成为项目标签。
+
+收到“无法可靠解析调用方项目”时，使用本次聊天的项目名，或本机 Git 仓库绝对路径重试。例如：
+
+```json
+{"query": "项目技术选型", "scope": "project", "project_id": "repository-a"}
+```
+
+```json
+{"text": "项目使用 uv 管理 Python 依赖", "scope": "project", "project_id": "repository-a"}
+```
+
+也可让客户端仅提供当前仓库 root。绝对路径会沿用现有 Git 仓库名命名空间，与自动选择该仓库一致；MCP 不接受相对路径。修复部署后重启宿主中的 Hippo MCP 连接并刷新工具 schema，让客户端识别写入新增的 `project_id`。该修复不迁移历史记忆，CLI、SDK 与 Hook 的缺省目录路由保持原有契约；共享路由器将显式项目名固定为命名空间，避免按服务目录下的同名子目录重新解释，CLI/SDK 的相对路径选择器须包含 `/`（例如 `./repository-a`）。详见 [ADR-0009](/adr/0009-request-scoped-mcp-project-routing)。
+
+---
+
 ## 2. Qdrant 管理命令
 
 使用 `hippo service` 子命令管理 Qdrant LaunchAgent：

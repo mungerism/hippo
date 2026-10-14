@@ -1,3 +1,4 @@
+import asyncio
 import math
 import unittest
 from typing import Any, Dict
@@ -420,12 +421,12 @@ class TestMcpAndCliContracts(unittest.TestCase):
 
         with patch("hippo_memory.server.get_engine", return_value=mock_engine):
             # 1. Direct invocation forwards configured max_injected budget
-            search_memories("query")
+            asyncio.run(search_memories("query", project_id="hippo"))
             assert_forwarded_with_budget(5)
 
             # 2. Call tool via MCPServer with legacy extra arguments (e.g. limit=100)
             mock_engine.search.reset_mock()
-            asyncio.run(mcp_server.call_tool("search_memories", {"query": "query", "limit": 100}))
+            asyncio.run(mcp_server.call_tool("search_memories", {"query": "query", "project_id": "hippo", "limit": 100}))
             assert_forwarded_with_budget(5)
 
     def test_cli_search_defaults_to_deployment_max_injected_budget(self):

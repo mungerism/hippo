@@ -4,13 +4,16 @@ Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed A
 """
 
 import logging
+from functools import partial
 from typing import Annotated, Any, Dict, Literal, Optional
 
+import anyio
 from pydantic import Field
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
+from hippo_memory.mcp_scope import ProjectContextError, resolve_mcp_scope
 from hippo_memory.recent import parse_temporal_query
 from hippo_memory.renderer import (
     UNTRUSTED_CONTEXT_INSTRUCTION,
@@ -35,7 +38,9 @@ mcp_server = MCPServer(
         "scope='global' only for cross-project personal habits. "
         "add_memory is an ADD-oriented raw capture path; do not assume synchronous "
         "deduplication, updates, or conflict resolution. "
-        + UNTRUSTED_CONTEXT_INSTRUCTION
+        "Project scope uses explicit project_id or the current client's unique Git workspace root; "
+        "it never uses the server working directory. If client roots are unavailable or ambiguous, "
+        "provide project_id explicitly. " + UNTRUSTED_CONTEXT_INSTRUCTION
     ),
 )
 _engine: Optional[HippoEngine] = None
@@ -54,10 +59,12 @@ def get_engine() -> HippoEngine:
         "Call this when the user states a preference, makes a decision worth keeping, corrects "
         "your behavior, or explicitly asks you to remember something. scope='project' (default) "
         "saves to the current Git repository's namespace; scope='global' saves to the user's "
-        "cross-project personal preferences. category defaults to 'general' (or 'preference', 'decision', 'pitfall')."
+        "cross-project personal preferences. Project routing requires the client's unique Git root "
+        "or explicit project_id; missing or ambiguous roots return an actionable error. "
+        "category defaults to 'general' (or 'preference', 'decision', 'pitfall')."
     )
 )
-def add_memory(
+async def add_memory(
     text: Annotated[
         str,
         Field(
@@ -86,6 +93,13 @@ def add_memory(
             )
         ),
     ] = "general",
+    project_id: Annotated[
+        Optional[str],
+        Field(
+            description="Explicit project namespace or local Git repository absolute path; required if client roots are unavailable or ambiguous."
+        ),
+    ] = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Store a new preference, fact, or decision into persistent long-term memory.
 
@@ -93,16 +107,28 @@ def add_memory(
         text: One concise fact, preference, rule, or decision to store (max 2000 chars).
         scope: Storage scope: 'project' (default, current project) or 'global' (cross-project personal preference).
         category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
+        project_id: Explicit project selector when client roots cannot identify a unique repository.
 
     Returns:
         Structured dictionary confirming memory addition: status, id, text, scope, category.
     """
     try:
+        resolved_scope, resolved_project = await resolve_mcp_scope(
+            ctx, scope=scope, project_id=project_id
+        )
         engine = get_engine()
-        return engine.add_explicit(
-            text=text,
-            scope=scope,
-            category=category,
+        return await anyio.to_thread.run_sync(
+            partial(
+                engine.add_explicit,
+                text=text,
+                scope=resolved_scope,
+                category=category,
+                **(
+                    {"project_id": resolved_project}
+                    if resolved_project is not None
+                    else {}
+                ),
+            )
         )
     except HippoValidationError as e:
         return {
@@ -127,10 +153,12 @@ def add_memory(
         "window alone. scope='all' (default) searches the current project's memories plus the "
         "user's global preferences; scope='project' only the current Git repository; "
         "scope='global' only cross-project personal preferences. "
+        "Project routing uses the client's unique Git root or explicit project_id, never the "
+        "server working directory. Missing or ambiguous client roots require explicit project_id. "
         + UNTRUSTED_CONTEXT_INSTRUCTION
     )
 )
-def search_memories(
+async def search_memories(
     query: Annotated[
         str,
         Field(
@@ -141,7 +169,8 @@ def search_memories(
         ),
     ],
     filters: Annotated[
-        Optional[Dict[str, Any]], Field(description="Optional structured Mem0 filters dictionary.")
+        Optional[Dict[str, Any]],
+        Field(description="Optional structured Mem0 filters dictionary."),
     ] = None,
     user_id: Annotated[
         Optional[str], Field(description="Optional user identifier.")
@@ -151,7 +180,7 @@ def search_memories(
         Field(
             description=(
                 "Optional agent or project identifier, e.g. 'global' for personal habits; "
-                "omit to auto-route to the current Git repository."
+                "omit to use explicit project_id or the client's unique Git workspace root."
             )
         ),
     ] = None,
@@ -165,8 +194,12 @@ def search_memories(
         ),
     ] = "all",
     project_id: Annotated[
-        Optional[str], Field(description="Optional explicit project name overriding Git auto-detection.")
+        Optional[str],
+        Field(
+            description="Explicit project namespace or local Git repository absolute path; required if client roots are unavailable or ambiguous."
+        ),
     ] = None,
+    ctx: Context = None,
 ) -> str:
     """Search memories semantically or route explicit temporal intent to a timeline.
 
@@ -184,45 +217,58 @@ def search_memories(
     temporal_window = parse_temporal_query(query) if filters is None else None
 
     try:
+        resolved_scope, resolved_project = await resolve_mcp_scope(
+            ctx, scope=scope, project_id=project_id, agent_id=agent_id
+        )
         engine = get_engine()
         max_injected = getattr(engine.config, "max_injected", 5)
         if temporal_window is not None:
-            recent_scope = scope
-            recent_project_id = project_id
-            if agent_id == "global":
-                recent_scope = "global"
-            elif agent_id:
-                recent_scope = "project"
-                recent_project_id = agent_id
-
-            results = engine.get_recent_memories(
-                hours=temporal_window.hours,
-                scope=recent_scope,
-                project_id=recent_project_id,
-                limit=max_injected,
-                since=temporal_window.since,
-                until=temporal_window.until,
-                user_id=user_id,
-                verified_only=True,
+            results = await anyio.to_thread.run_sync(
+                partial(
+                    engine.get_recent_memories,
+                    hours=temporal_window.hours,
+                    scope=resolved_scope,
+                    project_id=resolved_project,
+                    limit=max_injected,
+                    since=temporal_window.since,
+                    until=temporal_window.until,
+                    user_id=user_id,
+                    verified_only=True,
+                )
             )
             return render_untrusted_recent_memories(
                 results,
                 hours=temporal_window.hours,
-                scope=recent_scope,
+                scope=resolved_scope,
                 window_label=temporal_window.label,
             )
 
-        results = engine.search(
-            query=query,
-            filters=filters,
-            limit=max_injected,
-            user_id=user_id,
-            agent_id=agent_id,
-            scope=scope,
-            project_id=project_id,
+        results = await anyio.to_thread.run_sync(
+            partial(
+                engine.search,
+                query=query,
+                filters=filters,
+                limit=max_injected,
+                user_id=user_id,
+                agent_id=None,
+                scope=resolved_scope,
+                project_id=resolved_project,
+            )
         )
 
-        return render_untrusted_memories(results, query=query, scope=scope)
+        return render_untrusted_memories(results, query=query, scope=resolved_scope)
+    except ProjectContextError as e:
+        if temporal_window is not None:
+            return render_untrusted_recent_memories(
+                [],
+                hours=temporal_window.hours,
+                scope=scope,
+                window_label=temporal_window.label,
+                empty_message=str(e),
+            )
+        return render_untrusted_memories(
+            [], query=query, scope=scope, empty_message=str(e)
+        )
     except Exception as e:
         logger.error("Failed to search memories: %s", e, exc_info=True)
         if temporal_window is not None:

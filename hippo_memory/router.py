@@ -58,10 +58,12 @@ class ScopeRouter:
     ) -> str:
         """Resolve current project ID from explicit arg, given directory, or Git environment."""
         if project_id and project_id.strip():
-            # If project_id is a filesystem directory, derive clean Git repository name
+            # Namespace names must not be reinterpreted as server-relative
+            # directories. Only syntactic path selectors opt into Git detection.
             try:
                 p = Path(project_id.strip())
-                if p.exists() and p.is_dir():
+                is_path = p.is_absolute() or "/" in project_id or project_id.strip() in {".", ".."}
+                if is_path and p.exists() and p.is_dir():
                     detected, _ = detect_git_project(p)
                     if detected:
                         return detected

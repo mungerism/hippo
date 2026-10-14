@@ -1,5 +1,6 @@
 """Tests for Issue #16: Retrieved Memory Untrusted Context Envelope."""
 
+import asyncio
 import unittest
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
@@ -163,7 +164,7 @@ class TestUntrustedContextEnvelope(unittest.TestCase):
         ]
 
         with patch("hippo_memory.server.get_engine", return_value=mock_engine):
-            output = search_memories(query="安全测试", scope="project")
+            output = asyncio.run(search_memories(query="安全测试", scope="project", project_id="hippo"))
             self.assertTrue(output.startswith(ENVELOPE_START_TAG))
             self.assertTrue(output.endswith(ENVELOPE_END_TAG))
             self.assertIn("测试安全信封接入", output)

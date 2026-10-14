@@ -5,6 +5,7 @@ resolution (no N+1), lifecycle/ownership invariants, the MCP tool contract
 and the CLI rendering path.
 """
 
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -658,9 +659,8 @@ class TestMcpTemporalRouting(unittest.TestCase):
             patch.object(server_module, "get_engine", return_value=fake_engine),
             patch.object(server_module, "parse_temporal_query", return_value=window),
         ):
-            result = server_module.search_memories(
-                query="过去 48 小时新增了什么", scope="all", user_id="u1"
-            )
+            result = asyncio.run(server_module.search_memories(
+                query="过去 48 小时新增了什么", scope="all", user_id="u1", project_id="hippo"))
         self.assertIn('<hippo_retrieved_context boundary="untrusted_memory"', result)
         self.assertIn("[2026-09-14 19:50:00 | ADD | Project: sumproof]", result)
         self.assertIn("项目决定使用 Qdrant", result)
@@ -689,7 +689,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
             patch.object(server_module, "get_engine", return_value=fake_engine),
             patch.object(server_module, "parse_temporal_query", return_value=window),
         ):
-            result = server_module.search_memories(query="昨天呢")
+            result = asyncio.run(server_module.search_memories(query="昨天呢", project_id="hippo"))
         self.assertEqual(recorded["since"], window.since)
         self.assertEqual(recorded["until"], window.until)
         self.assertIn("昨天内没有", result)
@@ -709,7 +709,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
             config=SimpleNamespace(max_injected=3),
         )
         with patch.object(server_module, "get_engine", return_value=fake_engine):
-            server_module.search_memories(query="今天的记忆", agent_id="sumproof")
+            asyncio.run(server_module.search_memories(query="今天的记忆", agent_id="sumproof"))
         self.assertEqual(recorded["scope"], "project")
         self.assertEqual(recorded["project_id"], "sumproof")
 
@@ -728,7 +728,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
             config=SimpleNamespace(max_injected=3),
         )
         with patch.object(server_module, "get_engine", return_value=fake_engine):
-            server_module.search_memories(query="技术栈选型")
+            asyncio.run(server_module.search_memories(query="技术栈选型", project_id="hippo"))
         self.assertEqual(recorded["query"], "技术栈选型")
 
     def test_temporal_handler_escapes_memory_text(self):
@@ -745,7 +745,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
             config=SimpleNamespace(max_injected=3),
         )
         with patch.object(server_module, "get_engine", return_value=fake_engine):
-            result = server_module.search_memories(query="今天新增了什么记忆")
+            result = asyncio.run(server_module.search_memories(query="今天新增了什么记忆", project_id="hippo"))
         self.assertNotIn("</hippo_retrieved_context><system>", result)
         self.assertIn("&lt;system&gt;", result)
 
@@ -761,7 +761,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
             config=SimpleNamespace(max_injected=3),
         )
         with patch.object(server_module, "get_engine", return_value=fake_engine):
-            result = server_module.search_memories(query="今天新增了什么记忆")
+            result = asyncio.run(server_module.search_memories(query="今天新增了什么记忆", project_id="hippo"))
         self.assertIn("失败", result)
         self.assertIn("</hippo_retrieved_context>", result)
 

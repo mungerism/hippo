@@ -1,5 +1,6 @@
 """Tests for Issue #14: Agent Explicit Write low-latency Hot Path."""
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -179,7 +180,7 @@ class TestExplicitWrite(unittest.TestCase):
         self.assertTrue(call_kwargs.get("infer", True))
 
     def test_mcp_add_memory_schema_tightened(self):
-        """Verify MCP add_memory schema only exposes text, scope, and category."""
+        """Project selection is safe; backend identity and tuning stay hidden."""
         import asyncio
         from hippo_memory.server import mcp_server
 
@@ -188,7 +189,7 @@ class TestExplicitWrite(unittest.TestCase):
         add_tool = tool_dict["add_memory"]
 
         properties = add_tool.input_schema.get("properties", {})
-        allowed_properties = {"text", "scope", "category"}
+        allowed_properties = {"text", "scope", "category", "project_id"}
         self.assertEqual(set(properties.keys()), allowed_properties)
         self.assertEqual(properties["text"].get("maxLength"), 2000)
 
@@ -217,11 +218,11 @@ class TestExplicitWrite(unittest.TestCase):
             }
             mock_get_engine.return_value = mock_engine_instance
 
-            output = add_memory(
+            output = asyncio.run(add_memory(
                 text="代码风格偏好紧凑",
                 scope="global",
                 category="preference",
-            )
+            ))
 
             mock_engine_instance.add_explicit.assert_called_once_with(
                 text="代码风格偏好紧凑",
@@ -246,7 +247,7 @@ class TestExplicitWrite(unittest.TestCase):
 
             # 1. Explicit HippoValidationError handling (user-safe validation error)
             mock_engine_instance.add_explicit.side_effect = HippoValidationError("text cannot be empty")
-            output = add_memory(text="", scope="project")
+            output = asyncio.run(add_memory(text="", scope="project", project_id="hippo"))
             self.assertEqual(output["status"], "error")
             self.assertEqual(output["message"], "text cannot be empty")
 
@@ -254,7 +255,7 @@ class TestExplicitWrite(unittest.TestCase):
             mock_engine_instance.add_explicit.side_effect = ValueError(
                 "underlying fastembed dimension mismatch: 768 != 1536 internal details"
             )
-            output_val_err = add_memory(text="safe fact", scope="project")
+            output_val_err = asyncio.run(add_memory(text="safe fact", scope="project", project_id="hippo"))
             self.assertEqual(output_val_err["status"], "error")
             self.assertNotIn("fastembed", output_val_err["message"])
             self.assertNotIn("dimension", output_val_err["message"])
@@ -267,7 +268,7 @@ class TestExplicitWrite(unittest.TestCase):
             mock_engine_instance.add_explicit.side_effect = RuntimeError(
                 "secret database credentials or raw dump"
             )
-            output_internal = add_memory(text="safe fact", scope="project")
+            output_internal = asyncio.run(add_memory(text="safe fact", scope="project", project_id="hippo"))
             self.assertEqual(output_internal["status"], "error")
             self.assertNotIn("secret database", output_internal["message"])
             self.assertEqual(

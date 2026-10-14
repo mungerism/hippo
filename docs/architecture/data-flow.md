@@ -68,6 +68,7 @@ flowchart TD
 
 - **核心目标**：防范调用方传入自定义业务过滤条件时越权穿透或丢失用户/项目隔离边界，严格保证跨租户数据隔离（Forbidden Leakage = 0）。
 - **机制与实现**：
+  - **MCP 项目解析（#93）**：MCP 网关在接触后端前从显式 `project_id` 或本次调用所属客户端的唯一 Git root 解析项目，语义搜索、时间线和写入共享此边界；每次读取 roots 以支持聊天切换和多客户端复用。缺少/歧义 roots 时返回显式选项提示，不回退到服务启动目录；`global` 无需项目。详见 [ADR-0009](/adr/0009-request-scoped-mcp-project-routing) 与 [部署排障](/runbooks/deployment#mcp-project-routing)；
   - **Mandatory Scope（强制身份范围）**：由 `ScopeRouter.resolve_search_scope()` 依据选定用户及 `project`/`global`/`all` 生成基准范围，不可被外部替换或绕过；
   - **Conjunction Composition（严格合取组合）**：通过 `compose_scope_filters()` 保留顶层 `user_id` 以满足 Mem0 的实体范围校验，并将剩余 mandatory scope 与调用方传入的任意 business filters（含分类、嵌套 `AND`/`OR`/`NOT`）作为受保护的嵌套合取表达式组合；调用方 filters 只能缩小结果集，不能覆盖或放宽身份边界，冲突身份约束返回 0 结果；
   - **Production & Trace Parity**：生产环境 `search()` 与评测诊断 `search_with_trace()` 共享同一套范围解析与过滤器组合路径，并统一在底层推下 `add_lifecycle_exclusion()` 废弃排除过滤。
