@@ -5,8 +5,16 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
-def detect_git_project(start_path: Optional[Path] = None) -> Tuple[Optional[str], Optional[Path]]:
+def detect_git_project(
+    start_path: Optional[Path] = None,
+    *,
+    inherit_git_environment: bool = True,
+) -> Tuple[Optional[str], Optional[Path]]:
     """Detect Git repository root and project name from start_path or CWD.
+
+    inherit_git_environment=False isolates Git discovery from the hosting
+    process's Git configuration and repository-location variables. Only the
+    subprocess environment is filtered; shared process state is never changed.
 
     Returns:
         (project_name, git_root_path) or (None, None)
@@ -22,11 +30,21 @@ def detect_git_project(start_path: Optional[Path] = None) -> Tuple[Optional[str]
 
     # Try git command fallback
     try:
+        git_env = (
+            None
+            if inherit_git_environment
+            else {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+        )
         git_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=str(path),
             stderr=subprocess.DEVNULL,
             text=True,
+            env=git_env,
         ).strip()
         if git_root:
             p = Path(git_root)

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +19,7 @@ from mcp.shared.memory import create_client_server_memory_streams
 from hippo_memory.config import HippoConfig
 from hippo_memory.engine import HippoEngine
 from hippo_memory.gate import SearchGateConfig
-from hippo_memory.router import ScopeRouter
+from hippo_memory.router import ScopeRouter, detect_git_project
 from hippo_memory.server import mcp_server
 from tests.test_scope_isolation import _eval_filter
 
@@ -179,6 +181,58 @@ class TestMcpProjectRouting(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("private", output)
                     self.assertNotIn(str(self.repo_a.parent), output)
         self.store.search.assert_not_called()
+
+    async def test_git_environment_cannot_route_non_git_client_context(self):
+        # Use a real repository so inherited Git variables can redirect the
+        # actual rev-parse fallback, rather than mocking its output.
+        subprocess.run(["git", "init", "--quiet", str(self.repo_b)], check=True)
+        non_repo = self.repo_a.parent / "client-workspace"
+        non_repo.mkdir()
+        self.engine.get_recent_memories = MagicMock(return_value=[])
+        self.engine.add_explicit = MagicMock(return_value={"status": "success"})
+        git_environment = {
+            "GIT_DIR": str(self.repo_b / ".git"),
+            "GIT_WORK_TREE": str(self.repo_b),
+            "GIT_COMMON_DIR": str(self.repo_b / ".git"),
+        }
+        with patch.dict(os.environ, git_environment):
+            # Local CLI/SDK callers keep their existing Git environment contract.
+            self.assertEqual(detect_git_project(non_repo), ("repository-b", self.repo_b.resolve()))
+            for scope in ("project", "all"):
+                for selectors, ctx in (
+                    ({}, self.context([non_repo.as_uri()])),
+                    ({"project_id": str(non_repo)}, None),
+                    ({"agent_id": str(non_repo)}, None),
+                ):
+                    for query in ("fixture query", "今天新增了什么记忆"):
+                        with self.subTest(
+                            scope=scope, selectors=selectors, query=query
+                        ):
+                            result = await mcp_server.call_tool(
+                                "search_memories",
+                                {"query": query, "scope": scope, **selectors},
+                                ctx,
+                            )
+                            output = result.content[0].text
+                            self.assertIn("project_id", output)
+                            self.assertNotIn("fact for", output)
+                            self.assertNotIn(str(self.repo_b), output)
+            for selectors, ctx in (
+                ({}, self.context([non_repo.as_uri()])),
+                ({"project_id": str(non_repo)}, None),
+            ):
+                result = await mcp_server.call_tool(
+                    "add_memory", {"text": "fixture fact", **selectors}, ctx
+                )
+                error = json.loads(result.content[0].text)
+                self.assertEqual(error["status"], "error")
+                self.assertIn("project_id", error["message"])
+            # Isolation belongs to the Git subprocess, not the shared process.
+            for key, value in git_environment.items():
+                self.assertEqual(os.environ[key], value)
+        self.store.search.assert_not_called()
+        self.engine.get_recent_memories.assert_not_called()
+        self.engine.add_explicit.assert_not_called()
 
     async def test_roots_timeout_is_bounded(self):
         ctx = self.context([self.repo_a.as_uri()])

@@ -36,7 +36,7 @@ def _explicit_project(selector: str) -> str:
     path = Path(value).expanduser()
     if not path.is_absolute() or not path.is_dir():
         raise ProjectContextError(_PROJECT_HELP)
-    name, root = detect_git_project(path)
+    name, root = detect_git_project(path, inherit_git_environment=False)
     if name is None or root is None:
         raise ProjectContextError(_PROJECT_HELP)
     return name
@@ -92,7 +92,7 @@ async def resolve_mcp_scope(
         repositories: dict[Path, str] = {}
         for root in roots_result.roots:
             path = _root_path(str(root.uri))
-            name, git_root = detect_git_project(path)
+            name, git_root = detect_git_project(path, inherit_git_environment=False)
             if name is None or git_root is None:
                 raise ProjectContextError(_PROJECT_HELP)
             repositories[git_root.resolve()] = name
