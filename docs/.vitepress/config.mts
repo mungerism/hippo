@@ -73,6 +73,7 @@ export default withMermaid(
             { text: '0005: Spool 队列治理与 Worker 常驻保活', link: '/adr/0005-spool-governance-and-worker-service' },
             { text: '0006: 评测框架与分阶段 Evaluation Trace', link: '/adr/0006-retrieval-evaluation-harness-and-trace' },
             { text: '0007: Jev 关系分类受控范围接管', link: '/adr/0007-scoped-jev-relation-classification-takeover' },
+            { text: '0009: MCP 按调用方上下文解析项目', link: '/adr/0009-request-scoped-mcp-project-routing' },
           ],
         },
       ],

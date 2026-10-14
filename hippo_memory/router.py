@@ -5,8 +5,16 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
-def detect_git_project(start_path: Optional[Path] = None) -> Tuple[Optional[str], Optional[Path]]:
+def detect_git_project(
+    start_path: Optional[Path] = None,
+    *,
+    inherit_git_environment: bool = True,
+) -> Tuple[Optional[str], Optional[Path]]:
     """Detect Git repository root and project name from start_path or CWD.
+
+    inherit_git_environment=False isolates Git discovery from the hosting
+    process's Git configuration and repository-location variables. Only the
+    subprocess environment is filtered; shared process state is never changed.
 
     Returns:
         (project_name, git_root_path) or (None, None)
@@ -22,11 +30,21 @@ def detect_git_project(start_path: Optional[Path] = None) -> Tuple[Optional[str]
 
     # Try git command fallback
     try:
+        git_env = (
+            None
+            if inherit_git_environment
+            else {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+        )
         git_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=str(path),
             stderr=subprocess.DEVNULL,
             text=True,
+            env=git_env,
         ).strip()
         if git_root:
             p = Path(git_root)
@@ -58,10 +76,12 @@ class ScopeRouter:
     ) -> str:
         """Resolve current project ID from explicit arg, given directory, or Git environment."""
         if project_id and project_id.strip():
-            # If project_id is a filesystem directory, derive clean Git repository name
+            # Namespace names must not be reinterpreted as server-relative
+            # directories. Only syntactic path selectors opt into Git detection.
             try:
                 p = Path(project_id.strip())
-                if p.exists() and p.is_dir():
+                is_path = p.is_absolute() or "/" in project_id or project_id.strip() in {".", ".."}
+                if is_path and p.exists() and p.is_dir():
                     detected, _ = detect_git_project(p)
                     if detected:
                         return detected

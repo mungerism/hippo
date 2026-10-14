@@ -6,6 +6,7 @@ still read the full history. The lifecycle filter runs before the
 relevance gate in every Agent-facing recall seam.
 """
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -459,7 +460,7 @@ class TestAuditSemantics(unittest.TestCase):
         original = server.get_engine
         server.get_engine = lambda: engine
         try:
-            rendered = server.search_memories(query="database", scope="project")
+            rendered = asyncio.run(server.search_memories(query="database", scope="project", project_id="hippo"))
         finally:
             server.get_engine = original
 

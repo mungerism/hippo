@@ -149,6 +149,8 @@ System configurations for major clients. You can run directly via `uvx` or speci
 
 > 💡 **Tip**: Replace `/path/to/hippo` with the absolute path to your cloned repository, or run `uv tool install hippo-memory` to use `hippo-mcp` directly.
 
+**Project routing:** The MCP server's startup directory is not the chat's project. Project-scoped tools use an explicit `project_id` (namespace name or local Git repository absolute path), or the calling client's unique Git workspace root. Missing, unavailable, or ambiguous roots return an actionable error before accessing memory; pass `project_id` explicitly in those clients. `scope="global"` needs no workspace. This applies to semantic search, timeline queries, and writes; see the [routing runbook](https://mungerism.github.io/hippo/runbooks/deployment#mcp-project-routing). After upgrading, restart the MCP connection and refresh its tool schema.
+
 ### 1. antigravity
 Config path: `~/.gemini/config/mcp_config.json`
 ```json
@@ -257,7 +259,7 @@ This performs two idempotent setups:
 
 Hippo MCP exposes two minimal, secure tools tailored for autonomous agents:
 - **`search_memories(query, ...)`**: Hybrid vector and keyword retrieval with safety gate. Automatically switches to bounded timeline retrieval when explicit temporal queries ("today", "yesterday", "last 48 hours") are detected.
-- **`add_memory(text, ...)`**: Saves single-sentence facts, preferences, or rules (max 2000 chars, supports local image paths). Multi-turn session context is handled by asynchronous background distillation to avoid token explosions.
+- **`add_memory(text, scope="project", category="general", project_id=None)`**: Saves single-sentence facts, preferences, or rules (max 2000 chars). Use `project_id` when the client cannot provide a unique Git workspace root. Multi-turn session context is handled by asynchronous background distillation to avoid token explosions.
 
 ---
 

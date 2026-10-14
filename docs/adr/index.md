@@ -16,6 +16,7 @@
 | [0006](/adr/0006-retrieval-evaluation-harness-and-trace) | 评测框架与分阶段 Evaluation Trace | 已通过 (Accepted) | 2026-09-22 | 确立解耦评测 Schema、确定性指标公式、四阶段 Trace 诊断、物理隔离与 Baseline 回归门禁。 |
 | [0007](/adr/0007-scoped-jev-relation-classification-takeover) | Jev 关系分类受控范围接管 | 已通过 (Accepted) | 2026-10-03 | 建立白名单项目、校准门禁产物与预算约束下的 Jev 分类接管机制，具备 Fail-Closed 弃权与误合并定向回滚能力。 |
 | [0008](/adr/0008-hide-limit-from-agent-mcp) | 从 Agent MCP 剥离 limit 参数 | 已通过 (Accepted) | 2026-10-04 | 面向 Agent 的 search_memories 彻底隐藏 limit，由部署端 max_injected 单一权威管控注入预算。 |
+| [0009](/adr/0009-request-scoped-mcp-project-routing) | MCP 按调用方上下文解析项目 | 已通过 (Accepted) | 2026-10-14 | MCP 使用显式项目或请求级唯一 Git root；缺失或歧义时明确报错，杜绝服务目录跨项目回退。 |
 
 ---
 
