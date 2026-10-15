@@ -21,3 +21,5 @@ MCP 的自动 roots 和显式路径检测均以过滤掉全部 `GIT_*` 变量的
 [RFC-0003](/rfcs/0003-automatic-project-context) 的实现扩展了上述来源限制：允许明确启用的 Codex 请求 metadata、本地专属 stdio 启动时捕获的 `CLAUDE_PROJECT_DIR`，以及运维者传入的 `serve --project-root`。Claude 环境在 dotenv 载入前固定；普通仓库环境变量、服务 cwd 与最近项目不作为 MCP 来源。存在多个 roots 时，可信候选必须属于其中一个仓库；没有候选则 roots 必须唯一，各来源冲突时失败。
 
 Pi 工具通过回调 `ctx.cwd` 调用共用安全桥；Hook 保留完整候选，缺失或歧义时不能取进程 cwd 或首个工作区。新增 opt-in canonical 模式，以本地 Git common directory 为身份、显式映射保留历史空间、未绑定仓库使用完整哈希。默认保持 legacy；启用前须执行队列切换与历史绑定屏障，详见[运维手册](/runbooks/project-context)。这些规则取代本文原先对来源和命名空间的绝对限制，不改变请求隔离、scope、预算和 Mem0 存储契约。
+
+本机已于 2026-10-15 完成上述切换及四宿主真实召回验收，见[发布记录](/runbooks/project-context-acceptance)。Antigravity 的 stateless 连接会明确抛出 SDK `NoBackChannelError`；仅将这一状态视为 roots 不可用，继续要求有效独立上下文。普通 roots 异常、超时、空列表或冲突仍然失败。该兼容修订不改变软件默认开关。

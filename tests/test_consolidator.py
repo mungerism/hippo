@@ -408,6 +408,92 @@ class TestConflictEndToEnd(unittest.TestCase):
         self.assertEqual(audit["metadata"]["status"], "superseded")
 
 
+class TestPreferenceChangeEndToEnd(unittest.TestCase):
+    """PR language policy changes, with a scripted semantic classification.
+
+    The test covers real arbitration/apply/recall after CONFLICT is known;
+    it does not assert that an online LLM will recognize the conflict.
+    """
+
+    def setUp(self):
+        self.harness = _Harness(
+            [
+                _memory(
+                    "pr-language-english",
+                    "Hippo PR 与 Issue 的标题和正文优先使用英文。",
+                    confirmed_at="2026-10-14T00:00:00+00:00",
+                    confirmation_count=20,
+                ),
+                _memory(
+                    "pr-language-chinese",
+                    "Hippo PR 与 Issue 的标题和正文默认使用中文，技术标识保留原文。",
+                    confirmed_at="2026-10-15T00:00:00+00:00",
+                ),
+                _memory(
+                    "commit-language",
+                    "Git Commit Message 使用英文并遵循 Conventional Commits。",
+                    confirmed_at="2026-10-14T00:00:00+00:00",
+                ),
+            ],
+            semantic_scores={
+                frozenset(("pr-language-english", "pr-language-chinese")): 0.93,
+            },
+            scripted="CONFLICT",
+        )
+        self.addCleanup(self.harness.cleanup)
+
+    def test_dry_run_preserves_both_active_preferences(self):
+        before = {item["id"] for item in self.harness.recall("PR")}
+        result = self.harness.consolidator.consolidate(
+            scope="project", project_id="hippo", dry_run=True,
+        )
+
+        self.assertEqual(before, {"pr-language-english", "pr-language-chinese"})
+        self.assertEqual(result.classified_conflict, 1)
+        self.assertEqual(self.harness.store.update_calls, [])
+        self.assertEqual({item["id"] for item in self.harness.recall("PR")}, before)
+
+    def test_new_confirmation_wins_and_preserves_commit_policy_and_audit(self):
+        result = self.harness.consolidator.consolidate(
+            scope="project", project_id="hippo",
+        )
+
+        self.assertEqual(result.superseded, 1)
+        self.assertEqual(result.merged, 0)
+        self.assertEqual(
+            [item["id"] for item in self.harness.recall("PR")],
+            ["pr-language-chinese"],
+        )
+        audit = self.harness.engine.get("pr-language-english")
+        self.assertEqual(audit["metadata"]["status"], "superseded")
+        self.assertEqual(audit["metadata"]["superseded_by"], "pr-language-chinese")
+        self.assertEqual(audit["metadata"]["supersede_reason"], "conflict_overridden")
+        self.assertEqual(audit["metadata"]["confirmation_count"], 20)
+        self.assertEqual(
+            [item["id"] for item in self.harness.recall("Conventional Commits")],
+            ["commit-language"],
+        )
+        self.assertTrue(all(
+            call["id"] != "commit-language" for call in self.harness.store.update_calls
+        ))
+
+    def test_repeated_governance_is_idempotent(self):
+        self.harness.consolidator.consolidate(scope="project", project_id="hippo")
+        calls = len(self.harness.store.update_calls)
+
+        result = self.harness.consolidator.consolidate(
+            scope="project", project_id="hippo",
+        )
+
+        self.assertEqual(result.superseded, 0)
+        self.assertEqual(result.merged, 0)
+        self.assertEqual(len(self.harness.store.update_calls), calls)
+        self.assertEqual(
+            [item["id"] for item in self.harness.recall("PR")],
+            ["pr-language-chinese"],
+        )
+
+
 class TestScopeAndWindow(unittest.TestCase):
     def test_cross_identity_pairs_are_never_cross_governed(self):
         records = [
