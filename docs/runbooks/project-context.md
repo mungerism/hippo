@@ -56,7 +56,7 @@ v2 发布前会检查 legacy Worker 是否持锁，但它不能替代进程版�
 
 ## 开发验证记录
 
-本次隔离测试共 718 项通过、1 项因未启用真实 Qdrant 集成而跳过；Ruff CI 规则、compileall、Python wheel/sdist 与文档构建通过。MCP 使用真实 SDK 内存传输验证初始化协商与请求 metadata，不连接生产记忆后端。
+本次隔离测试运行 718 项，717 项通过、1 项因未启用真实 Qdrant 集成而跳过；Ruff CI 规则、compileall、Python wheel/sdist 与文档构建通过。MCP 使用真实 SDK 内存传输验证初始化协商与请求 metadata，不连接生产记忆后端。
 
 Pi 扩展契约脚本可用已安装的 Pi 包目录复跑，不安装新的依赖：
 
