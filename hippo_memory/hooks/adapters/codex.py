@@ -32,7 +32,7 @@ class CodexAdapter(BaseHostAdapter):
 
         session_id = str(data.get("session_id") or data.get("conversation_id") or data.get("id") or "unknown_session")
         event = str(data.get("hook_event_name") or data.get("event") or HookEvent.STOP.value)
-        cwd = str(data.get("cwd") or data.get("workspace_root") or env_cwd or os.getcwd())
+        cwd = str(data.get("cwd") or data.get("workspace_root") or env_cwd or "")
         transcript_path = data.get("transcript_path") or data.get("transcript_file")
 
         boundary, job_id = self.resolve_boundary_and_job_id(session_id, event, transcript_path)

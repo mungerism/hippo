@@ -37,7 +37,10 @@ class AntigravityAdapter(BaseHostAdapter):
 
         # workspacePaths is a list
         workspaces = data.get("workspacePaths") or []
-        cwd = str(workspaces[0] if workspaces else (env_cwd or os.getcwd()))
+        if not isinstance(workspaces, list) or any(not isinstance(p, str) or not p for p in workspaces):
+            workspaces = []
+        # Preserve all candidates. Never guess the active repository from list order.
+        cwd = workspaces[0] if len(workspaces) == 1 else (env_cwd or "")
         transcript_path = data.get("transcriptPath") or data.get("transcript_path")
 
         boundary, job_id = self.resolve_boundary_and_job_id(session_id, event, transcript_path)
@@ -48,6 +51,7 @@ class AntigravityAdapter(BaseHostAdapter):
             event=event,
             session_id=session_id,
             project_dir=cwd,
+            workspace_candidates=workspaces or [env_cwd or ""],
             transcript_path=str(transcript_path) if transcript_path else None,
             boundary=boundary,
             created_at=time.time(),

@@ -40,7 +40,7 @@ class PiAdapter(BaseHostAdapter):
         else:
             event = raw_event
 
-        cwd = str(data.get("cwd") or data.get("project_dir") or env_cwd or os.getcwd())
+        cwd = str(data.get("cwd") or data.get("project_dir") or env_cwd or "")
         transcript_path = data.get("transcript_path") or data.get("session_file")
 
         # In-memory turns or message snapshot passed from extension
@@ -70,6 +70,7 @@ class PiAdapter(BaseHostAdapter):
             event=event,
             session_id=session_id,
             project_dir=cwd,
+            workspace_candidates=[cwd],
             transcript_path=str(transcript_path) if transcript_path else None,
             created_at=time.time(),
         )

@@ -35,8 +35,8 @@ Documentation = "https://mungerism.github.io/hippo/"
 Issues = "https://github.com/mungerism/hippo/issues"
 
 [project.scripts]
-hippo = "hippo_memory.cli:app"
-hippo-mcp = "hippo_memory.server:main"
+hippo = "hippo_memory.bootstrap:cli"
+hippo-mcp = "hippo_memory.bootstrap:mcp"
 
 [build-system]
 requires = ["hatchling"]

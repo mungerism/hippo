@@ -3,6 +3,7 @@
 Allows easy inspection, addition, and querying of memories from the command line.
 """
 
+from pathlib import Path
 from typing import Optional
 import typer
 from rich.console import Console
@@ -17,6 +18,132 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+agent_app = typer.Typer(help="宿主扩展的安全记忆桥接，不开放底层预算参数")
+project_app = typer.Typer(help="检查仓库身份并绑定历史记忆命名空间")
+app.add_typer(agent_app, name="agent")
+app.add_typer(project_app, name="project")
+
+
+def _agent_scope(scope, project, context_dir):
+    from hippo_memory.project_context import ProjectContextResolver
+
+    if scope not in {"project", "global", "all"}:
+        from hippo_memory.project_context import ProjectContextError
+        raise ProjectContextError()
+    if scope == "global":
+        return None
+    resolver = ProjectContextResolver()
+    if project is not None:
+        return resolver.explicit(project).namespace
+    return resolver.automatic(
+        candidates=[] if context_dir is None else [("pi_context", context_dir, False)], roots=None,
+    ).namespace
+
+
+@agent_app.command("search")
+def agent_search(
+    query: str = typer.Argument(...),
+    scope: str = typer.Option("all", "--scope"),
+    project: Optional[str] = typer.Option(None, "--project"),
+    context_dir: Optional[str] = typer.Option(None, "--context-dir"),
+):
+    import anyio
+    import sys
+    from hippo_memory import agent_memory
+    from hippo_memory.exceptions import HippoValidationError
+
+    async def run():
+        try:
+            namespace = _agent_scope(scope, project, context_dir)
+            output = await agent_memory.search(_get_engine(), query=query, scope=scope, project_id=namespace)
+            sys.stdout.write(output + "\n")
+        except HippoValidationError as e:
+            sys.stdout.write(agent_memory.render_error(query, scope, str(e)) + "\n")
+            raise typer.Exit(1)
+        except Exception:
+            sys.stdout.write(agent_memory.render_error(query, scope, "记忆检索失败，请检查服务配置。") + "\n")
+            raise typer.Exit(1)
+    anyio.run(run)
+
+
+@agent_app.command("add")
+def agent_add(
+    text: str = typer.Argument(...),
+    scope: str = typer.Option("project", "--scope"),
+    project: Optional[str] = typer.Option(None, "--project"),
+    context_dir: Optional[str] = typer.Option(None, "--context-dir"),
+):
+    import anyio
+    import json
+    import sys
+    from hippo_memory import agent_memory
+    from hippo_memory.exceptions import HippoValidationError
+
+    async def run():
+        try:
+            if scope not in {"project", "global"} or not text.strip() or len(text) > 2000:
+                raise HippoValidationError("无效 scope 或事实文本（限 2000 字符）。")
+            namespace = _agent_scope(scope, project, context_dir)
+            result = await agent_memory.add(_get_engine(), text=text, scope=scope, project_id=namespace)
+            sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+        except HippoValidationError as e:
+            sys.stdout.write(json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False) + "\n")
+            raise typer.Exit(1)
+        except Exception:
+            sys.stdout.write('{"status":"error","message":"记忆保存失败，请检查服务配置。"}\n')
+            raise typer.Exit(1)
+    anyio.run(run)
+
+
+@project_app.command("inspect")
+def project_inspect(path: str = typer.Argument(...)):
+    import json
+    from hippo_memory.project_context import ProjectContextResolver, local_path, repository
+
+    resolver = ProjectContextResolver()
+    name, root, anchor = repository(local_path(path), canonical=True)
+    result = resolver.path_project(path, "inspect")
+    print(json.dumps({"mode": resolver.mode, "namespace": result.namespace,
+                      "legacy_namespace": name, "worktree_root": str(root),
+                      "repository_anchor": str(anchor), "revision": resolver.revision}, indent=2))
+
+
+@project_app.command("bind")
+def project_bind(path: str = typer.Argument(...), namespace: str = typer.Option(..., "--namespace")):
+    import fcntl
+    import json
+    import os
+    import tempfile
+    from hippo_memory.project_context import ProjectContextResolver, local_path, repository
+
+    resolver = ProjectContextResolver()
+    selected = resolver.explicit(namespace)
+    if selected.source != "explicit" or selected.repository_anchor is not None or selected.namespace == "global":
+        raise typer.BadParameter("namespace 必须是非 global 的纯命名空间名称")
+    _, _, anchor = repository(local_path(path), canonical=True)
+    target = resolver.path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        resolver = ProjectContextResolver(target)
+        values = dict(resolver.bindings)
+        values[str(anchor)] = selected.namespace
+        data = {"version": 1, "mode": resolver.mode,
+                "bindings": [{"repository_anchor": k, "namespace": v} for k, v in sorted(values.items())]}
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix="projects.")
+        try:
+            with os.fdopen(fd, "w") as out:
+                json.dump(data, out, ensure_ascii=False, indent=2)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, target)
+            from hippo_memory.hooks.spool import fsync_dir
+            fsync_dir(target.parent)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    console.print("项目绑定已保存；路由模式未改变。")
 
 
 def _get_engine(cfg: Optional[HippoConfig] = None):
@@ -34,8 +161,7 @@ def add(
     """Store a new memory into the Hippo memory hub."""
     scope = "global" if is_global else "project"
     engine = _get_engine()
-    resolved_proj = engine.router.resolve_project(project)
-    tag = "Global (全局习惯)" if scope == "global" else f"Project: {resolved_proj} (项目记忆)"
+    tag = "Global (全局习惯)" if scope == "global" else f"Project: {engine.router.resolve_project(project)} (项目记忆)"
 
     with console.status(f"[bold cyan]正在提取并沉淀记忆至 {tag}...[/bold cyan]"):
         try:
@@ -378,10 +504,13 @@ def consolidate(
 
 
 @app.command()
-def serve():
+def serve(
+    project_root: Optional[str] = typer.Option(None, "--project-root", help="专属 stdio 连接的仓库绝对路径"),
+    codex_context: bool = typer.Option(False, "--codex-context", help="启用实验性 Codex 请求上下文"),
+):
     """Start Hippo MCP Server (standard stdio mode for IDE integration)."""
     from hippo_memory.server import main as run_server
-    run_server()
+    run_server(project_root=project_root, codex_context=codex_context)
 
 
 @app.command()
@@ -667,6 +796,7 @@ def hook_capture(
     host: str = typer.Option(..., "--host", "-h", help="宿主类型: codex | pi | zcode | antigravity"),
     sync: bool = typer.Option(False, "--sync", help="同步执行蒸馏（调试与单测使用）"),
     cwd: Optional[str] = typer.Option(None, "--cwd", help="覆盖运行目录"),
+    queue_version: int = typer.Option(1, "--queue-version", min=1, max=2, help="显式选择已完成消费者升级的队列格式"),
 ):
     """Capture host hook context from stdin and enqueue into spool (<50ms fast exit)."""
     import sys
@@ -691,7 +821,12 @@ def hook_capture(
             return
 
         payload = adapter.parse_context(raw_input, env_cwd=cwd)
-        storage = SpoolStorage()
+        payload.schema_version = queue_version
+        if not payload.workspace_candidates:
+            payload.workspace_candidates = [payload.project_dir]
+        if queue_version == 2 and SpoolStorage().is_worker_active():
+            raise RuntimeError("旧队列 Worker 仍在运行，升级切换完成前不能发布 v2 作业")
+        storage = SpoolStorage(version=queue_version)
         is_new, job_id = storage.enqueue(payload)
 
         if sync:
@@ -704,7 +839,8 @@ def hook_capture(
             if not storage.is_worker_active():
                 try:
                     subprocess.Popen(
-                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain"],
+                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain",
+                         "--queue-version", str(queue_version)],
                         start_new_session=True,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
@@ -733,11 +869,13 @@ def hook_worker(
     daemon: bool = typer.Option(False, "--daemon", help="以常驻守护进程模式持续监听消费"),
     limit: Optional[int] = typer.Option(None, "--limit", "-n", help="最大消费作业数"),
     interval: float = typer.Option(2.0, "--interval", "-i", help="常驻轮询间隔秒数"),
+    queue_version: int = typer.Option(1, "--queue-version", min=1, max=2),
+    spool_dir: Optional[Path] = typer.Option(None, "--spool-dir", hidden=True),
 ):
     """Background single worker mutex-consuming the spool job queue."""
     from hippo_memory.hooks import SpoolStorage, SpoolWorker
 
-    storage = SpoolStorage()
+    storage = SpoolStorage(base_dir=spool_dir, version=queue_version)
     worker = SpoolWorker(storage=storage)
 
     if daemon:
@@ -749,12 +887,12 @@ def hook_worker(
 
 
 @hook_app.command("status")
-def hook_status():
+def hook_status(queue_version: int = typer.Option(1, "--queue-version", min=1, max=2)):
     """Inspect spool queue statistics and job journal."""
     import datetime
     from hippo_memory.hooks import SpoolStorage, JobState
 
-    storage = SpoolStorage()
+    storage = SpoolStorage(version=queue_version)
     jobs = storage.list_jobs()
 
     counts = {st.value: 0 for st in JobState}
@@ -800,6 +938,7 @@ def hook_retry(
     all_dead: bool = typer.Option(False, "--all-dead", "-a", help="批量重试所有死信 (dead) 作业"),
     drain: bool = typer.Option(True, "--drain/--no-drain", help="重置状态后触发消费"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只预览待重试的作业，不实际修改"),
+    queue_version: int = typer.Option(1, "--queue-version", min=1, max=2),
 ):
     """Re-enqueue failed (dead) or skipped jobs and trigger consumption."""
     from hippo_memory.hooks import SpoolStorage, SpoolWorker, JobState
@@ -814,7 +953,7 @@ def hook_retry(
     if dry_run and drain:
         drain = False
 
-    storage = SpoolStorage()
+    storage = SpoolStorage(version=queue_version)
 
     if all_dead:
         retried = storage.retry_all_dead(dry_run=dry_run)
@@ -850,7 +989,7 @@ def hook_retry(
         console.print(f"[bold green]✓ 作业 {job_id} 已重置为 pending 状态。[/bold green]")
 
     if drain:
-        if is_worker_running():
+        if storage.is_worker_active() if queue_version == 2 else is_worker_running():
             console.print("[cyan]常驻 Worker (dev.hippo.worker) 正在运行中，作业已重新入队并将由后台守护进程自动消费。[/cyan]")
         else:
             console.print("[cyan]正在触发前台消费...[/cyan]")
@@ -876,6 +1015,7 @@ def hook_prune(
     hours: Optional[int] = typer.Option(None, "--hours", help="清理早于指定小时数的作业"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只预览待清理的作业，不实际删除"),
     force: bool = typer.Option(False, "--force", "-f", help="确认执行删除（破坏性操作保护）"),
+    queue_version: int = typer.Option(1, "--queue-version", min=1, max=2),
 ):
     """Prune completed or discarded spool jobs (preserving receipts and tombstones for idempotency)."""
     from hippo_memory.hooks import SpoolStorage, TERMINAL_STATES
@@ -902,7 +1042,7 @@ def hook_prune(
         h_sec = hours * 3600.0
         older_than_seconds = min(older_than_seconds, h_sec) if older_than_seconds is not None else h_sec
 
-    storage = SpoolStorage()
+    storage = SpoolStorage(version=queue_version)
     try:
         pruned = storage.prune_jobs(
             states=target_states,

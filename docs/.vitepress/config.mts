@@ -84,6 +84,7 @@ export default withMermaid(
             { text: 'RFC 提案索引', link: '/rfcs/' },
             { text: 'RFC 标准模板', link: '/rfcs/template' },
             { text: '0001: Jev 离线关系分类后端', link: '/rfcs/0001-jev-cold-path-classifier' },
+            { text: '0003: 宿主自动项目上下文', link: '/rfcs/0003-automatic-project-context' },
           ],
         },
       ],
@@ -102,6 +103,7 @@ export default withMermaid(
           items: [
             { text: '手册索引', link: '/runbooks/' },
             { text: 'Qdrant 本地常驻与部署运维', link: '/runbooks/deployment' },
+            { text: '自动项目路由与版本切换', link: '/runbooks/project-context' },
             { text: 'Doctor 巡检与环境排障', link: '/runbooks/troubleshooting' },
             { text: '记忆迁移与向量重建操作手册', link: '/runbooks/migration' },
             { text: '评测 Baseline 治理与回归排障', link: '/runbooks/eval-baseline-management' },
@@ -120,6 +122,7 @@ export default withMermaid(
             { text: 'Jev 分类校准与门禁', link: '/knowledge/jev-calibration' },
             { text: 'Jev 关系分类受控接管', link: '/knowledge/jev-takeover' },
             { text: 'Codex 记忆机制深度调研', link: '/knowledge/codex-memory-research' },
+            { text: 'Claude Code 记忆机制调研', link: '/knowledge/claude-code-memory-research' },
             { text: '会话记忆蒸馏工程调研', link: '/knowledge/session-distill-research' },
             { text: 'Cold Path 记忆固化与索引设计', link: '/knowledge/cold-path-consolidation-design' },
             { text: 'Mem0 内部机制与边界剖析', link: '/knowledge/mem0-deep-dive' },

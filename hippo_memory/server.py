@@ -4,29 +4,45 @@ Enables seamless memory reading and writing for antigravity, Codex, ZCode, Zed A
 """
 
 import logging
-from functools import partial
 from typing import Annotated, Any, Dict, Literal, Optional
 
-import anyio
 from pydantic import Field
 
 from mcp.server.mcpserver import Context, MCPServer
+from hippo_memory import agent_memory
 from hippo_memory.engine import HippoEngine
 from hippo_memory.exceptions import HippoValidationError
 from hippo_memory.mcp_scope import ProjectContextError, resolve_mcp_scope
-from hippo_memory.recent import parse_temporal_query
 from hippo_memory.renderer import (
     UNTRUSTED_CONTEXT_INSTRUCTION,
-    render_untrusted_memories,
-    render_untrusted_recent_memories,
 )
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hippo.mcp")
 
-# Initialize MCP Server
-mcp_server = MCPServer(
+class HostMCPServer(MCPServer):
+    """A stdio-only capability adapter; bindings are immutable after startup."""
+
+    project_bindings = ()
+    codex_context = False
+
+    async def run_stdio_async(self):
+        from mcp.server.stdio import stdio_server
+        from hippo_memory.mcp_scope import CODEX_CONTEXT_KEY
+
+        experimental = {CODEX_CONTEXT_KEY: {}} if self.codex_context else {}
+        async with stdio_server() as (read, write):
+            await self._lowlevel_server.run(
+                read, write,
+                self._lowlevel_server.create_initialization_options(
+                    experimental_capabilities=experimental,
+                ),
+            )
+
+
+# One stdio connection per launched process, never a shared HTTP binding.
+mcp_server = HostMCPServer(
     "hippo-memory",
     instructions=(
         "Hippo is the persistent long-term memory hub (Mem0-compatible). "
@@ -38,8 +54,8 @@ mcp_server = MCPServer(
         "scope='global' only for cross-project personal habits. "
         "add_memory is an ADD-oriented raw capture path; do not assume synchronous "
         "deduplication, updates, or conflict resolution. "
-        "Project scope uses explicit project_id or the current client's unique Git workspace root; "
-        "it never uses the server working directory. If client roots are unavailable or ambiguous, "
+        "Project scope uses host context, a dedicated stdio binding, client roots or explicit project_id; "
+        "it never uses the server working directory. If validated host context is unavailable or ambiguous, "
         "provide project_id explicitly. " + UNTRUSTED_CONTEXT_INSTRUCTION
     ),
 )
@@ -59,8 +75,8 @@ def get_engine() -> HippoEngine:
         "Call this when the user states a preference, makes a decision worth keeping, corrects "
         "your behavior, or explicitly asks you to remember something. scope='project' (default) "
         "saves to the current Git repository's namespace; scope='global' saves to the user's "
-        "cross-project personal preferences. Project routing requires the client's unique Git root "
-        "or explicit project_id; missing or ambiguous roots return an actionable error. "
+        "cross-project personal preferences. Project routing uses host context, a dedicated stdio binding, the client's unique Git root "
+        "or explicit project_id; missing, conflicting or ambiguous context returns an actionable error. "
         "category defaults to 'general' (or 'preference', 'decision', 'pitfall')."
     )
 )
@@ -96,7 +112,7 @@ async def add_memory(
     project_id: Annotated[
         Optional[str],
         Field(
-            description="Explicit project namespace or local Git repository absolute path; required if client roots are unavailable or ambiguous."
+            description="Explicit project namespace or local Git repository absolute path; required if validated host context is unavailable or ambiguous."
         ),
     ] = None,
     ctx: Context = None,
@@ -107,28 +123,19 @@ async def add_memory(
         text: One concise fact, preference, rule, or decision to store (max 2000 chars).
         scope: Storage scope: 'project' (default, current project) or 'global' (cross-project personal preference).
         category: Knowledge category ('preference', 'decision', 'pitfall', 'general').
-        project_id: Explicit project selector when client roots cannot identify a unique repository.
+        project_id: Explicit project selector when host context cannot identify a unique repository.
 
     Returns:
         Structured dictionary confirming memory addition: status, id, text, scope, category.
     """
     try:
         resolved_scope, resolved_project = await resolve_mcp_scope(
-            ctx, scope=scope, project_id=project_id
+            ctx, scope=scope, project_id=project_id,
+            bindings=mcp_server.project_bindings, codex_context=mcp_server.codex_context,
         )
-        engine = get_engine()
-        return await anyio.to_thread.run_sync(
-            partial(
-                engine.add_explicit,
-                text=text,
-                scope=resolved_scope,
-                category=category,
-                **(
-                    {"project_id": resolved_project}
-                    if resolved_project is not None
-                    else {}
-                ),
-            )
+        return await agent_memory.add(
+            get_engine(), text=text, scope=resolved_scope,
+            project_id=resolved_project, category=category,
         )
     except HippoValidationError as e:
         return {
@@ -153,8 +160,8 @@ async def add_memory(
         "window alone. scope='all' (default) searches the current project's memories plus the "
         "user's global preferences; scope='project' only the current Git repository; "
         "scope='global' only cross-project personal preferences. "
-        "Project routing uses the client's unique Git root or explicit project_id, never the "
-        "server working directory. Missing or ambiguous client roots require explicit project_id. "
+        "Project routing uses validated host context, stdio bindings, client roots or explicit project_id, never the "
+        "server working directory. Missing or ambiguous host context requires explicit project_id. "
         + UNTRUSTED_CONTEXT_INSTRUCTION
     )
 )
@@ -196,7 +203,7 @@ async def search_memories(
     project_id: Annotated[
         Optional[str],
         Field(
-            description="Explicit project namespace or local Git repository absolute path; required if client roots are unavailable or ambiguous."
+            description="Explicit project namespace or local Git repository absolute path; required if validated host context is unavailable or ambiguous."
         ),
     ] = None,
     ctx: Context = None,
@@ -214,81 +221,33 @@ async def search_memories(
     Returns:
         Markdown-formatted memories enclosed inside an untrusted context envelope.
     """
-    temporal_window = parse_temporal_query(query) if filters is None else None
-
     try:
         resolved_scope, resolved_project = await resolve_mcp_scope(
-            ctx, scope=scope, project_id=project_id, agent_id=agent_id
+            ctx, scope=scope, project_id=project_id, agent_id=agent_id,
+            bindings=mcp_server.project_bindings, codex_context=mcp_server.codex_context,
         )
-        engine = get_engine()
-        max_injected = getattr(engine.config, "max_injected", 5)
-        if temporal_window is not None:
-            results = await anyio.to_thread.run_sync(
-                partial(
-                    engine.get_recent_memories,
-                    hours=temporal_window.hours,
-                    scope=resolved_scope,
-                    project_id=resolved_project,
-                    limit=max_injected,
-                    since=temporal_window.since,
-                    until=temporal_window.until,
-                    user_id=user_id,
-                    verified_only=True,
-                )
-            )
-            return render_untrusted_recent_memories(
-                results,
-                hours=temporal_window.hours,
-                scope=resolved_scope,
-                window_label=temporal_window.label,
-            )
-
-        results = await anyio.to_thread.run_sync(
-            partial(
-                engine.search,
-                query=query,
-                filters=filters,
-                limit=max_injected,
-                user_id=user_id,
-                agent_id=None,
-                scope=resolved_scope,
-                project_id=resolved_project,
-            )
+        return await agent_memory.search(
+            get_engine(), query=query, scope=resolved_scope, project_id=resolved_project,
+            filters=filters, user_id=user_id,
         )
-
-        return render_untrusted_memories(results, query=query, scope=resolved_scope)
     except ProjectContextError as e:
-        if temporal_window is not None:
-            return render_untrusted_recent_memories(
-                [],
-                hours=temporal_window.hours,
-                scope=scope,
-                window_label=temporal_window.label,
-                empty_message=str(e),
-            )
-        return render_untrusted_memories(
-            [], query=query, scope=scope, empty_message=str(e)
-        )
-    except Exception as e:
-        logger.error("Failed to search memories: %s", e, exc_info=True)
-        if temporal_window is not None:
-            return render_untrusted_recent_memories(
-                [],
-                hours=temporal_window.hours,
-                scope=scope,
-                window_label=temporal_window.label,
-                empty_message="近期记忆检索失败，请检查服务配置或稍后重试。",
-            )
-        return render_untrusted_memories(
-            [],
-            query=query,
-            scope=scope,
-            empty_message="记忆检索失败，请检查服务配置或稍后重试。",
-        )
+        return agent_memory.render_error(query, scope, str(e), filters)
+    except Exception:
+        logger.exception("Memory search failed")
+        return agent_memory.render_error(query, scope, "记忆检索失败，请检查服务配置或稍后重试。", filters)
 
 
-def main():
+def main(project_root=None, codex_context=False):
     """Entry point for running the MCP server over stdio."""
+    from hippo_memory.bootstrap import CLAUDE_PROJECT_DIR
+
+    bindings = []
+    if CLAUDE_PROJECT_DIR is not None:
+        bindings.append(("claude_stdio", CLAUDE_PROJECT_DIR, False))
+    if project_root is not None:
+        bindings.append(("operator_binding", str(project_root), False))
+    mcp_server.project_bindings = tuple(bindings)
+    mcp_server.codex_context = codex_context
     logger.info("Starting Hippo MCP Server over stdio...")
     mcp_server.run(transport="stdio")
 

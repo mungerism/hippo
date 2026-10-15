@@ -10,6 +10,7 @@
 | :--- | :--- | :--- |
 | [Jev 结构化决策后端调研](/knowledge/jev-research) | Jev API、能力边界与部署 | 核对官方协议、中文局限、成本与数据条款，评估离线关系分类接入 |
 | [Codex 记忆机制深度调研](/knowledge/codex-memory-research) | Codex Local Memory | 剖析 Codex 的 Stage1/Stage2 记忆抽取与 SQLite 存储机制 |
+| [Claude Code 记忆机制调研](/knowledge/claude-code-memory-research) | 项目自动识别与分层文件记忆 | 核对仓库记忆范围、索引加载与 MCP 项目上下文传递 |
 | [会话记忆蒸馏工程调研](/knowledge/session-distill-research) | Warm Path 会话反思 | 对比前台实时提取与后台异步蒸馏的延迟、成本与质量权衡 |
 | [Mem0 内部机制与边界剖析](/knowledge/mem0-deep-dive) | Mem0 源码机制 | 深入剖析 Mem0 的 Graph/VectorStore 架构与开源版工程短板 |
 | [Cold Path 记忆合并与生命周期设计](/knowledge/cold-path-consolidation-design) | 离线记忆治理 | 详细推导基于 ANN 相似度、LLM 分类与行版本号的合并算法 |
