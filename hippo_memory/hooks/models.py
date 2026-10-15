@@ -146,6 +146,9 @@ class CapturedPayload:
     session_id: str
     project_dir: str
     project_id: Optional[str] = None
+    schema_version: int = 1
+    workspace_candidates: List[str] = field(default_factory=list)
+    routing_identity: Optional[Dict[str, Any]] = None
     transcript_path: Optional[str] = None
     boundary: Optional[str] = None
     created_at: float = 0.0
@@ -186,4 +189,7 @@ class CapturedPayload:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> CapturedPayload:
+        version = data.get("schema_version", 1)
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError("Unsupported captured payload version")
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})

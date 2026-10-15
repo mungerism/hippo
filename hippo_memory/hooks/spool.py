@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -130,14 +131,23 @@ RETRYABLE_STATES: set[str] = {
 }
 
 
+class ContextFenceError(RuntimeError):
+    """The session fence could not be persisted; stop consuming this queue."""
+
+
 class SpoolStorage:
     """Filesystem-based atomic spool queue and state store with crash-resilient staging."""
 
-    def __init__(self, base_dir: Optional[Path] = None):
+    def __init__(self, base_dir: Optional[Path] = None, *, version: int = 1):
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError("Unsupported spool version")
         if base_dir is None:
             from hippo_memory.config import DEFAULT_SPOOL_DIR
             base_dir = DEFAULT_SPOOL_DIR
-        self.base_dir = Path(base_dir).expanduser()
+        self.version = version
+        self.root_dir = Path(base_dir).expanduser()
+        self.base_dir = self.root_dir / "v2" if version == 2 else self.root_dir
+        self.contexts_dir = self.root_dir / "contexts"
         self.jobs_dir = self.base_dir / "jobs"
         self.staging_dir = self.base_dir / "staging"
         self.quarantine_dir = self.base_dir / "quarantine"
@@ -192,6 +202,8 @@ class SpoolStorage:
         try:
             with open(payload_file, "r", encoding="utf-8") as f:
                 p_data = json.load(f)
+            if p_data.get("schema_version", 1) != self.version:
+                return False
             payload = CapturedPayload.from_dict(p_data)
             if payload.job_id != path.name:
                 return False
@@ -253,6 +265,8 @@ class SpoolStorage:
         Returns:
             (is_new, job_id)
         """
+        if payload.schema_version != self.version:
+            raise ValueError("Payload cannot be published to a different queue version")
         # Quick non-authoritative tombstone pre-check
         tombstone_file = self.tombstones_dir / f"{payload.job_id}.json"
         if tombstone_file.exists():
@@ -366,6 +380,8 @@ class SpoolStorage:
         try:
             with open(p_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if data.get("schema_version", 1) != self.version:
+                raise ValueError("Queue/payload version mismatch")
             return CapturedPayload.from_dict(data)
         except Exception as e:
             logger.error(f"Failed to read payload for {job_id}: {e}")
@@ -374,10 +390,7 @@ class SpoolStorage:
     def save_payload(self, payload: CapturedPayload) -> None:
         """Persist updated payload attributes."""
         p_path = self.jobs_dir / payload.job_id / "payload.json"
-        tmp_path = self.jobs_dir / payload.job_id / "payload.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload.to_dict(), f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, p_path)
+        durable_write_json(p_path, payload.to_dict(), tmp_suffix=".identity.tmp")
 
     def load_state(self, job_id: str) -> Dict[str, Any]:
         """Read state.json for a given job."""
@@ -448,7 +461,8 @@ class SpoolStorage:
             sys.executable,
             "-c",
             f"import time, subprocess, sys; time.sleep({delay}); "
-            f"subprocess.run([sys.executable, '-m', 'hippo_memory.cli', 'hook', 'worker', '--drain'])",
+            f"subprocess.run([sys.executable, '-m', 'hippo_memory.cli', 'hook', 'worker', '--drain', "
+            f"'--queue-version', {str(self.version)!r}, '--spool-dir', {str(self.root_dir.resolve())!r}])",
         ]
         try:
             proc = subprocess.Popen(
@@ -804,12 +818,134 @@ class SpoolStorage:
                 recovered += 1
         return recovered
 
-    def coalesce_pending_jobs(self) -> int:
+    def context_ledger(self, job: CapturedPayload, router=None) -> Path:
+        from hippo_memory.config import get_default_user_id
+
+        user_id = getattr(router, "default_user_id", None)
+        if not isinstance(user_id, str):
+            user_id = get_default_user_id()
+        key = hashlib.sha256(json.dumps([job.host, user_id, job.session_id]).encode()).hexdigest()
+        self.contexts_dir.mkdir(parents=True, exist_ok=True)
+        return self.contexts_dir / f"{key}.json"
+
+    def block_session(self, job: CapturedPayload, router=None) -> None:
+        """An unresolved prefix makes later full-session snapshots unsafe as well."""
+        ledger = self.context_ledger(job, router)
+        with ledger.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            old = json.loads(ledger.read_text()) if ledger.exists() else {}
+            durable_write_json(ledger, {"blocked": True, "identity": old.get("identity")})
+
+    def prepare_identity(self, job: CapturedPayload, router=None) -> None:
+        try:
+            self._prepare_identity(job, router)
+        except Exception:
+            # Do not mark this job dead until the durable fence exists: on a
+            # storage failure, a subsequent consumer must retry the unsafe prefix.
+            try:
+                self.block_session(job, router)
+            except Exception as exc:
+                raise ContextFenceError("Cannot persist project context fence") from exc
+            raise
+
+    def _prepare_identity(self, job: CapturedPayload, router=None) -> None:
+        """Fix identity before any destructive coalescing; no memory backend calls."""
+        from hippo_memory.project_context import ProjectContextError, ProjectContextResolver
+        from hippo_memory.router import ScopeRouter, detect_git_project
+        from hippo_memory.config import get_default_user_id
+
+        if job.routing_identity is not None:
+            identity = job.routing_identity
+            required = ("namespace", "user_id", "context_key", "mode", "revision", "segment")
+            if not isinstance(identity, dict) or not all(isinstance(identity.get(k), str) and identity[k] for k in required):
+                raise ProjectContextError()
+            return
+        resolver = ProjectContextResolver()
+        workspace = None
+        if job.workspace_candidates:
+            workspace = resolver.automatic(
+                candidates=[("hook", p, False) for p in job.workspace_candidates], roots=None,
+            )
+        if job.schema_version == 1:
+            if resolver.mode == "canonical":
+                namespace = job.project_id or detect_git_project(Path(job.project_dir))[0] or "default_project"
+            else:
+                namespace = job.project_id or (router or ScopeRouter()).resolve_project(cwd=job.project_dir)
+            context_key = str(Path(job.project_dir).resolve())
+            mode, revision = "legacy", "legacy"
+            if workspace is not None:
+                # First-stage ingress remains in the legacy namespace even if
+                # the foreground has been configured for canonical routing.
+                namespace = workspace.worktree_root.name
+                context_key = str(workspace.worktree_root)
+        else:
+            if job.project_id is not None:
+                item = resolver.explicit(job.project_id)
+            else:
+                values = job.workspace_candidates or ([job.project_dir] if job.project_dir else [])
+                item = resolver.automatic(candidates=[("hook", p, False) for p in values], roots=None)
+            namespace = item.namespace
+            context_key = str(item.repository_anchor) if item.repository_anchor else "explicit:" + namespace
+            mode, revision = resolver.mode, resolver.revision
+        if not isinstance(namespace, str) or not namespace:
+            raise ProjectContextError()
+        user_id = getattr(router, "default_user_id", None)
+        identity = {"namespace": namespace, "context_key": context_key, "mode": mode,
+                    "revision": revision, "user_id": user_id if isinstance(user_id, str) else get_default_user_id(),
+                    "segment": "initial"}
+        # A persistent session fence survives completed-job pruning. Changed contexts
+        # with full-session snapshots cannot be safely attributed without segment evidence.
+        ledger = self.context_ledger(job, router)
+        with ledger.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            old = json.loads(ledger.read_text()) if ledger.exists() else None
+            signature = {k: identity[k] for k in ("namespace", "context_key", "mode")}
+            if old and (old.get("blocked") or old.get("identity") != signature):
+                durable_write_json(ledger, {"blocked": True, "identity": old.get("identity")})
+                raise ProjectContextError("PROJECT_CONTEXT_CONFLICT")
+            durable_write_json(ledger, {"identity": signature, "blocked": False})
+        job.routing_identity = identity
+        self.save_payload(job)
+
+    def fence_unresolved_processing(self, router=None) -> None:
+        # A crash between claim and identity persistence can leave an unsafe
+        # prefix under an unexpired lease. Fence it before touching later jobs.
+        for job in self.list_jobs(state=JobState.PROCESSING):
+            if job.routing_identity is None:
+                try:
+                    self.block_session(job, router)
+                except Exception as exc:
+                    raise ContextFenceError("Cannot persist unresolved processing fence") from exc
+
+    def prepare_pending_identities(self, router=None) -> None:
+        self.fence_unresolved_processing(router)
+        for job in sorted(self.list_jobs(state=JobState.PENDING), key=lambda p: p.created_at):
+            try:
+                skip, reason = should_skip_session(
+                    turns=job.turns, last_user_goal=job.last_user_goal,
+                    last_assistant_final=job.last_assistant_final, touched_files=job.touched_files,
+                )
+                if job.turns and skip:
+                    self.skip_job(job.job_id, f"Delta skip: {reason}")
+                    continue
+                self.prepare_identity(job, router)
+            except Exception:
+                self.block_session(job, router)
+                self.fail_job(job.job_id, "Project context unresolved; repair context or use a new session", retryable=False)
+
+    def coalesce_pending_jobs(self, router=None) -> int:
         """Coalesce consecutive pending jobs belonging to the same session under superset invariant."""
+        self.prepare_pending_identities(router)
         pending_jobs = self.list_jobs(state=JobState.PENDING)
-        by_session: Dict[str, List[CapturedPayload]] = {}
+        by_session: Dict[tuple, List[CapturedPayload]] = {}
         for j in pending_jobs:
-            by_session.setdefault(j.session_id, []).append(j)
+            identity = j.routing_identity
+            if identity is None:
+                continue
+            group = (j.schema_version, j.host, j.session_id, *(identity[k] for k in (
+                "user_id", "namespace", "context_key", "mode", "revision", "segment",
+            )))
+            by_session.setdefault(group, []).append(j)
 
         coalesced_count = 0
         for session_id, jobs in by_session.items():
@@ -912,6 +1048,7 @@ class SpoolWorker:
 
     def process_one_job(self, payload: CapturedPayload) -> bool:
         """Execute distillation for a single claimed job. Returns True if handled."""
+        self.storage.fence_unresolved_processing(self.engine.router)
         pid = os.getpid()
         if not self.storage.claim_job(payload.job_id, worker_pid=pid):
             return False
@@ -925,7 +1062,16 @@ class SpoolWorker:
                 self.storage.skip_job(extracted.job_id, "No extractable conversation turns found")
                 return True
 
-            project_id = extracted.project_id or self.engine.router.resolve_project(cwd=extracted.project_dir)
+            skip, reason = should_skip_session(
+                turns=extracted.turns, last_user_goal=extracted.last_user_goal,
+                last_assistant_final=extracted.last_assistant_final, touched_files=extracted.touched_files,
+            )
+            if skip:
+                self.storage.skip_job(extracted.job_id, reason)
+                return True
+            self.storage.prepare_identity(extracted, self.engine.router)
+
+            project_id = extracted.routing_identity["namespace"]
             cursor = calculate_semantic_cursor(
                 project_id=project_id,
                 session_id=extracted.session_id,
@@ -983,6 +1129,7 @@ class SpoolWorker:
                 prompt=SESSION_DISTILLATION_PROMPT_V1,
                 project_id=project_id,
                 scope="project",
+                user_id=extracted.routing_identity["user_id"],
                 infer=True,
                 metadata=distill_metadata,
             )
@@ -992,6 +1139,8 @@ class SpoolWorker:
             logger.info(f"Successfully distilled job {extracted.job_id} (cursor: {cursor[:12]})")
             return True
 
+        except ContextFenceError:
+            raise
         except ContextConflictError as e:
             err_msg = str(e)
             logger.warning(
@@ -1019,7 +1168,7 @@ class SpoolWorker:
         try:
             while True:
                 self.storage.recover_expired_leases()
-                self.storage.coalesce_pending_jobs()
+                self.storage.coalesce_pending_jobs(self.engine.router)
 
                 now = time.time()
                 pending_jobs = self.storage.list_jobs(state=JobState.PENDING)
@@ -1083,7 +1232,7 @@ class SpoolWorker:
             self.storage.recover_spool_publication()
             while not stop_requested:
                 self.storage.recover_expired_leases()
-                self.storage.coalesce_pending_jobs()
+                self.storage.coalesce_pending_jobs(self.engine.router)
 
                 now = time.time()
                 pending = self.storage.list_jobs(state=JobState.PENDING)

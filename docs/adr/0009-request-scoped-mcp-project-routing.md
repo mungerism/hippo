@@ -15,3 +15,9 @@ MCP 的自动 roots 和显式路径检测均以过滤掉全部 `GIT_*` 变量的
 拒绝沿用服务工作目录、默认取第一个 root 或缓存最近使用项目：这些方式兼容旧客户端，但会在跨仓库部署或共享服务时静默选错身份。代价是没有可靠 roots 的客户端须传入 `project_id`，因此给 `add_memory` 增加这一安全选择器；身份和预算相关的底层参数仍不向写入工具开放。CLI、SDK 和 Hook 的缺省本地目录路由保持原有契约。共享 `ScopeRouter` 将显式项目名作为命名空间，只有含路径分隔符、绝对路径或 `.` / `..` 的选择器参与目录检测，避免已解析名称因服务目录下存在同名子目录而被再次路由。项目命名空间继续沿用现有仓库名约定，不迁移历史记忆，也不在本次修复引入新的命名空间格式。
 
 实现依赖 MCP SDK 的请求级 Context 和 roots 能力；不提供该能力的协议/传输通过显式项目选择器使用服务。参考 [MCP roots 规范](https://modelcontextprotocol.io/specification/2025-06-18/client/roots)。客户端 roots 表示其声明的工作区，不是用户鉴权凭据，也无法推断多个工作区中当前聊天选中了哪个。
+
+## 2026-10-15：自动宿主上下文的受控扩展
+
+[RFC-0003](/rfcs/0003-automatic-project-context) 的实现扩展了上述来源限制：允许明确启用的 Codex 请求 metadata、本地专属 stdio 启动时捕获的 `CLAUDE_PROJECT_DIR`，以及运维者传入的 `serve --project-root`。Claude 环境在 dotenv 载入前固定；普通仓库环境变量、服务 cwd 与最近项目不作为 MCP 来源。存在多个 roots 时，可信候选必须属于其中一个仓库；没有候选则 roots 必须唯一，各来源冲突时失败。
+
+Pi 工具通过回调 `ctx.cwd` 调用共用安全桥；Hook 保留完整候选，缺失或歧义时不能取进程 cwd 或首个工作区。新增 opt-in canonical 模式，以本地 Git common directory 为身份、显式映射保留历史空间、未绑定仓库使用完整哈希。默认保持 legacy；启用前须执行队列切换与历史绑定屏障，详见[运维手册](/runbooks/project-context)。这些规则取代本文原先对来源和命名空间的绝对限制，不改变请求隔离、scope、预算和 Mem0 存储契约。

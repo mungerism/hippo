@@ -1,4 +1,5 @@
 import math
+from hippo_memory import bootstrap as _bootstrap  # capture host context before dotenv
 import os
 import re
 from dataclasses import dataclass

@@ -15,6 +15,23 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 
 ---
 
+## 自动项目上下文（实现候选）
+
+[RFC-0003](/rfcs/0003-automatic-project-context) 将 Codex、Claude Code、Antigravity、Pi 列为同一发布的兼容与验收范围。下表接线已实现，默认保持 legacy 命名空间，四宿主真实聊天验收仍待完成。部署以[自动项目路由运维](/runbooks/project-context)和 [ADR-0009](/adr/0009-request-scoped-mcp-project-routing) 为准。
+
+| 宿主 | 项目来源 | 需验证的条件 |
+| --- | --- | --- |
+| Codex | 请求级 sandbox cwd / roots | capability 协商、路径与多环境语义 |
+| Claude Code | stdio 的 `CLAUDE_PROJECT_DIR` / roots | 原始环境捕获与连接生命周期 |
+| Antigravity | roots / 工作区专属部署绑定 | 实际 roots 能力、多窗口与多目录消歧；Hook 不取首个目录 |
+| Pi | 工具与事件回调的 `ctx.cwd` | 逐调用传目录，安全桥接共用记忆逻辑，不依赖进程 cwd |
+
+四宿主共用项目映射、scope 语义与检索门禁；缺少可靠上下文时保留显式项目选择。Antigravity 的多文件夹 Project 不自动合并成一个 Hippo 项目命名空间。
+
+候选项目既可来自请求活动目录，也可来自专属启动绑定；有候选时允许多个 roots，只做成员校验。后台需在合并作业前固定身份并验证捕获段范围，新作业使用独立版本队列；升级先切消费者，回滚禁止旧 Worker 重新解释新格式。详细契约与验收见 RFC 第 4.2、6.1、6.2 节。
+
+---
+
 ## 🪝 极速入队契约 (`hippo hook capture`)
 
 为了保证用户在任何宿主中工作时完全无卡顿，宿主 Hook 脚本必须满足以下非功能性指标：

@@ -49,6 +49,11 @@ function extractConversation(messages: any[]): Array<{ role: "user" | "assistant
 
 export default function (pi: ExtensionAPI) {
   const hippoBin = resolveHippoBin();
+  // Deployment switch: enable only after upgrading/draining the v1 consumer.
+  const queueVersion = process.env.HIPPO_QUEUE_VERSION || "1";
+  if (queueVersion !== "1" && queueVersion !== "2") {
+    throw new Error("HIPPO_QUEUE_VERSION must be 1 or 2");
+  }
 
   // 1. Semantic and hybrid memory search tool (Mem0 standard: search_memories)
   pi.registerTool({
@@ -70,21 +75,26 @@ export default function (pi: ExtensionAPI) {
         Type.String({ description: "可选指定项目名，默认自动根据当前 Git 仓库探测" })
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       try {
-        const args = ["search", params.query];
+        const args = ["agent", "search", params.query];
         if (params.scope) args.push("--scope", params.scope);
         if (params.project) args.push("--project", params.project);
 
-        const { stdout } = await execFileAsync(hippoBin, args);
+        if (params.scope !== "global" && !params.project && !ctx?.cwd) {
+          throw new Error("Hippo 缺少当前 Pi 会话目录，请重新载入扩展或显式选择项目。");
+        }
+        if (ctx?.cwd) args.push("--context-dir", ctx.cwd);
+        const { stdout } = await execFileAsync(hippoBin, args, { cwd: ctx?.cwd });
         return {
           content: [{ type: "text", text: stdout.trim() || "未找到相关记忆。" }],
           details: {},
         };
       } catch (err: any) {
         return {
-          content: [{ type: "text", text: `检索记忆失败: ${err.message}` }],
-          details: { error: String(err) },
+          content: [{ type: "text", text: err.stdout?.trim() || "检索记忆失败，请检查宿主上下文与 Hippo 配置。" }],
+          details: { error: "Hippo operation failed" },
+          isError: true,
         };
       }
     },
@@ -112,7 +122,7 @@ export default function (pi: ExtensionAPI) {
         Type.String({ description: "可选指定项目名，默认自动关联当前 Git 仓库" })
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       try {
         const text = params.text?.trim() || "";
         if (!text) {
@@ -133,22 +143,27 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
-        const args = ["add", text];
+        const args = ["agent", "add", text];
         if (params.scope === "global") {
-          args.push("--global");
+          args.push("--scope", "global");
         } else if (params.project) {
           args.push("--project", params.project);
         }
 
-        const { stdout } = await execFileAsync(hippoBin, args);
+        if (params.scope !== "global" && !params.project && !ctx?.cwd) {
+          throw new Error("Hippo 缺少当前 Pi 会话目录，请重新载入扩展或显式选择项目。");
+        }
+        if (ctx?.cwd) args.push("--context-dir", ctx.cwd);
+        const { stdout } = await execFileAsync(hippoBin, args, { cwd: ctx?.cwd });
         return {
           content: [{ type: "text", text: stdout.trim() }],
           details: {},
         };
       } catch (err: any) {
         return {
-          content: [{ type: "text", text: `保存记忆失败: ${err.message}` }],
-          details: { error: String(err) },
+          content: [{ type: "text", text: err.stdout?.trim() || "保存记忆失败，请检查宿主上下文与 Hippo 配置。" }],
+          details: { error: "Hippo operation failed" },
+          isError: true,
         };
       }
     },
@@ -160,7 +175,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       try {
         const cmdArgs = args ? args.split(" ") : ["status"];
-        const { stdout } = await execFileAsync(hippoBin, cmdArgs);
+        const { stdout } = await execFileAsync(hippoBin, cmdArgs, { cwd: ctx.cwd });
         ctx.ui.notify(stdout.trim(), "info");
       } catch (err: any) {
         ctx.ui.notify(`Hippo 执行失败: ${err.message}`, "error");
@@ -234,7 +249,8 @@ function extractTouchedFiles(messages: any[]): string[] {
       const payload = JSON.stringify({
         session_id: sessionId,
         event: eventName,
-        project_dir: ctx?.cwd || process.cwd(),
+        project_dir: ctx?.cwd || "",
+        context_source: "pi_context",
         transcript_path: transcriptPath,
         turns: extractedTurns.slice(-100),
         total_turns: extractedTurns.length,
@@ -242,7 +258,7 @@ function extractTouchedFiles(messages: any[]): string[] {
         touched_files: touchedFiles,
       });
 
-      const child = spawn(hippoBin, ["hook", "capture", "--host", "pi"], {
+      const child = spawn(hippoBin, ["hook", "capture", "--host", "pi", "--queue-version", queueVersion], {
         detached: true,
         stdio: ["pipe", "ignore", "ignore"],
       });

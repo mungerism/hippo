@@ -45,6 +45,7 @@ def detect_git_project(
             stderr=subprocess.DEVNULL,
             text=True,
             env=git_env,
+            timeout=0.5,
         ).strip()
         if git_root:
             p = Path(git_root)
@@ -75,6 +76,13 @@ class ScopeRouter:
         cwd: Optional[str | Path] = None,
     ) -> str:
         """Resolve current project ID from explicit arg, given directory, or Git environment."""
+        from hippo_memory.project_context import ProjectContextResolver
+
+        resolver = ProjectContextResolver()
+        if resolver.mode == "canonical":
+            if project_id is not None:
+                return resolver.explicit(project_id).namespace
+            return resolver.path_project(str(cwd or Path.cwd()), "local").namespace
         if project_id and project_id.strip():
             # Namespace names must not be reinterpreted as server-relative
             # directories. Only syntactic path selectors opt into Git detection.
@@ -107,7 +115,7 @@ class ScopeRouter:
             - 'project': Project-specific knowledge, ADRs, gotchas.
         """
         uid = user_id or self.default_user_id
-        resolved_proj = self.resolve_project(project_id)
+        resolved_proj = None if scope == "global" else self.resolve_project(project_id)
 
         meta = extra_metadata.copy() if extra_metadata else {}
 
@@ -141,7 +149,7 @@ class ScopeRouter:
             - 'all': Both global and project knowledge.
         """
         uid = user_id or self.default_user_id
-        resolved_proj = self.resolve_project(project_id)
+        resolved_proj = None if scope == "global" else self.resolve_project(project_id)
 
         if scope == "global":
             return {

@@ -657,7 +657,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
         )
         with (
             patch.object(server_module, "get_engine", return_value=fake_engine),
-            patch.object(server_module, "parse_temporal_query", return_value=window),
+            patch.object(server_module.agent_memory, "parse_temporal_query", return_value=window),
         ):
             result = asyncio.run(server_module.search_memories(
                 query="过去 48 小时新增了什么", scope="all", user_id="u1", project_id="hippo"))
@@ -687,7 +687,7 @@ class TestMcpTemporalRouting(unittest.TestCase):
         )
         with (
             patch.object(server_module, "get_engine", return_value=fake_engine),
-            patch.object(server_module, "parse_temporal_query", return_value=window),
+            patch.object(server_module.agent_memory, "parse_temporal_query", return_value=window),
         ):
             result = asyncio.run(server_module.search_memories(query="昨天呢", project_id="hippo"))
         self.assertEqual(recorded["since"], window.since)
