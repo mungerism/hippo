@@ -1,9 +1,15 @@
 # [RFC-0003] 宿主自动项目上下文与稳定记忆命名空间
 
 - **作者**：Codex
-- **状态**：实现候选；设计已复审，代码与隔离测试已落地，真实宿主验收及生产启用待完成
+- **状态**：已实现；2026-10-15 完成本机四宿主召回验收并启用 canonical / v2，验收范围与剩余限制见[发布记录](/runbooks/project-context-acceptance)
 - **创建日期**：2026-10-15
 - **关联**：[Issue #93](https://github.com/mungerism/hippo/issues/93)、[ADR-0009](/adr/0009-request-scoped-mcp-project-routing)
+
+## 发布结果（2026-10-15）
+
+[PR #95](https://github.com/mungerism/hippo/pull/95) 实现本方案，[PR #98](https://github.com/mungerism/hippo/pull/98) 补齐 Antigravity stateless 协议兼容。本机部署提交为 `3bb67f3`，已启用 canonical、12 个历史命名空间绑定及 v2 Worker / Hook。软件默认仍为 legacy / v1，Codex metadata 仍需显式启用。
+
+Codex、Claude Code、Pi、Antigravity 工作区专属插件均已完成真实调用省略项目选择器的召回验收；scope 与时间线隔离通过。本记录不代表所有宿主版本、多窗口组合及性能目标均已实测；后续章节保留设计与完整验收目标，具体证据和未覆盖范围以[发布记录](/runbooks/project-context-acceptance)为准。
 
 ## 1. 背景与目标
 

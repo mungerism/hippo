@@ -11,7 +11,7 @@
 | [RFC-0001](/rfcs/0001-jev-cold-path-classifier) | Jev 作为可选的 Cold Path 关系分类后端 | 草稿 | Codex | 先隔离评测和旁路观测，达标后限定接管 |
 | [RFC 模板](/rfcs/template) | RFC 标准设计提案模板 | 模板 | Architecture | 规范中大型需求提案格式与评审要素 |
 | [RFC-0002](/rfcs/0002-jev-adoption-gates) | Jev Cold Path 分阶段接入与接管门禁 | 草稿 | Codex | 隔离评测、旁路和限定接管的安全条件 |
-| [RFC-0003](/rfcs/0003-automatic-project-context) | 宿主自动项目上下文与稳定记忆命名空间 | 草稿 | Codex | Codex / Claude Code / Antigravity / Pi 自动路由、冲突处理与历史命名空间兼容 |
+| [RFC-0003](/rfcs/0003-automatic-project-context) | 宿主自动项目上下文与稳定记忆命名空间 | 已实现，本机已部署验收 | Codex | Codex / Claude Code / Antigravity / Pi 自动路由、冲突处理与历史命名空间兼容 |
 
 ---
 

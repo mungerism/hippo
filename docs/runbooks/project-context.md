@@ -1,6 +1,6 @@
 # 自动项目路由与版本切换
 
-本功能为实现候选，尚未在本次开发中部署。默认 legacy 命名空间、v1 队列；Codex metadata 默认关闭。真实四宿主验收通过后才启用对应功能，验收项见 [RFC-0003](/rfcs/0003-automatic-project-context)。
+本功能已实现，2026-10-15 本机部署已开启 canonical / v2，并完成四宿主真实召回验收，详见[发布记录](/runbooks/project-context-acceptance)。软件默认仍为 legacy 命名空间、v1 队列，Codex metadata 默认关闭；新部署须完成下述切换屏障与适用宿主验收后启用。完整验收目标见 [RFC-0003](/rfcs/0003-automatic-project-context)。
 
 ## 宿主接线
 
@@ -56,7 +56,7 @@ v2 发布前会检查 legacy Worker 是否持锁，但它不能替代进程版�
 
 ## 开发验证记录
 
-本次隔离测试运行 718 项，717 项通过、1 项因未启用真实 Qdrant 集成而跳过；Ruff CI 规则、compileall、Python wheel/sdist 与文档构建通过。MCP 使用真实 SDK 内存传输验证初始化协商与请求 metadata，不连接生产记忆后端。
+PR #95 隔离测试运行 718 项，717 项通过、1 项因未启用真实 Qdrant 集成而跳过；PR #98 增加 stateless 回归后为 719 项，718 项通过、1 项跳过。相关 CI 的真实 Qdrant 集成、代码检查、包构建与文档构建通过。MCP 隔离测试使用真实 SDK 内存传输验证初始化协商与请求 metadata，不连接生产记忆后端。
 
 Pi 扩展契约脚本可用已安装的 Pi 包目录复跑，不安装新的依赖：
 
@@ -64,7 +64,15 @@ Pi 扩展契约脚本可用已安装的 Pi 包目录复跑，不安装新的依�
 node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding-agent
 ```
 
-已在 Pi 0.83.0 的加载器下验证搜索/写入的 ctx.cwd、缺上下文拒绝、global、两个捕获事件以及 v1/v2 版本参数。真实 Codex/Claude Code/Antigravity/Pi 聊天、窗口隔离和 Hook 时延仍须在发布环境验收。
+已在 Pi 0.83.0 的加载器下验证搜索/写入的 ctx.cwd、缺上下文拒绝、global、两个捕获事件以及 v1/v2 版本参数。本机四宿主真实召回结果见[发布记录](/runbooks/project-context-acceptance)；完整多窗口组合与 Hook 时延仍需补充实测。
+
+## 日常核查与上下文失败
+
+使用 `hippo project inspect /abs/repo` 检查 mode 与 namespace，使用 `hippo hook status --queue-version 2` 区分积压和已隔离失败。`dead` 增长需逐条核对，不能仅因 pending 为零判定捕获完整。
+
+自动项目解析目前只支持本机 Git 目录。非 Git 会话被标为上下文未解析时，检查宿主目录及会话隔离记录；明确项目归属后用新会话重新捕获。确需支持非 Git 项目时，可由调用方明确选择命名空间，但这不会自动修复历史 Hook 作业。个人通用偏好可显式使用 global。
+
+保留未解析作业及会话隔离记录供审计；补目录、切绑定后，不直接批量 retry 或移除 contexts 隔离记录，避免旧完整会话历史写入错误项目。
 
 ## Antigravity stateless 协议
 
