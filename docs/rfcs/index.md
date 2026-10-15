@@ -12,6 +12,7 @@
 | [RFC 模板](/rfcs/template) | RFC 标准设计提案模板 | 模板 | Architecture | 规范中大型需求提案格式与评审要素 |
 | [RFC-0002](/rfcs/0002-jev-adoption-gates) | Jev Cold Path 分阶段接入与接管门禁 | 草稿 | Codex | 隔离评测、旁路和限定接管的安全条件 |
 | [RFC-0003](/rfcs/0003-automatic-project-context) | 宿主自动项目上下文与稳定记忆命名空间 | 已实现，本机已部署验收 | Codex | Codex / Claude Code / Antigravity / Pi 自动路由、冲突处理与历史命名空间兼容 |
+| [RFC-0004](/rfcs/0004-non-git-workspace-context) | 非 Git 工作目录的显式绑定与自动路由 | 草稿 | Codex | 稳定目录身份、四宿主共用解析、配置升级与历史作业隔离 |
 
 ---
 

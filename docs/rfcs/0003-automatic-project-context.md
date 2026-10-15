@@ -1,7 +1,7 @@
 # [RFC-0003] 宿主自动项目上下文与稳定记忆命名空间
 
 - **作者**：Codex
-- **状态**：已实现；2026-10-15 完成本机四宿主召回验收并启用 canonical / v2，验收范围与剩余限制见[发布记录](/runbooks/project-context-acceptance)
+- **状态**：核心已实现，本机启用 canonical / v2；2026-10-16 扩展验收部分通过，Antigravity 多项目自动绑定与 Hook 时延未通过，见[扩展记录](/runbooks/project-context-extended-acceptance)
 - **创建日期**：2026-10-15
 - **关联**：[Issue #93](https://github.com/mungerism/hippo/issues/93)、[ADR-0009](/adr/0009-request-scoped-mcp-project-routing)
 
@@ -9,7 +9,7 @@
 
 [PR #95](https://github.com/mungerism/hippo/pull/95) 实现本方案，[PR #98](https://github.com/mungerism/hippo/pull/98) 补齐 Antigravity stateless 协议兼容。本机部署提交为 `3bb67f3`，已启用 canonical、12 个历史命名空间绑定及 v2 Worker / Hook。软件默认仍为 legacy / v1，Codex metadata 仍需显式启用。
 
-Codex、Claude Code、Pi、Antigravity 工作区专属插件均已完成真实调用省略项目选择器的召回验收；scope 与时间线隔离通过。本记录不代表所有宿主版本、多窗口组合及性能目标均已实测；后续章节保留设计与完整验收目标，具体证据和未覆盖范围以[发布记录](/runbooks/project-context-acceptance)为准。
+首次单项目验收中，Codex、Claude Code、Pi、Antigravity 工作区插件均曾省略项目选择器完成召回。后续双项目验收确认前三者实际调用通过，但 Antigravity 同名连接跨 Project 复用，隔离失败，本机已撤下固定绑定并改为显式选择。本记录不代表所有宿主版本、多窗口组合及性能目标均已实测；后续章节保留设计与完整验收目标，具体证据和未覆盖范围以[发布记录](/runbooks/project-context-acceptance)为准。
 
 ## 1. 背景与目标
 
@@ -143,6 +143,8 @@ roots 的匹配按规范化仓库身份完成，不用显示名称、路径字�
 ### 4.6 Antigravity：roots 与工作区专属连接
 
 Antigravity 的 app/CLI/IDE 要分别探测初始化能力和连接生命周期。官方文档确认 MCP 全局及工作区配置、stdio 参数/env/cwd，但未承诺当前版本向 server 提供 roots 或活动项目 metadata；不能仅凭“支持 MCP”认定可以自动定位。Antigravity Project 还允许包含多个仓库，不直接等于 Hippo 的 Git 项目身份。[MCP 官方说明](https://antigravity.google/docs/mcp)、[Projects 官方说明](https://antigravity.google/docs/projects/)
+
+**当前发布限制（2026-10-16）**：本机 2.23.1 未通过上述连接归属条件，暂不启用工作区自动绑定；不同服务名也未被实际发现。保留显式项目选择，修复跟踪 [Issue #101](https://github.com/mungerism/hippo/issues/101)。以下为通过宿主验收后才可使用的接入设计。
 
 接入顺序：支持 roots 的连接使用通用规则；不支持时，在受支持的工作区 MCP 配置中生成该工作区专属的 `hippo serve --project-root /abs/repo`。绑定路径由本地安装器/部署者写入，模型仍无需填 ID。只设置 MCP `cwd` 不等于声明项目绑定，仍不从服务 cwd 推导身份。
 

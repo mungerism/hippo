@@ -1,6 +1,6 @@
 # 自动项目路由与版本切换
 
-本功能已实现，2026-10-15 本机部署已开启 canonical / v2，并完成四宿主真实召回验收，详见[发布记录](/runbooks/project-context-acceptance)。软件默认仍为 legacy 命名空间、v1 队列，Codex metadata 默认关闭；新部署须完成下述切换屏障与适用宿主验收后启用。完整验收目标见 [RFC-0003](/rfcs/0003-automatic-project-context)。
+本功能已实现，2026-10-15 本机部署已开启 canonical / v2，并完成四宿主真实召回验收，详见[发布记录](/runbooks/project-context-acceptance)。软件默认仍为 legacy 命名空间、v1 队列，Codex metadata 默认关闭；新部署须完成下述切换屏障与适用宿主验收后启用。2026-10-16 [扩展验收](/runbooks/project-context-extended-acceptance)发现 Antigravity 跨 Project 连接隔离失败及 Hook 全程超时，本机 Antigravity 已撤下固定绑定。完整验收目标见 [RFC-0003](/rfcs/0003-automatic-project-context)。
 
 ## 宿主接线
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | Codex | stdio command `hippo`，args `serve --codex-context` 才协商实验 metadata；关闭时使用标准 roots 或显式项目选择 |
 | Claude Code | stdio command `hippo`，args `serve`；在载入 dotenv 之前捕获宿主 `CLAUDE_PROJECT_DIR`。确认连接专属于项目且原始环境正确 |
-| Antigravity | 标准 roots；没有活动目录契约时，通过每个工作区的专属插件配置 `hippo serve --project-root /abs/repo`，不得复用不同项目的连接 |
+| Antigravity | 经验证的标准 roots；本机 2.23.1 工作区绑定未通过隔离验收，使用 `hippo serve` 并显式传 `project_id`，暂不部署固定 root |
 | Pi | 安装本仓库原生扩展，工具按每次回调 `ctx.cwd` 进入 `hippo agent search/add`；部署环境 `HIPPO_QUEUE_VERSION=2` 可使事件捕获发布 v2，默认 1 |
 
 CLI 的 `hippo agent search QUERY --context-dir /abs/repo` 和 `hippo agent add TEXT --context-dir /abs/repo` 是宿主桥，不开放检索预算。缺少目录且未显式选择项目时，项目调用失败；`--scope global` 无需目录。MCP 仍只暴露原有工具。
@@ -64,7 +64,7 @@ Pi 扩展契约脚本可用已安装的 Pi 包目录复跑，不安装新的依�
 node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding-agent
 ```
 
-已在 Pi 0.83.0 的加载器下验证搜索/写入的 ctx.cwd、缺上下文拒绝、global、两个捕获事件以及 v1/v2 版本参数。本机四宿主真实召回结果见[发布记录](/runbooks/project-context-acceptance)；完整多窗口组合与 Hook 时延仍需补充实测。
+已在 Pi 0.83.0 的加载器下验证搜索/写入的 ctx.cwd、缺上下文拒绝、global、两个捕获事件以及 v1/v2 版本参数。首次单项目召回见[发布记录](/runbooks/project-context-acceptance)，双项目并发及 Hook 时延的新结果见[扩展验收](/runbooks/project-context-extended-acceptance)。
 
 ## 日常核查与上下文失败
 
@@ -78,4 +78,4 @@ node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding
 
 本机真实验收确认：Antigravity 的 `2026-07-28` 请求仍声明 roots 能力，但 SDK 会抛出 `NoBackChannelError`，无法发起 `roots/list`。Hippo 仅将这个明确的无回传通道状态视为 roots 不可用，继续验证独立的 stdio 绑定或活动目录；没有可靠独立来源时仍拒绝操作。普通 roots 异常、超时、空列表或冲突不会因此被忽略。
 
-本机版本没有载入顶层 `.agents/mcp_config.json`。应在工作区 `.agents/plugins/hippo-project-context/` 中放置 `plugin.json` 和 `mcp_config.json`，由插件提供专属 stdio 命令及绝对 `--project-root`。全局连接不绑定为某个固定仓库；没有 roots 时须使用专属插件或显式项目选择。
+本机版本没有载入顶层 `.agents/mcp_config.json`。首次验收通过工作区插件加载固定 root，但 2026-10-16 的双 Project 验收发现同名连接复用，改用不同服务名又未发现工具，详见 [Issue #101](https://github.com/mungerism/hippo/issues/101)。当前使用无固定 root 的 `hippo serve`，项目调用显式传 `project_id`。其他版本只有在实际 A/B 交替、并发与重连均证实连接独占后，才可启用工作区 `--project-root`；不要因插件配置存在就认定专属连接成立。

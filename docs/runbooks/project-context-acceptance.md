@@ -2,6 +2,8 @@
 
 本记录描述 2026-10-15 本机部署与实际验收，其他机器应按[切换手册](/runbooks/project-context)独立验证。软件默认开关与本机已启用配置分开记录。
 
+> **2026-10-16 更新**：[双项目扩展验收](/runbooks/project-context-extended-acceptance)发现 Antigravity 同名 MCP 连接跨 Project 复用，双项目隔离失败；本机已获授权移除固定项目绑定，改用显式选择。本文 Antigravity 通过项仅是历史单项目证据，不能作为多项目部署依据。Hook 50ms 目标实测也未通过。
+
 ## 部署与回滚依据
 
 - 合并 [PR #95](https://github.com/mungerism/hippo/pull/95) 和 [PR #98](https://github.com/mungerism/hippo/pull/98)，部署提交 `3bb67f31fe4ba87306fd7cbefb14d4da91122667`，已核对安装包与源代码一致。
@@ -24,7 +26,7 @@
 
 本次证据支持本机已测试配置下的真实召回及作用域隔离，不等同于逐宿主全部工具、所有版本、多窗口/多目录组合或性能指标均已实测。Hook 的 50ms 目标、解析 p95、长时间稳定性及未覆盖宿主组合仍需独立测量。
 
-Antigravity 仅对明确的 SDK `NoBackChannelError` 使用独立合法绑定继续解析。工作区插件提供专属 MCP 配置，全局连接不固定绑定某个仓库。普通 roots 错误、超时或冲突不降级；其他工作区需各自配置和验收。
+Antigravity 仅对明确的 SDK `NoBackChannelError` 使用独立合法绑定继续解析。首次验收使用工作区插件配置，但后续扩展验收发现不能保证连接独占，当前本机已移除固定绑定。普通 roots 错误、超时或冲突不降级；缺少可靠上下文时显式选择项目。
 
 ## 发布后只读巡检（2026-10-15）
 
@@ -53,6 +55,6 @@ Antigravity 仅对明确的 SDK `NoBackChannelError` 使用独立合法绑定继
 uv run python -m unittest tests.test_consolidator.TestPreferenceChangeEndToEnd -v
 ```
 
-测试用脚本化分类响应驱动真实 discovery、仲裁、apply、journal 和召回过滤，不连接生产后端，也不评估在线 LLM 对中文冲突的识别质量。生产旧记忆仍待单独预览与审查；本次未执行生产 consolidation，也未启用自动治理。
+测试用脚本化分类响应驱动真实 discovery、仲裁、apply、journal 和召回过滤，不连接生产后端，也不评估在线 LLM 对中文冲突的识别质量。首次验收时生产旧记忆仍待单独预览与审查；当时未执行生产 consolidation，也未启用自动治理。后续 2026-10-15 已完成独立的定向治理：11 条旧语言偏好软废弃，总记录数 667 保持不变，未硬删除；备份与核验报告在本机 `~/.hippo/backups/policy-language-20261015T153833Z/verification-report.json`。此后续操作不代表开启自动治理。
 
 本次新增 3 项回归通过；连同 consolidation、生命周期过滤、项目解析和项目队列的相关测试共 71 项通过。文档构建及 CI 所用 Ruff 错误规则检查通过。
