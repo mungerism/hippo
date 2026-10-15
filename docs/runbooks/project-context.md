@@ -10,7 +10,7 @@
 | --- | --- |
 | Codex | stdio command `hippo`，args `serve --codex-context` 才协商实验 metadata；关闭时使用标准 roots 或显式项目选择 |
 | Claude Code | stdio command `hippo`，args `serve`；在载入 dotenv 之前捕获宿主 `CLAUDE_PROJECT_DIR`。确认连接专属于项目且原始环境正确 |
-| Antigravity | 标准 roots；没有活动目录契约时，每个工作区配置专属 `hippo serve --project-root /abs/repo`，不得复用不同项目的连接 |
+| Antigravity | 标准 roots；没有活动目录契约时，通过每个工作区的专属插件配置 `hippo serve --project-root /abs/repo`，不得复用不同项目的连接 |
 | Pi | 安装本仓库原生扩展，工具按每次回调 `ctx.cwd` 进入 `hippo agent search/add`；部署环境 `HIPPO_QUEUE_VERSION=2` 可使事件捕获发布 v2，默认 1 |
 
 CLI 的 `hippo agent search QUERY --context-dir /abs/repo` 和 `hippo agent add TEXT --context-dir /abs/repo` 是宿主桥，不开放检索预算。缺少目录且未显式选择项目时，项目调用失败；`--scope global` 无需目录。MCP 仍只暴露原有工具。
@@ -65,3 +65,9 @@ node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding
 ```
 
 已在 Pi 0.83.0 的加载器下验证搜索/写入的 ctx.cwd、缺上下文拒绝、global、两个捕获事件以及 v1/v2 版本参数。真实 Codex/Claude Code/Antigravity/Pi 聊天、窗口隔离和 Hook 时延仍须在发布环境验收。
+
+## Antigravity stateless 协议
+
+本机真实验收确认：Antigravity 的 `2026-07-28` 请求仍声明 roots 能力，但 SDK 会抛出 `NoBackChannelError`，无法发起 `roots/list`。Hippo 仅将这个明确的无回传通道状态视为 roots 不可用，继续验证独立的 stdio 绑定或活动目录；没有可靠独立来源时仍拒绝操作。普通 roots 异常、超时、空列表或冲突不会因此被忽略。
+
+本机版本没有载入顶层 `.agents/mcp_config.json`。应在工作区 `.agents/plugins/hippo-project-context/` 中放置 `plugin.json` 和 `mcp_config.json`，由插件提供专属 stdio 命令及绝对 `--project-root`。全局连接不绑定为某个固定仓库；没有 roots 时须使用专属插件或显式项目选择。

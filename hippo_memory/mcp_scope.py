@@ -5,6 +5,7 @@ from typing import Optional
 
 import anyio
 from mcp.server.mcpserver import Context
+from mcp.shared.exceptions import NoBackChannelError
 
 from hippo_memory.project_context import ProjectContextError, ProjectContextResolver
 
@@ -40,8 +41,15 @@ async def resolve_mcp_scope(
                 candidates.insert(0, ("codex_meta", state["sandboxCwd"], True))
             capabilities = ctx.session.client_capabilities
             if capabilities is not None and capabilities.roots is not None:
-                result = await asyncio.wait_for(ctx.session.list_roots(), timeout=2.0)
-                roots = [str(root.uri) for root in result.roots]
+                try:
+                    result = await asyncio.wait_for(ctx.session.list_roots(), timeout=2.0)
+                except NoBackChannelError:
+                    # Stateless connections cannot provide roots even if their
+                    # request metadata advertises the deprecated capability.
+                    # The resolver still requires a validated independent source.
+                    roots = None
+                else:
+                    roots = [str(root.uri) for root in result.roots]
         def select():
             return resolver.automatic(candidates=candidates, roots=roots)
         item = await anyio.to_thread.run_sync(select, abandon_on_cancel=True)
