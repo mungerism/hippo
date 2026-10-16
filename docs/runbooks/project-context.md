@@ -10,7 +10,7 @@
 | --- | --- |
 | Codex | stdio command `hippo`，args `serve --codex-context` 才协商实验 metadata；关闭时使用标准 roots 或显式项目选择 |
 | Claude Code | stdio command `hippo`，args `serve`；在载入 dotenv 之前捕获宿主 `CLAUDE_PROJECT_DIR`。确认连接专属于项目且原始环境正确 |
-| Antigravity | 经验证的标准 roots；本机 2.23.1 工作区绑定未通过隔离验收，使用 `hippo serve` 并显式传 `project_id`，暂不部署固定 root |
+| Antigravity | 共享 `hippo serve`，安装 [PreToolUse 自动补参插件](/runbooks/antigravity-plugin)；未安装时显式传 `project_id`，不部署固定 root |
 | Pi | 安装本仓库原生扩展，工具按每次回调 `ctx.cwd` 进入 `hippo agent search/add`；部署环境 `HIPPO_QUEUE_VERSION=2` 可使事件捕获发布 v2，默认 1 |
 
 CLI 的 `hippo agent search QUERY --context-dir /abs/repo` 和 `hippo agent add TEXT --context-dir /abs/repo` 是宿主桥，不开放检索预算。缺少目录且未显式选择项目时，项目调用失败；`--scope global` 无需目录。MCP 仍只暴露原有工具。
@@ -81,3 +81,8 @@ node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding
 无绑定、无请求上下文仍返回 `PROJECT_CONTEXT_MISSING`；显式 `project_id` / `agent_id` 和有效 global 保留原语义。请求 metadata 与启动绑定冲突仍拒绝，不能用 metadata 静默盖掉旧绑定。普通 roots 异常、超时、空列表或冲突也不降级。有回传通道的既有专属 stdio 绑定契约保留；通道能力本身不证明项目归属，部署者仍须核验连接独占。
 
 本机版本没有载入顶层 `.agents/mcp_config.json`。首次验收通过工作区插件加载固定 root，但 2026-10-16 的双 Project 验收发现同名连接复用，改用不同服务名又未发现工具，详见 [Issue #101](https://github.com/mungerism/hippo/issues/101)。当前使用无固定 root 的 `hippo serve`，项目调用显式传 `project_id`。其他版本只有在实际 A/B 交替、并发与重连均证实连接独占后，才可启用工作区 `--project-root`；不要因插件配置存在就认定专属连接成立。
+
+
+## Antigravity Plugin 自动补参
+
+正式插件通过每次 Hook 的 `workspacePaths` 补齐内层 MCP 参数，安装与回滚见 [Antigravity 自动项目路由插件](/runbooks/antigravity-plugin)。这提供了独立于 MCP metadata 的请求级目录来源，保留上述 stateless 安全检查；显式选择仍优先，不再要求 Agent 为每次正常单仓库调用主动填写项目。历史固定绑定失败结论保持有效。

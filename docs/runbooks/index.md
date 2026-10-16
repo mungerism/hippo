@@ -16,3 +16,4 @@
 | **项目路由** | [自动项目路由与版本切换](/runbooks/project-context) | 四宿主绑定、v2 队列和 canonical 启用/回滚 | `hippo project inspect/bind` |
 | **发布验收** | [自动项目上下文发布与巡检记录](/runbooks/project-context-acceptance) | 2026-10-15 本机部署证据、范围限制与偏好变更回归 | 四宿主真实调用、v2 队列核查 |
 | **扩展验收** | [双项目路由扩展验收](/runbooks/project-context-extended-acceptance) | 双项目并发、连接隔离失败与 Hook 时延 | 实际宿主调用、独立延迟基准 |
+| **Antigravity 插件** | [自动项目路由插件](/runbooks/antigravity-plugin) | 逐调用补参、安装、停用和验收 | `hippo antigravity install/disable` |
