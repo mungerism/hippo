@@ -34,7 +34,7 @@ PreToolUse(call_mcp_tool)
 
 搜索、自然语言时间线和写入使用相同路径。拷贝完整内层 `Arguments` 后补参，保留 query/text、scope、user_id 等字段；不向 MCP 工具增加参数。显式选择器优先语义保持不变，包括跨项目访问和旧 `agent_id` 覆盖。两个不同仓库即使同名也拒绝自动选择；同仓库子目录与 canonical Git worktree 可合并。只支持本机可访问的 Git 目录，不取插件 cwd、首个工作区、会话 ID 或产物目录作兜底。
 
-该 Hook 只输出 `allow` 或 `deny`，不授予权限，不使用 `auto_approve` 或 `permissionOverrides`。输入上限 1 MiB；POSIX 子进程总截止时间为 2 秒，宿主超时为 5 秒。它是同步的路由检查，与 Stop 捕获的 50ms 入队目标分别衡量；后者的 [Issue #102](https://github.com/mungerism/hippo/issues/102)仍未解决。
+该 Hook 只输出 `allow` 或 `deny`，不授予权限，不使用 `auto_approve` 或 `permissionOverrides`。输入上限 1 MiB；POSIX 子进程总截止时间为 2 秒，宿主超时为 5 秒。它是同步的路由检查，与 Stop 捕获的 50ms 入队目标分别衡量；后者已完成 Worker 本机通道优化，四宿主常驻与回退的 240 次部署采样均通过，详见[捕获隔离与延迟验收](/runbooks/hook-capture-acceptance)。
 
 插件损坏、未加载或被宿主终止时，未补参请求到达无固定绑定的 MCP 后仍缺少可靠项目上下文并失败。显式选择和 global 继续可用。这一保障依赖 MCP 配置保持无固定项目绑定；不要恢复已证实不安全的工作区固定 root。
 
@@ -93,7 +93,7 @@ hippo antigravity disable --workspace /absolute/repo
 python3 ~/.hippo/acceptance/antigravity-plugin-release-20261016/verify.py
 ```
 
-报告确认项目串用 ID 为 0、共享进程并发、重连、全局安装与清理。这里仅验收 App 2.23.1，CLI/IDE 不作外推；Stop 捕获时延 Issue #102 仍待处理。
+报告确认项目串用 ID 为 0、共享进程并发、重连、全局安装与清理。这里仅验收 App 2.23.1，CLI/IDE 不作外推；此段记录发布当时的失败；后续 #106 / #102 的修复及部署验证见[捕获隔离与延迟验收](/runbooks/hook-capture-acceptance)。
 
 ## 捕获停用与验收会话围栏（Issue #106 修订）
 
@@ -108,3 +108,6 @@ hippo hook fence --host antigravity --session-id <conversationId>
 命令持久写入并回读围栏，成功输出 `blocked=true`；失败非零退出，验收必须停止。该命令属于本机运维，不向 Agent MCP 暴露。围栏无法撤销已经完成的写入，也不能替代对已在执行中的后端操作的核查。
 
 路由插件安装器生成的命令新增 `--config-root`，每次执行检查该安装范围及当前工作区的插件开关。`hippo antigravity disable --workspace /abs/repo` 的 `enabled=false` 也能让全局路由命令停止为该工作区自动补参；显式选择和 global 保留。旧部署更新后须重新执行安装命令，使缓存命令包含安装范围。源文件变更后无需仅依赖宿主刷新来停用自动补参；宿主仍可能显示已加载组件，实际行为以原生调用为准。
+
+
+2026-10-16 后续原生验收已验证以上停用与围栏行为：7 次无选择器调用、3 个停用会话自动围栏、重新启用后的旧会话作业进入 dead，两处测试空间保持为空。详见[捕获隔离与延迟验收](/runbooks/hook-capture-acceptance)。
