@@ -76,3 +76,24 @@ Antigravity B 的只读调用进入了 A 的同一个探针 PID，解析结果�
 原配置保存在本机 `~/.hippo/backups/antigravity-explicit-20261015T231713Z`。原始测试证据保存在 `~/.hippo/acceptance/host-routing-20261016`，不提交真实记忆、凭据或原始宿主报文到仓库。36 条合成记录已逐条核对用户、前缀和完整备份后随隔离测试集合清理，临时凭据副本已移除；生产集合未做删除。审计分别见 `cleanup-audit.json` 与 `antigravity-mitigation-verification.json`。
 
 重新启用 Antigravity 自动绑定前，必须在实际应用中完成 A/B 交替、并发、重连，逐次核对真实返回 ID 和写入 namespace；唯一服务名只有在真实工具发现及路由均通过后才可作为方案。非 Git 绑定不能绕过这一宿主发布条件。现存 9 条非 Git dead 作业继续隔离，不批量 retry 或移除围栏。
+
+## Issue #101 网关防护候选复验
+
+随后修订在网关阻断危险兜底，不改变 Antigravity 的连接池：SDK 明确 `can_send_request=false`，或 roots 请求抛出 `NoBackChannelError` 时，只有启动绑定而没有合法请求级目录的调用返回 `PROJECT_CONTEXT_UNVERIFIED`。第一项在 roots 未声明时也检查；显式项目选择与 global 保留，合法 metadata 与绑定冲突仍拒绝。保护不按宿主名称或版本放行。
+
+原生 Antigravity 2.23.1 使用临时的**纯路由 MCP 探针**载入候选解析器，不连接任何记忆后端。真实请求可不声明 roots，且 `can_send_request=false`；只观察到会话、产物目录及协议 metadata，没有活动 Git 目录。不能从会话 ID 或 artifacts 路径猜测项目。
+
+| 复验 | 实际结果 |
+| --- | --- |
+| 仅捕获 `NoBackChannelError` 的初版候选 | roots 未声明时仍错误接受 A 绑定，复现遗漏分支 |
+| 完整保护，A / B 省略选择器 | 两边均返回 `PROJECT_CONTEXT_UNVERIFIED`，不选 A 作为默认项目 |
+| 同一 A 绑定进程，显式选择 A / B | 分别返回 `isolation_a` / `isolation_b` |
+| 重建测试连接 | 三个候选进程上的结果一致，无旧身份兜底 |
+| 两聊天普通交替调用 | 每边四次结果正确；实际窗口未重叠，不计作并发证据 |
+| 两聊天同步屏障 | 两个不同会话的请求在同一进程中实际重叠，两边均安全拒绝 |
+
+完整候选共完成 15 次原生探针调用，记录与当前解析器源码 SHA-256 一致，后端调用数始终为零。同步屏障只用于确认并发，不计入时延评测。该证据验证真实宿主请求经过候选解析器的行为，不冒充生产记忆读写验收；实际工具的搜索、时间线、写入在单元回归中验证拒绝发生于后端调用之前。
+
+测试服务已从配置移除，所有匹配的临时探针进程已停止，其他 MCP 条目保留。证据位于本机 `~/.hippo/acceptance/issue101-20261016`，不含全局配置副本或凭据。本次未替换生产运行时、重启 Worker / Qdrant 或改动记忆集合，现有生产无固定 root 的显式选择配置继续使用。
+
+该修复收紧 Hippo 可控制的失败门禁；Antigravity 免选择器路由仍待宿主提供可验证的请求目录或连接归属，不将其宣称为已恢复。Issue #101 继续跟踪剩余宿主能力，Hook 时延问题 #102 也保持开放。

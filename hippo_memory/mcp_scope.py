@@ -39,14 +39,22 @@ async def resolve_mcp_scope(
                 if not codex_context or not isinstance(state, dict) or not isinstance(state.get("sandboxCwd"), str):
                     raise ProjectContextError()
                 candidates.insert(0, ("codex_meta", state["sandboxCwd"], True))
+            # Modern stateless requests may omit roots entirely. Check the
+            # SDK's public channel capability before the optional roots branch.
+            if (bindings and CODEX_CONTEXT_KEY not in meta
+                    and getattr(ctx.session, "can_send_request", None) is False):
+                raise ProjectContextError("PROJECT_CONTEXT_UNVERIFIED")
             capabilities = ctx.session.client_capabilities
             if capabilities is not None and capabilities.roots is not None:
                 try:
                     result = await asyncio.wait_for(ctx.session.list_roots(), timeout=2.0)
                 except NoBackChannelError:
-                    # Stateless connections cannot provide roots even if their
-                    # request metadata advertises the deprecated capability.
-                    # The resolver still requires a validated independent source.
+                    # A host can share an A-bound process with callers from B.
+                    # Without a back channel, startup bindings alone cannot
+                    # establish request ownership (#101). Validated request
+                    # metadata may still disambiguate; all sources must agree.
+                    if bindings and CODEX_CONTEXT_KEY not in meta:
+                        raise ProjectContextError("PROJECT_CONTEXT_UNVERIFIED") from None
                     roots = None
                 else:
                     roots = [str(root.uri) for root in result.roots]

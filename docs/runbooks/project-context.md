@@ -76,6 +76,8 @@ node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding
 
 ## Antigravity stateless 协议
 
-本机真实验收确认：Antigravity 的 `2026-07-28` 请求仍声明 roots 能力，但 SDK 会抛出 `NoBackChannelError`，无法发起 `roots/list`。Hippo 仅将这个明确的无回传通道状态视为 roots 不可用，继续验证独立的 stdio 绑定或活动目录；没有可靠独立来源时仍拒绝操作。普通 roots 异常、超时、空列表或冲突不会因此被忽略。
+本机真实验收确认：Antigravity 的 `2026-07-28` 请求仍声明 roots 能力，但 SDK 会抛出 `NoBackChannelError`，无法发起 `roots/list`。本次安全修订不再将启动绑定单独作为该场景的可靠来源：SDK `can_send_request=false`，或 `roots/list` 明确抛出 `NoBackChannelError` 时，只有启动绑定而没有已启用、合法的请求级目录，返回 `PROJECT_CONTEXT_UNVERIFIED`，在搜索、时间线或写入接触后端前停止。即使客户端完全不声明 roots，也检查公开的通道能力。
+
+无绑定、无请求上下文仍返回 `PROJECT_CONTEXT_MISSING`；显式 `project_id` / `agent_id` 和有效 global 保留原语义。请求 metadata 与启动绑定冲突仍拒绝，不能用 metadata 静默盖掉旧绑定。普通 roots 异常、超时、空列表或冲突也不降级。有回传通道的既有专属 stdio 绑定契约保留；通道能力本身不证明项目归属，部署者仍须核验连接独占。
 
 本机版本没有载入顶层 `.agents/mcp_config.json`。首次验收通过工作区插件加载固定 root，但 2026-10-16 的双 Project 验收发现同名连接复用，改用不同服务名又未发现工具，详见 [Issue #101](https://github.com/mungerism/hippo/issues/101)。当前使用无固定 root 的 `hippo serve`，项目调用显式传 `project_id`。其他版本只有在实际 A/B 交替、并发与重连均证实连接独占后，才可启用工作区 `--project-root`；不要因插件配置存在就认定专属连接成立。
