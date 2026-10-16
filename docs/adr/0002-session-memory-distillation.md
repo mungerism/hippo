@@ -54,3 +54,12 @@ Antigravity 原生验收发现工作区禁用字段未阻止全局 Stop 捕获�
 ## 捕获入口与后台依赖分离（Issue #102）
 
 常用 `hippo hook capture` 和 `python -m hippo_memory.cli hook capture` 在 CLI 初始化前进入共用轻量捕获函数；正常发布不加载 Typer、Rich、后端配置或蒸馏依赖。仅在首次确需唤醒 Worker 时导入进程启动库；帮助、非法选项和同步调试仍交给完整 CLI。所有入口共用 Adapter、策略检查及原子 Spool 发布，保留 fsync、READY 标记、版本屏障与 fail-safe，不引入新的服务或依赖。后台的质量策略与提示词在消费时加载，历史 helper 导出保持兼容。
+
+
+## 复用 Worker 的本机入队通道（Issue #102）
+
+常驻 Worker 在持有对应版本 `worker.lock` 后启动同进程 Unix socket 监听线程，退出前关闭线程与 socket，再释放锁。它不引入新服务、第三方依赖或 TCP 端口；入口仅接受同用户、权限 `0600` 的 `capture.sock`，请求只有宿主、cwd、原始 Hook 输入和队列版本，大小上限 8 MiB。
+
+Hook 首选本机通道，Worker 仍执行原有 Adapter、捕获停用策略、持久围栏、旧 Worker 屏障和原子入队；只有完整发布并完成 fsync 才返回成功确认。前台因此无需加载 Adapter 与 Spool 模块。无监听、版本不符、25ms socket 操作超时或协议错误时回退原来的本地发布；相对路径输入保留本地解释，`--sync` 保留原路径。确认丢失可能触发重复投递，继续依靠既有 transcript boundary / Semantic Cursor 防重，不宣称分布式 exactly-once；无转录的时间边界仍可能产生重复的空作业。
+
+该通道优化常驻 Worker 场景；回退路径的 Python 冷启动和系统调度仍可能超过 50ms。基准新增 `--resident`，在独立 spool 内启动相同监听器并持有 Worker 锁，计入完整子进程启动、持久化确认与退出，逐条核对实际作业；默认模式仍测本地回退。原来的 50ms 门槛不变，保留每次采样与失败结果，最终以部署实测为准。

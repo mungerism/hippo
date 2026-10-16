@@ -106,3 +106,8 @@
 4. **Receipts Preserved**：`receipts/` 目录严禁被 prune 遍历或清理；
 5. **Lock Exclusivity**：同一时刻在整个系统内只能有一个 Worker 进程持有 `worker.lock` 并消费队列；
 6. **Publish Exclusivity & Durability**：作业发布与清理必须由 `publish.lock` 互斥保护，发布内容在原子 rename 前必须已落盘并落地 `READY.json`，且父目录完成 `fsync`。
+
+
+## 常驻 Worker 捕获通道
+
+Worker daemon 在持锁期间拥有一个可选的 `capture.sock` 监听线程，先接受持久入队，再初始化/消费后端；线程只发布作业，不调用 Engine，不启动额外 Worker。监听启动失败不终止消费者，Hook 自动走原有本地发布。停止时先等待当前发布完成并关闭监听，核验 socket inode 后清理，再释放 Worker 锁；drain 模式不提供此通道。协议、回退与重复投递边界见 [ADR-0002](/adr/0002-session-memory-distillation)。
