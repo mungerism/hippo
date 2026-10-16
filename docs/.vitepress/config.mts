@@ -108,6 +108,7 @@ export default withMermaid(
             { text: 'Antigravity 自动项目路由插件', link: '/runbooks/antigravity-plugin' },
             { text: '自动项目上下文发布与巡检记录', link: '/runbooks/project-context-acceptance' },
             { text: '双项目路由扩展验收', link: '/runbooks/project-context-extended-acceptance' },
+            { text: '捕获隔离与 Hook 入队延迟验收', link: '/runbooks/hook-capture-acceptance' },
             { text: 'Doctor 巡检与环境排障', link: '/runbooks/troubleshooting' },
             { text: '记忆迁移与向量重建操作手册', link: '/runbooks/migration' },
             { text: '评测 Baseline 治理与回归排障', link: '/runbooks/eval-baseline-management' },
