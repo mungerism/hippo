@@ -12,7 +12,7 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 | **Claude Code** | CLI 终端工具 | 本方案未新增 Hippo 捕获协议 | MCP 按需检索 | 专属 stdio 启动时捕获 `CLAUDE_PROJECT_DIR`，结合 roots 校验 |
 | **Pi** | 极简终端 Agent | 原生扩展的 `agent_settled` / `session_shutdown` 回调 | 通过 Tool Call 按需检索 | 工具与事件逐次读取 `ctx.cwd` |
 | **ZCode** | 终端编码套件 | 监听本地 `.zcode` 记忆变动或通过 CLI 迁移 | 统一注入 Prompt 上下文 | 支持通过 `hippo migrate-zcode` 迁移精细记忆 |
-| **Antigravity** | Agentic IDE 助手 | Stop Hook | MCP 按需检索，任务前遵循 `AGENTS.md` | roots 或工作区专属插件提供项目上下文 |
+| **Antigravity** | Agentic IDE 助手 | Stop Hook | MCP 按需检索，任务前遵循 `AGENTS.md` | 经验证的 roots 或显式项目选择；本机工作区绑定隔离未通过 |
 
 ---
 
@@ -24,8 +24,10 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 | --- | --- | --- |
 | Codex | 请求级 sandbox cwd / roots | capability 协商、路径与多环境语义 |
 | Claude Code | stdio 的 `CLAUDE_PROJECT_DIR` / roots | 原始环境捕获与连接生命周期 |
-| Antigravity | roots / 工作区专属部署绑定 | 实际 roots 能力、多窗口与多目录消歧；Hook 不取首个目录 |
+| Antigravity | 经验证的 roots / 显式选择 | 2.23.1 同名连接跨 Project 复用，暂禁固定绑定；Hook 不取首个目录 |
 | Pi | 工具与事件回调的 `ctx.cwd` | 逐调用传目录，安全桥接共用记忆逻辑，不依赖进程 cwd |
+
+2026-10-16 [双项目扩展验收](/runbooks/project-context-extended-acceptance)确认 Codex、Claude、Pi 的实际 A/B 调用通过；Antigravity 隔离失败，当前退回显式选择。Hook 全程实测超过 50ms，目标保留为未达标项。
 
 四宿主共用项目映射、scope 语义与检索门禁；缺少可靠上下文时保留显式项目选择。Antigravity 的多文件夹 Project 不自动合并成一个 Hippo 项目命名空间。
 
