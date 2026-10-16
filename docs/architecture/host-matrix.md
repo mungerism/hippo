@@ -27,7 +27,7 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 | Antigravity | PreToolUse workspacePaths / roots / 显式选择 | 使用无固定绑定的共享 MCP；Hook 多仓库拒绝，保留显式选择优先 |
 | Pi | 工具与事件回调的 `ctx.cwd` | 逐调用传目录，安全桥接共用记忆逻辑，不依赖进程 cwd |
 
-2026-10-16 [双项目扩展验收](/runbooks/project-context-extended-acceptance)确认 Codex、Claude、Pi 的实际 A/B 调用通过；Antigravity 隔离失败，当前退回显式选择。Hook 全程实测超过 50ms，目标保留为未达标项。
+2026-10-16 [双项目扩展验收](/runbooks/project-context-extended-acceptance)确认 Codex、Claude、Pi 的实际 A/B 调用通过；Antigravity 固定绑定隔离失败；同日后续[正式插件发布](/runbooks/antigravity-plugin)改为逐调用补参。Hook 全程实测超过 50ms，目标保留为未达标项。
 
 MCP 无回传通道且仅有启动绑定时返回 `PROJECT_CONTEXT_UNVERIFIED`；该检查也覆盖不声明 roots 的请求，显式选择和有效 global 保留。
 
