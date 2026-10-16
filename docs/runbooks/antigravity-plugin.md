@@ -63,7 +63,7 @@ hippo antigravity disable --workspace /absolute/repo
 
 完整回归 739 项（738 通过、1 项真实 Qdrant 按本地契约跳过），新增插件回归 13 项。更新后的 PR [CI](https://github.com/mungerism/hippo/actions/runs/38869275509)与合并后 [main CI](https://github.com/mungerism/hippo/actions/runs/38869437647)通过，包含独立真实 Qdrant、文档和发行包构建。
 
-在 App 2.23.1 两个真实原生 Project 中使用安装后的模块、真实记忆引擎及独立测试用户/集合，导出 8 个会话共 22 次模型工具请求；原始请求均省略 `project_id` / `agent_id`。其中测试 MCP 收到 19 次请求（18 次后端操作、1 次缺上下文拒绝），另 1 次多根请求在 Hook 阶段拒绝；2 次生产服务只读检查用于区分工作区覆盖和最终全局接线。
+在 App 2.23.1 两个真实原生 Project 中使用安装后的模块、真实记忆引擎及独立测试用户/集合，导出 8 个会话共 23 次模型工具请求；原始请求均省略 `project_id` / `agent_id`。其中测试 MCP 收到 19 次请求（18 次后端操作、1 次缺上下文拒绝），另 1 次多根请求在 Hook 阶段拒绝；3 次生产服务只读检查用于区分工作区覆盖和最终全局接线。
 
 | 检查 | 实际结果 |
 | --- | --- |
@@ -85,7 +85,7 @@ hippo antigravity disable --workspace /absolute/repo
 
 后续原生验收须在首次工具调用前核验生产捕获隔离或持久会话围栏；不依赖 Agent 的“不保存”提示或工作区停用字段。开关合并、缓存及验收捕获隔离由 [Issue #106](https://github.com/mungerism/hippo/issues/106) 独立跟进，不据此撤销已验证的请求级路由结论。
 
-临时 MCP 条目及观察 Hook 已移除，测试进程已停止，测试工作区插件已移出扫描路径，B 已恢复单仓库。全局 MCP 文件精确恢复原始字节，正式全局路由插件保留。生产 v2 队列检查时 pending / processing 均为 0；dead 保留并逐项审计，不批量 retry。
+临时 MCP 条目及观察 Hook 已移除，测试进程已停止，测试工作区插件已移出扫描路径，B 已恢复单仓库。全局 MCP 文件精确恢复原始字节，正式全局路由插件保留。随后仅重连 Antigravity 的生产 Hippo MCP，使现有连接载入新版；在已围栏会话中再次原生只读查询，Hook 正常补参、已清理空间返回空结果，新的 Stop 作业被围栏阻断且两处测试空间仍为 0 条。生产 v2 队列检查时 pending / processing 均为 0；dead 保留并逐项审计，不批量 retry。
 
 私有证据：`~/.hippo/acceptance/antigravity-plugin-release-20261016`；不含临时凭据或全局 MCP 配置副本。可离线复跑只读校验：
 
