@@ -1,4 +1,4 @@
-"""Local routing and Hook wall-time probe; no memory backend or worker starts.
+"""Local routing and Hook wall-time probe; no memory backend or worker starts; resident listener is optional.
 
 Run with the deployed interpreter to measure the deployed entry point:
   /path/to/python -m benchmarks.project_context_latency --hippo /path/to/hippo
@@ -30,12 +30,13 @@ def main():
     parser.add_argument("--hippo", required=True, help="Deployed executable, not a shell command")
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument("--host", choices=["codex", "antigravity", "pi", "zcode"], default="codex")
+    parser.add_argument("--resident", action="store_true", help="Use existing Worker capture listener path")
     parser.add_argument("--check", action="store_true", help="Exit 1 when a measured latency target fails")
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be positive")
     command = str(Path(args.hippo).expanduser().resolve(strict=True))
-    with tempfile.TemporaryDirectory(prefix="hippo-context-latency-") as temporary:
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="hippo-context-latency-") as temporary:
         base = Path(temporary).resolve()
         repo = base / "repository"
         repo.mkdir()
@@ -72,32 +73,42 @@ def main():
         # An isolated held lock prevents capture's automatic drain fallback.
         with (storage.base_dir / "worker.lock").open("a") as worker_lock:
             fcntl.flock(worker_lock, fcntl.LOCK_EX)
-            for index in range(args.samples):
-                event = {
-                    "session_id": f"latency-{index}", "event": "Stop", "cwd": str(repo),
-                    "last_assistant_message": "Synthetic latency probe completed.",
-                }
-                if args.host == "antigravity":
-                    event = {"conversationId": f"latency-{index}", "workspacePaths": [str(repo)]}
-                payload = json.dumps(event)
-                start = time.perf_counter()
-                result = subprocess.run(
-                    [command, "hook", "capture", "--host", args.host, "--queue-version", "2"],
-                    input=payload, capture_output=True, text=True,
-                    cwd=repo, env=dict(os.environ), timeout=15,
-                )
-                hook_samples.append((time.perf_counter() - start) * 1000)
-                if result.returncode != 0 or "capture error" in result.stderr:
-                    raise RuntimeError(f"Hook capture failed; timing is not a successful sample: {result.stderr}")
-                json.loads(result.stdout)
+            from contextlib import ExitStack
+            with ExitStack() as cleanup:
+                if args.resident:
+                    from hippo_memory.capture_server import CaptureServer
+                    server = CaptureServer(storage).start()
+                    cleanup.callback(server.close)
+                for index in range(args.samples):
+                    event = {
+                        "session_id": f"latency-{index}", "event": "Stop", "cwd": str(repo),
+                        "last_assistant_message": "Synthetic latency probe completed.",
+                    }
+                    if args.host == "antigravity":
+                        event = {"conversationId": f"latency-{index}", "workspacePaths": [str(repo)]}
+                    payload = json.dumps(event)
+                    start = time.perf_counter()
+                    result = subprocess.run(
+                        [command, "hook", "capture", "--host", args.host, "--queue-version", "2"],
+                        input=payload, capture_output=True, text=True,
+                        cwd=repo, env=dict(os.environ), timeout=15,
+                    )
+                    hook_samples.append((time.perf_counter() - start) * 1000)
+                    if result.returncode != 0 or "capture error" in result.stderr:
+                        raise RuntimeError(f"Hook capture failed; timing is not a successful sample: {result.stderr}")
+                    json.loads(result.stdout)
+        if args.resident and server.completed_requests != args.samples:
+            raise RuntimeError("Resident listener did not acknowledge every measured request")
         # One distinct job per launch proves the benchmark timed actual persistence.
         if len(list(storage.jobs_dir.iterdir())) != args.samples:
             raise RuntimeError("Hook did not persist every measured job")
         report = {
-            "host": args.host,
+            "host": args.host, "capture_transport": "resident" if args.resident else "local",
+            "resident_completed_requests": server.completed_requests if args.resident else 0,
             "resolver_warm": summarize(route_samples),
             "resolver_warm_two_roots": summarize(multi_root_samples),
             "hook_process_wall": summarize(hook_samples),
+            "hook_samples_ms": hook_samples,
             "resolver_p95_target_ms": 50, "hook_max_target_ms": 50,
             "memory_backend_used": False, "worker_started": False,
         }

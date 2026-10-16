@@ -1247,6 +1247,13 @@ class SpoolWorker:
             logger.warning("Spool worker already running. Exiting daemon.")
             return
 
+        capture_server = None
+        try:
+            from hippo_memory.capture_server import CaptureServer
+            capture_server = CaptureServer(self.storage).start()
+        except Exception as exc:
+            logger.warning("Capture listener unavailable; local publication remains active (%s)", type(exc).__name__)
+
         stop_requested = False
 
         def _handle_signal(signum, frame):
@@ -1290,4 +1297,8 @@ class SpoolWorker:
                     signal.signal(signal.SIGINT, old_sigint)
             except (ValueError, AttributeError):
                 pass
-            self.release_lock()
+            try:
+                if capture_server is not None:
+                    capture_server.close()
+            finally:
+                self.release_lock()
