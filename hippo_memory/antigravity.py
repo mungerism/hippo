@@ -24,7 +24,7 @@ TOOLS = {"search_memories", "add_memory"}
 MAX_INPUT = 1024 * 1024
 
 
-def rewrite(event: dict, *, servers: set[str], bindings: Path) -> dict:
+def rewrite(event: dict, *, servers: set[str], bindings: Path, config_root: Path | None = None) -> dict:
     """Preserve explicit choices; inject only omitted selectors on Hippo tools."""
     allow = {"decision": "allow"}
     call = event.get("toolCall")
@@ -51,6 +51,13 @@ def rewrite(event: dict, *, servers: set[str], bindings: Path) -> dict:
     if len(paths) > 64:
         raise ProjectContextError()
     roots = [local_path(value).as_uri() for value in paths]
+    from hippo_memory.capture_policy import routing_disabled
+
+    try:
+        if routing_disabled(paths, config_root):
+            return allow
+    except (ValueError, OSError):
+        raise ProjectContextError() from None
     selected = ProjectContextResolver(bindings).automatic(candidates=[], roots=roots)
     return {"decision": "allow", "overwrite": {"Arguments": dict(inner, project_id=selected.namespace)}}
 
@@ -63,6 +70,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-name", action="append", required=True)
     parser.add_argument("--bindings", type=Path, required=True)
+    parser.add_argument("--config-root", type=Path)
     args = parser.parse_args()
     previous = None
     try:
@@ -78,7 +86,7 @@ def main():
         event = json.loads(raw)
         if not isinstance(event, dict):
             raise ProjectContextError()
-        output = rewrite(event, servers=set(args.server_name), bindings=args.bindings)
+        output = rewrite(event, servers=set(args.server_name), bindings=args.bindings, config_root=args.config_root)
     except ProjectContextError as exc:
         output = {"decision": "deny", "reason": exc.code}
     except Exception:
@@ -148,7 +156,7 @@ def install(*, config_root: Path, bindings: Path, servers: list[str], backup_roo
     if entry not in registration:
         registration.append(entry)
     command = [str(python or Path(sys.executable).absolute()), "-m", "hippo_memory.antigravity",
-               "--bindings", str(bindings.expanduser().absolute())]
+               "--bindings", str(bindings.expanduser().absolute()), "--config-root", str(root)]
     for server in dict.fromkeys(servers):
         command.extend(["--server-name", server])
     desired = {

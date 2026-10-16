@@ -94,3 +94,17 @@ python3 ~/.hippo/acceptance/antigravity-plugin-release-20261016/verify.py
 ```
 
 报告确认项目串用 ID 为 0、共享进程并发、重连、全局安装与清理。这里仅验收 App 2.23.1，CLI/IDE 不作外推；Stop 捕获时延 Issue #102 仍待处理。
+
+## 捕获停用与验收会话围栏（Issue #106 修订）
+
+Hippo 捕获入口现在独立检查每个事件工作区至 Git 根的 `.agents/hooks.json`。任一目录的 `hippo-memory-distill.enabled=false` 会阻止整段会话入队，并持久写入会话围栏；配置损坏同样失败关闭。此检查不依赖 Antigravity 是否覆盖了同名全局 Hook。Worker 在消费前也重新检查，已有冻结身份的作业不能绕过后续围栏。重新启用仅影响新会话；已阻断会话的完整历史不会自动重放，也不批量 retry。
+
+对尚无工作区策略的原生验收，可在首次工具调用前由运维者执行：
+
+```bash
+hippo hook fence --host antigravity --session-id <conversationId>
+```
+
+命令持久写入并回读围栏，成功输出 `blocked=true`；失败非零退出，验收必须停止。该命令属于本机运维，不向 Agent MCP 暴露。围栏无法撤销已经完成的写入，也不能替代对已在执行中的后端操作的核查。
+
+路由插件安装器生成的命令新增 `--config-root`，每次执行检查该安装范围及当前工作区的插件开关。`hippo antigravity disable --workspace /abs/repo` 的 `enabled=false` 也能让全局路由命令停止为该工作区自动补参；显式选择和 global 保留。旧部署更新后须重新执行安装命令，使缓存命令包含安装范围。源文件变更后无需仅依赖宿主刷新来停用自动补参；宿主仍可能显示已加载组件，实际行为以原生调用为准。

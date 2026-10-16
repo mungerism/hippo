@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import signal
 import time
 import uuid
@@ -17,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from hippo_memory.config import get_config
 from hippo_memory.hooks.adapters import get_adapter
 from hippo_memory.hooks.models import (
     CapturedPayload,
@@ -25,18 +23,19 @@ from hippo_memory.hooks.models import (
     calculate_semantic_cursor,
 )
 from hippo_memory.exceptions import ContextConflictError
-from hippo_memory.prompts import SESSION_DISTILLATION_PROMPT_V1
 
 if TYPE_CHECKING:
     from hippo_memory.engine import HippoEngine
 
 logger = logging.getLogger(__name__)
 
-from hippo_memory.persistence_quality import (
-    TRANSIENT_PHRASES,
-    clean_transient_text,
-    should_skip_session,
-)
+def __getattr__(name):
+    # Preserve historical helper exports without loading Worker-only policy
+    # during each short-lived capture process.
+    if name in {"TRANSIENT_PHRASES", "clean_transient_text", "should_skip_session"}:
+        from hippo_memory import persistence_quality
+        return getattr(persistence_quality, name)
+    raise AttributeError(name)
 
 
 def fsync_dir(path: Path) -> None:
@@ -247,6 +246,7 @@ class SpoolStorage:
 
     def _cleanup_staging_dir(self, staging_job_dir: Path, owner_fd: Optional[int] = None) -> None:
         """Helper to unlock and delete staging directory upon rejected enqueue."""
+        import shutil
         if owner_fd is not None:
             try:
                 fcntl.flock(owner_fd, fcntl.LOCK_UN)
@@ -267,6 +267,8 @@ class SpoolStorage:
         """
         if payload.schema_version != self.version:
             raise ValueError("Payload cannot be published to a different queue version")
+        if not self.capture_allowed(payload):
+            return False, payload.job_id
         # Quick non-authoritative tombstone pre-check
         tombstone_file = self.tombstones_dir / f"{payload.job_id}.json"
         if tombstone_file.exists():
@@ -282,6 +284,7 @@ class SpoolStorage:
         try:
             fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            import shutil
             os.close(owner_fd)
             owner_fd = None
             shutil.rmtree(staging_job_dir, ignore_errors=True)
@@ -703,6 +706,7 @@ class SpoolStorage:
         Returns:
             (recovered_count, quarantined_count)
         """
+        import shutil
         recovered = 0
         quarantined = 0
         now = time.time()
@@ -821,7 +825,10 @@ class SpoolStorage:
     def context_ledger(self, job: CapturedPayload, router=None) -> Path:
         from hippo_memory.config import get_default_user_id
 
-        user_id = getattr(router, "default_user_id", None)
+        identity = job.routing_identity
+        user_id = identity.get("user_id") if isinstance(identity, dict) else None
+        if not isinstance(user_id, str):
+            user_id = getattr(router, "default_user_id", None)
         if not isinstance(user_id, str):
             user_id = get_default_user_id()
         key = hashlib.sha256(json.dumps([job.host, user_id, job.session_id]).encode()).hexdigest()
@@ -835,6 +842,22 @@ class SpoolStorage:
             fcntl.flock(lock, fcntl.LOCK_EX)
             old = json.loads(ledger.read_text()) if ledger.exists() else {}
             durable_write_json(ledger, {"blocked": True, "identity": old.get("identity")})
+
+    def capture_allowed(self, job: CapturedPayload, router=None) -> bool:
+        if job.host != "antigravity":
+            return True
+        from hippo_memory.capture_policy import capture_disabled
+
+        try:
+            disabled = capture_disabled(job)
+        except Exception:
+            # Invalid opt-out configuration cannot publish a sensitive prefix.
+            self.block_session(job, router)
+            raise
+        if disabled:
+            self.block_session(job, router)
+            return False
+        return True
 
     def prepare_identity(self, job: CapturedPayload, router=None) -> None:
         try:
@@ -854,6 +877,12 @@ class SpoolStorage:
         from hippo_memory.router import ScopeRouter, detect_git_project
         from hippo_memory.config import get_default_user_id
 
+        if not self.capture_allowed(job, router):
+            raise ProjectContextError("CAPTURE_DISABLED")
+        # Frozen identity must not bypass a subsequently persisted session fence.
+        ledger = self.context_ledger(job, router)
+        if ledger.exists() and json.loads(ledger.read_text()).get("blocked"):
+            raise ProjectContextError("CAPTURE_SESSION_BLOCKED")
         if job.routing_identity is not None:
             identity = job.routing_identity
             required = ("namespace", "user_id", "context_key", "mode", "revision", "segment")
@@ -918,6 +947,7 @@ class SpoolStorage:
                     raise ContextFenceError("Cannot persist unresolved processing fence") from exc
 
     def prepare_pending_identities(self, router=None) -> None:
+        from hippo_memory.persistence_quality import should_skip_session
         self.fence_unresolved_processing(router)
         for job in sorted(self.list_jobs(state=JobState.PENDING), key=lambda p: p.created_at):
             try:
@@ -1038,6 +1068,8 @@ class SpoolWorker:
         Merges and delegates to should_skip_session() to preserve safety baselines
         and prevent dual-policy drift.
         """
+        from hippo_memory.persistence_quality import should_skip_session
+
         skip, _ = should_skip_session(
             turns=payload.turns,
             last_user_goal=payload.last_user_goal,
@@ -1048,6 +1080,8 @@ class SpoolWorker:
 
     def process_one_job(self, payload: CapturedPayload) -> bool:
         """Execute distillation for a single claimed job. Returns True if handled."""
+        from hippo_memory.persistence_quality import should_skip_session
+        from hippo_memory.prompts import SESSION_DISTILLATION_PROMPT_V1
         self.storage.fence_unresolved_processing(self.engine.router)
         pid = os.getpid()
         if not self.storage.claim_job(payload.job_id, worker_pid=pid):

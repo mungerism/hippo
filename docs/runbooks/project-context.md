@@ -86,3 +86,18 @@ node tests/pi-extension-contract.mjs /absolute/path/to/@earendil-works/pi-coding
 ## Antigravity Plugin 自动补参
 
 正式插件通过每次 Hook 的 `workspacePaths` 补齐内层 MCP 参数，安装与回滚见 [Antigravity 自动项目路由插件](/runbooks/antigravity-plugin)。这提供了独立于 MCP metadata 的请求级目录来源，保留上述 stateless 安全检查；显式选择仍优先，不再要求 Agent 为每次正常单仓库调用主动填写项目。历史固定绑定失败结论保持有效。
+
+## 捕获入口与冷启动复测（Issue #102）
+
+正常 `hippo hook capture` 及 `python -m hippo_memory.cli hook capture` 使用相同轻量捕获逻辑，避免初始化 Typer/Rich 或记忆后端；`--sync`、帮助和非法选项继续使用完整 CLI。Adapter 与 durable Spool 发布逻辑共用，fsync、READY、原子 rename、版本屏障和异常退出语义没有削弱。
+
+基准增加 `--host codex|antigravity|pi|zcode`。必须使用部署后的可执行文件，持有独立 v2 Worker 锁，逐条核对 payload 落盘；不启动后台 Worker 或访问记忆服务。
+
+```bash
+/path/to/python -m benchmarks.project_context_latency \
+  --hippo /path/to/deployed/hippo --host antigravity --samples 30 --check
+```
+
+修复前本机 30 次进程总耗时中位数 72.8ms、p95 81.6ms、最大 98.6ms。5 次分段观测中，CLI 导入约 36–67ms、Adapter 解析约 0.03ms、持久入队约 1.1–1.5ms、其中 fsync 约 0.08–0.43ms，主要成本在初始化而非可靠落盘。
+
+最终源码测量的 Codex 30 次最大 43.9ms、Antigravity 30 次最大 46.3ms。调试中与完整回归并行的批次曾出现 58.2ms 和 116.0ms，均按原 `--check` 规则保留为失败，不能把空闲测量推广为负载下的硬实时保证。50ms 门槛未修改，部署后复测单独记录。

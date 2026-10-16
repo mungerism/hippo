@@ -29,6 +29,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hippo", required=True, help="Deployed executable, not a shell command")
     parser.add_argument("--samples", type=int, default=30)
+    parser.add_argument("--host", choices=["codex", "antigravity", "pi", "zcode"], default="codex")
     parser.add_argument("--check", action="store_true", help="Exit 1 when a measured latency target fails")
     args = parser.parse_args()
     if args.samples < 1:
@@ -72,13 +73,16 @@ def main():
         with (storage.base_dir / "worker.lock").open("a") as worker_lock:
             fcntl.flock(worker_lock, fcntl.LOCK_EX)
             for index in range(args.samples):
-                payload = json.dumps({
+                event = {
                     "session_id": f"latency-{index}", "event": "Stop", "cwd": str(repo),
                     "last_assistant_message": "Synthetic latency probe completed.",
-                })
+                }
+                if args.host == "antigravity":
+                    event = {"conversationId": f"latency-{index}", "workspacePaths": [str(repo)]}
+                payload = json.dumps(event)
                 start = time.perf_counter()
                 result = subprocess.run(
-                    [command, "hook", "capture", "--host", "codex", "--queue-version", "2"],
+                    [command, "hook", "capture", "--host", args.host, "--queue-version", "2"],
                     input=payload, capture_output=True, text=True,
                     cwd=repo, env=dict(os.environ), timeout=15,
                 )
@@ -90,6 +94,7 @@ def main():
         if len(list(storage.jobs_dir.iterdir())) != args.samples:
             raise RuntimeError("Hook did not persist every measured job")
         report = {
+            "host": args.host,
             "resolver_warm": summarize(route_samples),
             "resolver_warm_two_roots": summarize(multi_root_samples),
             "hook_process_wall": summarize(hook_samples),

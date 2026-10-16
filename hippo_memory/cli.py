@@ -3,6 +3,12 @@
 Allows easy inspection, addition, and querying of memories from the command line.
 """
 
+if __name__ == "__main__":
+    import sys
+    from hippo_memory.capture import try_fast_capture
+    if try_fast_capture(sys.argv[1:]):
+        raise SystemExit(0)
+
 from pathlib import Path
 from typing import Optional
 import typer
@@ -835,68 +841,36 @@ def hook_capture(
     queue_version: int = typer.Option(1, "--queue-version", min=1, max=2, help="显式选择已完成消费者升级的队列格式"),
 ):
     """Capture host hook context from stdin and enqueue into spool (<50ms fast exit)."""
-    import sys
-    import subprocess
-    from hippo_memory.hooks import SpoolStorage, SpoolWorker, get_adapter
+    from hippo_memory.capture import run_capture
+    from hippo_memory.config import DEFAULT_SPOOL_DIR
 
-    raw_input = ""
+    run_capture(host=host, cwd=cwd, queue_version=queue_version, sync=sync, spool_dir=DEFAULT_SPOOL_DIR)
+
+
+@hook_app.command("fence")
+def hook_fence(
+    host: str = typer.Option(..., "--host"),
+    session_id: str = typer.Option(..., "--session-id"),
+):
+    """持久阻断指定测试会话的捕获历史，启用前可在首次工具调用前核验。"""
+    import json
+    from hippo_memory.hooks import CapturedPayload, SpoolStorage, get_adapter
+
+    if not session_id.strip() or len(session_id) > 512:
+        raise typer.BadParameter("session-id 必须非空且不超过 512 字符")
     try:
-        # If piped via stdin, read all
-        if not sys.stdin.isatty():
-            raw_input = sys.stdin.read()
-    except Exception:
-        pass
-
-    adapter = None
-    payload = None
-    try:
-        try:
-            adapter = get_adapter(host)
-        except ValueError as e:
-            sys.stderr.write(f"Hippo Hook warning: unknown host {host}: {e}\n")
-            return
-
-        payload = adapter.parse_context(raw_input, env_cwd=cwd)
-        payload.schema_version = queue_version
-        if not payload.workspace_candidates:
-            payload.workspace_candidates = [payload.project_dir]
-        if queue_version == 2 and SpoolStorage().is_worker_active():
-            raise RuntimeError("旧队列 Worker 仍在运行，升级切换完成前不能发布 v2 作业")
-        storage = SpoolStorage(version=queue_version)
-        is_new, job_id = storage.enqueue(payload)
-
-        if sync:
-            worker = SpoolWorker(storage=storage)
-            worker.process_one_job(payload)
-        else:
-            # Hot-path fast check (<0.1ms): if a worker is already active (holding worker.lock),
-            # avoid spawning a redundant detached drain process.
-            # If no worker is active, spawn background detached worker with self-healing fallback.
-            if not storage.is_worker_active():
-                try:
-                    subprocess.Popen(
-                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain",
-                         "--queue-version", str(queue_version)],
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        stdin=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
-    except Exception as e:
-        sys.stderr.write(f"Hippo Hook capture error: {e}\n")
-    finally:
-        try:
-            resp = adapter.format_response(payload) if (adapter and payload) else "{}\n"
-            sys.stdout.write(resp)
-            sys.stdout.flush()
-        except Exception:
-            try:
-                sys.stdout.write("{}\n")
-                sys.stdout.flush()
-            except Exception:
-                pass
+        adapter = get_adapter(host)
+        payload = CapturedPayload(job_id="operator-fence", host=adapter.host_name,
+                                  event="Stop", session_id=session_id, project_dir="")
+        storage = SpoolStorage()
+        storage.block_session(payload)
+        ledger = storage.context_ledger(payload)
+        assert json.loads(ledger.read_text())["blocked"] is True
+    except (ValueError, OSError) as exc:
+        console.print(f"围栏写入失败: {type(exc).__name__}")
+        raise typer.Exit(1)
+    print(json.dumps({"blocked": True, "host": adapter.host_name, "session_id": session_id,
+                      "ledger": str(ledger)}, ensure_ascii=False))
 
 
 @hook_app.command("worker")

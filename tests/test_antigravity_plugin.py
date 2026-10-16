@@ -204,6 +204,26 @@ class TestAntigravityPlugin(unittest.TestCase):
             self.install()
         self.assertFalse(config.exists())
 
+    def test_cached_hook_command_honors_disable_and_workspace_override(self):
+        self.install()
+        hooks = json.loads((self.config / 'plugins' / PLUGIN / 'hooks.json').read_text())
+        command = shlex.split(hooks[PLUGIN]['PreToolUse'][0]['hooks'][0]['command'])
+        def invoke():
+            result = subprocess.run(command, input=json.dumps(self.event(query='x')),
+                                    text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        self.assertIn('overwrite', invoke())
+        disable(self.config)
+        self.assertEqual(invoke(), {'decision': 'allow'})
+        self.install()
+        workspace_config = self.a / '.agents/config.json'
+        workspace_config.parent.mkdir()
+        workspace_config.write_text(json.dumps({'plugins': {PLUGIN: {'enabled': False}}}))
+        self.assertEqual(invoke(), {'decision': 'allow'})
+        workspace_config.unlink()
+        self.assertIn('overwrite', invoke())
+
     def test_partial_failure_restores_original_bytes(self):
         self.config.mkdir()
         config = self.config / 'config.json'
