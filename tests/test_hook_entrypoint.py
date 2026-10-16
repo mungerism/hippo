@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -74,7 +75,8 @@ sys.meta_path.insert(0,Guard())
     def test_existing_help_and_invalid_version_keep_cli_contract(self):
         result = self.invoke(['hook', 'capture', '--help'])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('--queue-version', result.stdout)
+        visible = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', result.stdout)
+        self.assertIn('--queue-version', visible)
         result = self.invoke(['hook', 'capture', '--host', 'codex', '--queue-version', '3'])
         self.assertEqual(result.returncode, 2)
 

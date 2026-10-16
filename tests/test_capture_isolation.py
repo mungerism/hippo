@@ -116,6 +116,22 @@ class TestCaptureIsolation(unittest.TestCase):
             self.assertFalse(worker.process_one_job(p))
         self.engine.add.assert_not_called()
 
+    def test_frozen_owner_keeps_original_fence_when_worker_user_changes(self):
+        p = self.payload()
+        self.storage.enqueue(p)
+        self.storage.prepare_identity(p, self.engine.router)
+        owner_ledger = self.storage.context_ledger(p, self.engine.router)
+        self.storage.block_session(p, self.engine.router)
+        other_router = MagicMock(default_user_id='other-user')
+        self.assertEqual(self.storage.context_ledger(p, other_router), owner_ledger)
+        with self.assertRaises(ValueError):
+            self.storage.prepare_identity(p, other_router)
+        other = self.payload('other-user-job')
+        self.storage.enqueue(other)
+        self.storage.prepare_identity(other, other_router)
+        self.assertEqual(other.routing_identity['user_id'], 'other-user')
+        self.assertNotEqual(self.storage.context_ledger(other, other_router), owner_ledger)
+
     def test_operator_fence_before_any_job_is_persistent(self):
         from typer.testing import CliRunner
         from hippo_memory.cli import app
