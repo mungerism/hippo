@@ -860,9 +860,11 @@ def hook_capture(
         payload.schema_version = queue_version
         if not payload.workspace_candidates:
             payload.workspace_candidates = [payload.project_dir]
+        storage = SpoolStorage(version=queue_version)
+        if not storage.capture_allowed(payload):
+            return
         if queue_version == 2 and SpoolStorage().is_worker_active():
             raise RuntimeError("旧队列 Worker 仍在运行，升级切换完成前不能发布 v2 作业")
-        storage = SpoolStorage(version=queue_version)
         is_new, job_id = storage.enqueue(payload)
 
         if sync:
@@ -897,6 +899,32 @@ def hook_capture(
                 sys.stdout.flush()
             except Exception:
                 pass
+
+
+@hook_app.command("fence")
+def hook_fence(
+    host: str = typer.Option(..., "--host"),
+    session_id: str = typer.Option(..., "--session-id"),
+):
+    """持久阻断指定测试会话的捕获历史，启用前可在首次工具调用前核验。"""
+    import json
+    from hippo_memory.hooks import CapturedPayload, SpoolStorage, get_adapter
+
+    if not session_id.strip() or len(session_id) > 512:
+        raise typer.BadParameter("session-id 必须非空且不超过 512 字符")
+    try:
+        adapter = get_adapter(host)
+        payload = CapturedPayload(job_id="operator-fence", host=adapter.host_name,
+                                  event="Stop", session_id=session_id, project_dir="")
+        storage = SpoolStorage()
+        storage.block_session(payload)
+        ledger = storage.context_ledger(payload)
+        assert json.loads(ledger.read_text())["blocked"] is True
+    except (ValueError, OSError) as exc:
+        console.print(f"围栏写入失败: {type(exc).__name__}")
+        raise typer.Exit(1)
+    print(json.dumps({"blocked": True, "host": adapter.host_name, "session_id": session_id,
+                      "ledger": str(ledger)}, ensure_ascii=False))
 
 
 @hook_app.command("worker")

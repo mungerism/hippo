@@ -267,6 +267,8 @@ class SpoolStorage:
         """
         if payload.schema_version != self.version:
             raise ValueError("Payload cannot be published to a different queue version")
+        if not self.capture_allowed(payload):
+            return False, payload.job_id
         # Quick non-authoritative tombstone pre-check
         tombstone_file = self.tombstones_dir / f"{payload.job_id}.json"
         if tombstone_file.exists():
@@ -821,7 +823,10 @@ class SpoolStorage:
     def context_ledger(self, job: CapturedPayload, router=None) -> Path:
         from hippo_memory.config import get_default_user_id
 
-        user_id = getattr(router, "default_user_id", None)
+        identity = job.routing_identity
+        user_id = identity.get("user_id") if isinstance(identity, dict) else None
+        if not isinstance(user_id, str):
+            user_id = getattr(router, "default_user_id", None)
         if not isinstance(user_id, str):
             user_id = get_default_user_id()
         key = hashlib.sha256(json.dumps([job.host, user_id, job.session_id]).encode()).hexdigest()
@@ -835,6 +840,20 @@ class SpoolStorage:
             fcntl.flock(lock, fcntl.LOCK_EX)
             old = json.loads(ledger.read_text()) if ledger.exists() else {}
             durable_write_json(ledger, {"blocked": True, "identity": old.get("identity")})
+
+    def capture_allowed(self, job: CapturedPayload, router=None) -> bool:
+        from hippo_memory.capture_policy import capture_disabled
+
+        try:
+            disabled = capture_disabled(job)
+        except Exception:
+            # Invalid opt-out configuration cannot publish a sensitive prefix.
+            self.block_session(job, router)
+            raise
+        if disabled:
+            self.block_session(job, router)
+            return False
+        return True
 
     def prepare_identity(self, job: CapturedPayload, router=None) -> None:
         try:
@@ -854,6 +873,12 @@ class SpoolStorage:
         from hippo_memory.router import ScopeRouter, detect_git_project
         from hippo_memory.config import get_default_user_id
 
+        if not self.capture_allowed(job, router):
+            raise ProjectContextError("CAPTURE_DISABLED")
+        # Frozen identity must not bypass a subsequently persisted session fence.
+        ledger = self.context_ledger(job, router)
+        if ledger.exists() and json.loads(ledger.read_text()).get("blocked"):
+            raise ProjectContextError("CAPTURE_SESSION_BLOCKED")
         if job.routing_identity is not None:
             identity = job.routing_identity
             required = ("namespace", "user_id", "context_key", "mode", "revision", "segment")

@@ -43,3 +43,9 @@
 - **极度轻量与高响应**：开发者在终端感受不到任何停顿（< 50ms 释放），后台单 Worker 默默完成蒸馏；
 - **免维护自愈**：利用 Qdrant 常驻机制与原子文件状态机，即使终端异常中止或机器断电，重启后自动续跑，不丢作业、不重复消费；
 - **符合 Mem0 原生哲学**：无缝复用 Mem0 原生批处理抽取管线与自定义 Prompt（`SESSION_DISTILLATION_PROMPT_V1`），无需重新发明抽取器。
+
+## 2026-10-16：捕获隔离由 Hippo 自身执行
+
+Antigravity 原生验收发现工作区禁用字段未阻止全局 Stop 捕获（Issue #106）。在捕获入口和 Worker 消费前检查工作区 `hippo-memory-distill.enabled=false`，任一工作区停用或配置损坏即拒绝整个捕获段，并持久阻断会话；已有冻结身份不能绕过后续围栏。重新启用需新会话，保持完整历史归属规则，既有作业不自动重放。
+
+新增本机运维命令 `hippo hook fence`，允许验收在首次工具调用前持久落围栏并核验。它不属于 Agent MCP，也不撤销已完成或已进入后端的写入。与宿主的 Hook 合并/缓存行为解耦，正常会话及已有 durability、版本屏障和检索门禁保持不变。操作细节见 [Antigravity 插件运维](/runbooks/antigravity-plugin)。
