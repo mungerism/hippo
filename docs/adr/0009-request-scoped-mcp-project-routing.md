@@ -35,3 +35,10 @@ Pi 工具通过回调 `ctx.cwd` 调用共用安全桥；Hook 保留完整候选�
 MCP 网关因此在两处拒绝仅有启动绑定的自动项目调用：公开通道能力明确为 false 时，以及实际 roots 请求抛出 `NoBackChannelError` 时。返回 `PROJECT_CONTEXT_UNVERIFIED`，不进入任何记忆后端；显式选择与 global 保留。已启用且合法的请求级 Codex metadata 仍可参与解析，但所有来源必须一致。此规则取代前述 stateless 场景下“静态绑定单独足够”的解释，不按客户端名称或版本做特殊放行，也不从会话 ID / artifacts 目录猜测项目。
 
 这是一项防止错误读写的安全修复，不修复宿主自身的连接池或恢复 Antigravity 免选择器路由。没有可靠活动目录的当前宿主仍使用显式项目选择；工作区唯一服务名也需独立实测，不能据配置存在宣称已支持。
+
+
+## 2026-10-16：Antigravity 按事件补充可靠上下文
+
+原生 [Plugin Hook 探针](/runbooks/project-context-extended-acceptance#antigravity-hook-validation)证明，MCP 请求本身缺少目录时，PreToolUse 事件仍能提供当前会话的 `workspacePaths`。采用 [Hippo 路由插件](/runbooks/antigravity-plugin)将该来源送入共用解析器，只在选择器缺失时复制完整内层 `Arguments` 并补 `project_id`。共享服务保持无启动项目绑定；不缓存身份，不改变显式跨项目选择、global 或权限策略。多仓库不能唯一解析时由 Hook 拒绝；插件未执行时无绑定 MCP 仍失败关闭。
+
+这补充了自动上下文来源，不撤销固定绑定不可靠的结论，也不把目录视为鉴权凭据。安装器独立于 `hippo init`，显式启用，可保留配置、备份并停用回滚；Stop 捕获和路由 Hook 分别管理。

@@ -23,6 +23,42 @@ agent_app = typer.Typer(help="宿主扩展的安全记忆桥接，不开放底�
 project_app = typer.Typer(help="检查仓库身份并绑定历史记忆命名空间")
 app.add_typer(agent_app, name="agent")
 app.add_typer(project_app, name="project")
+antigravity_app = typer.Typer(help="安装或停用 Antigravity 按调用自动补参插件")
+app.add_typer(antigravity_app, name="antigravity")
+
+
+@antigravity_app.command("install")
+def antigravity_install(
+    workspace: Optional[Path] = typer.Option(None, "--workspace", help="只在指定工作区安装；默认全局安装"),
+    server_name: Optional[list[str]] = typer.Option(None, "--server-name", help="精确匹配 MCP 服务名，可重复"),
+):
+    from hippo_memory.antigravity import install
+    from hippo_memory.config import HIPPO_HOME
+    import json
+
+    if workspace is not None and not workspace.is_dir():
+        raise typer.BadParameter("工作区目录不存在")
+    root = workspace.resolve() / ".agents" if workspace else Path.home() / ".gemini" / "config"
+    try:
+        result = install(config_root=root, bindings=HIPPO_HOME / "projects.json",
+                         servers=server_name or ["hippo-memory"], backup_root=HIPPO_HOME / "backups")
+    except (ValueError, OSError) as exc:
+        console.print(f"安装失败: {exc}")
+        raise typer.Exit(1)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+@antigravity_app.command("disable")
+def antigravity_disable(workspace: Optional[Path] = typer.Option(None, "--workspace")):
+    from hippo_memory.antigravity import disable
+
+    root = workspace.resolve() / ".agents" if workspace else Path.home() / ".gemini" / "config"
+    try:
+        disable(root)
+    except (ValueError, OSError) as exc:
+        console.print(f"停用失败: {exc}")
+        raise typer.Exit(1)
+    console.print("已停用 hippo-project-routing；重新加载宿主后生效。")
 
 
 def _agent_scope(scope, project, context_dir):

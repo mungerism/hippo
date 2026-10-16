@@ -105,6 +105,7 @@ export default withMermaid(
             { text: '手册索引', link: '/runbooks/' },
             { text: 'Qdrant 本地常驻与部署运维', link: '/runbooks/deployment' },
             { text: '自动项目路由与版本切换', link: '/runbooks/project-context' },
+            { text: 'Antigravity 自动项目路由插件', link: '/runbooks/antigravity-plugin' },
             { text: '自动项目上下文发布与巡检记录', link: '/runbooks/project-context-acceptance' },
             { text: '双项目路由扩展验收', link: '/runbooks/project-context-extended-acceptance' },
             { text: 'Doctor 巡检与环境排障', link: '/runbooks/troubleshooting' },
