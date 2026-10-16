@@ -29,6 +29,8 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 
 2026-10-16 [双项目扩展验收](/runbooks/project-context-extended-acceptance)确认 Codex、Claude、Pi 的实际 A/B 调用通过；Antigravity 隔离失败，当前退回显式选择。Hook 全程实测超过 50ms，目标保留为未达标项。
 
+MCP 无回传通道且仅有启动绑定时返回 `PROJECT_CONTEXT_UNVERIFIED`；该检查也覆盖不声明 roots 的请求，显式选择和有效 global 保留。
+
 四宿主共用项目映射、scope 语义与检索门禁；缺少可靠上下文时保留显式项目选择。Antigravity 的多文件夹 Project 不自动合并成一个 Hippo 项目命名空间。
 
 候选项目既可来自请求活动目录，也可来自专属启动绑定；有候选时允许多个 roots，只做成员校验。后台需在合并作业前固定身份并验证捕获段范围，新作业使用独立版本队列；升级先切消费者，回滚禁止旧 Worker 重新解释新格式。详细契约与验收见 RFC 第 4.2、6.1、6.2 节。

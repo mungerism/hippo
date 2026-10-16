@@ -27,3 +27,11 @@ Pi 工具通过回调 `ctx.cwd` 调用共用安全桥；Hook 保留完整候选�
 ## 2026-10-16：Antigravity 连接归属验收失败
 
 [扩展验收](/runbooks/project-context-extended-acceptance)发现 Antigravity 2.23.1 在两个 Project 间复用同名 MCP 连接，B 查询返回 A 的测试身份；未执行 B 写入。不同服务名未被发现，尚无可用的已验证绕行。本机已获授权移除固定 root，回到显式 `project_id`。专属部署绑定能力保留，但只有实际连接独占经 A/B 并发、切换和重连验证后才能启用。此结论收窄前次单项目验收范围，不放宽解析器的失败门禁。
+
+## 2026-10-16：无回传通道不能仅凭启动绑定路由
+
+[Issue #101](https://github.com/mungerism/hippo/issues/101)的原生探针进一步观察到：Antigravity 请求可不声明 roots，SDK `can_send_request=false`；metadata 只有会话、产物目录和协议字段，没有活动仓库。先前仅捕获 `NoBackChannelError` 的兼容处理不足以覆盖此分支。
+
+MCP 网关因此在两处拒绝仅有启动绑定的自动项目调用：公开通道能力明确为 false 时，以及实际 roots 请求抛出 `NoBackChannelError` 时。返回 `PROJECT_CONTEXT_UNVERIFIED`，不进入任何记忆后端；显式选择与 global 保留。已启用且合法的请求级 Codex metadata 仍可参与解析，但所有来源必须一致。此规则取代前述 stateless 场景下“静态绑定单独足够”的解释，不按客户端名称或版本做特殊放行，也不从会话 ID / artifacts 目录猜测项目。
+
+这是一项防止错误读写的安全修复，不修复宿主自身的连接池或恢复 Antigravity 免选择器路由。没有可靠活动目录的当前宿主仍使用显式项目选择；工作区唯一服务名也需独立实测，不能据配置存在宣称已支持。
