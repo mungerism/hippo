@@ -1,9 +1,15 @@
 # [RFC-0003] 宿主自动项目上下文与稳定记忆命名空间
 
 - **作者**：Codex
-- **状态**：实现候选；设计已复审，代码与隔离测试已落地，真实宿主验收及生产启用待完成
+- **状态**：核心已实现，本机启用 canonical / v2；2026-10-16 扩展验收部分通过，Antigravity 多项目自动绑定与 Hook 时延未通过，见[扩展记录](/runbooks/project-context-extended-acceptance)
 - **创建日期**：2026-10-15
 - **关联**：[Issue #93](https://github.com/mungerism/hippo/issues/93)、[ADR-0009](/adr/0009-request-scoped-mcp-project-routing)
+
+## 发布结果（2026-10-15）
+
+[PR #95](https://github.com/mungerism/hippo/pull/95) 实现本方案，[PR #98](https://github.com/mungerism/hippo/pull/98) 补齐 Antigravity stateless 协议兼容。本机部署提交为 `3bb67f3`，已启用 canonical、12 个历史命名空间绑定及 v2 Worker / Hook。软件默认仍为 legacy / v1，Codex metadata 仍需显式启用。
+
+首次单项目验收中，Codex、Claude Code、Pi、Antigravity 工作区插件均曾省略项目选择器完成召回。后续双项目验收确认前三者实际调用通过，但 Antigravity 同名连接跨 Project 复用，隔离失败，本机已撤下固定绑定并改为显式选择。本记录不代表所有宿主版本、多窗口组合及性能目标均已实测；后续章节保留设计与完整验收目标，具体证据和未覆盖范围以[发布记录](/runbooks/project-context-acceptance)为准。
 
 ## 1. 背景与目标
 
@@ -138,7 +144,11 @@ roots 的匹配按规范化仓库身份完成，不用显示名称、路径字�
 
 Antigravity 的 app/CLI/IDE 要分别探测初始化能力和连接生命周期。官方文档确认 MCP 全局及工作区配置、stdio 参数/env/cwd，但未承诺当前版本向 server 提供 roots 或活动项目 metadata；不能仅凭“支持 MCP”认定可以自动定位。Antigravity Project 还允许包含多个仓库，不直接等于 Hippo 的 Git 项目身份。[MCP 官方说明](https://antigravity.google/docs/mcp)、[Projects 官方说明](https://antigravity.google/docs/projects/)
 
-接入顺序：支持 roots 的连接使用通用规则；不支持时，在受支持的工作区 MCP 配置中生成该工作区专属的 `hippo serve --project-root /abs/repo`。绑定路径由本地安装器/部署者写入，模型仍无需填 ID。只设置 MCP `cwd` 不等于声明项目绑定，仍不从服务 cwd 推导身份。
+**当前发布限制（2026-10-16）**：本机 2.23.1 未通过上述连接归属条件，暂不启用工作区自动绑定；不同服务名也未被实际发现。保留显式项目选择，修复跟踪 [Issue #101](https://github.com/mungerism/hippo/issues/101)。以下为通过宿主验收后才可使用的接入设计。
+
+**后续验证**：工作区 Plugin 的 `PreToolUse` 在本机可读取 `workspacePaths`，并改写 `call_mcp_tool.args.Arguments`，自动补入每次调用的 `project_id`。A/B、global、多根拒绝、重连及并发纯路由验证通过，见[Hook 接线验证](/runbooks/project-context-extended-acceptance#antigravity-hook-validation)。该路径尚未产品化或部署，不依赖专属 MCP 连接，也不恢复 stateless 静态绑定兜底。
+
+接入顺序：支持 roots 的连接使用通用规则；有回传通道但未提供 roots 时，可在经验证独占的工作区连接中配置 `hippo serve --project-root /abs/repo`。绑定路径由本地安装器/部署者写入。若 SDK 明确没有回传通道，静态绑定单独不足以证明调用归属，网关返回 `PROJECT_CONTEXT_UNVERIFIED`；须有合法请求级目录或显式项目选择。只设置 MCP `cwd` 不等于声明项目绑定，仍不从服务 cwd 推导身份。
 
 必须验证工作区配置是否为不同工作区创建/重建独立子进程，以及是否被同名全局 server 覆盖。无法证明专属连接时，禁用该绑定模式，保留显式项目选择；不能把一个仓库的固定 root 写入全局配置，再让所有聊天共用。切换工作区时重建绑定连接或使用新的请求级上下文，不把新目录写入旧共享 server 的全局状态。
 
@@ -311,3 +321,8 @@ Pi 额外验证：子进程安装位置与 ctx.cwd 不同、两个并发上下�
 当前未实现可信转录偏移分段：上下文缺失、歧义、冲突或实际项目/路由模式切换会持久化阻断该会话后续自动蒸馏，必须开启新的独立会话。无关绑定造成的映射 revision 变化只阻止合并，不阻断身份未变的会话。已固定作业重试继续使用原身份。
 
 隔离测试覆盖临时 Git 仓库与 worktree、MCP initialize/call_tool 线协议、模拟后端零调用、队列切换与恢复。Pi 0.83.0 的实际扩展加载器已验证工具回调与 `ctx.cwd` 桥接。上述验证不等同于四宿主真实聊天的端到端验收；第 9 节 P0 仍是启用实验来源与 canonical 的发布条件。
+
+
+### Antigravity Plugin 产品化补充（2026-10-16）
+
+[正式插件](/runbooks/antigravity-plugin)落地上述 PreToolUse 验证路径，以共享无绑定 MCP 配合逐调用 `workspacePaths` 自动补参。显式选择器保持优先，安装及停用通过独立命令完成；原生路由探针与正式记忆后端验收分开记录。此路径不依赖同名 MCP 连接独占，不恢复固定 root。
