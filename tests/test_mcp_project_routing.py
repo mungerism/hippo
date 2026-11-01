@@ -64,11 +64,12 @@ class TestMcpProjectRouting(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def context(self, uris=None, *, supported=True, error=None):
+    def context(self, uris=None, *, supported=True, error=None, can_send_request=True):
         roots = [
             types.Root(uri=uri, name="Misleading display name") for uri in (uris or [])
         ]
         session = SimpleNamespace(
+            can_send_request=can_send_request,
             client_capabilities=types.ClientCapabilities(
                 roots=types.RootsCapability() if supported else None
             ),
@@ -154,6 +155,89 @@ class TestMcpProjectRouting(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("repository-b", results[0])
         self.assertNotIn("repository-a", results[1])
         self.assertEqual(ctx.session.list_roots.await_count, 2)
+
+    async def test_shared_stateless_binding_rejects_project_calls_before_backend(self):
+        from mcp.shared.exceptions import NoBackChannelError
+
+        # Antigravity may route callers A and B through the same A-bound
+        # connection. Without request context, even a valid startup root cannot
+        # prove which caller owns the request (#101).
+        ctx = self.context(error=NoBackChannelError("private peer detail"))
+        binding = (("operator_binding", str(self.repo_a), False),)
+        self.engine.get_recent_memories = MagicMock(return_value=[])
+        self.engine.add_explicit = MagicMock(return_value={"status": "success"})
+        with patch.object(mcp_server, "project_bindings", binding):
+            calls = []
+            for _caller in ("A", "B", "A"):
+                for scope in ("project", "all"):
+                    for query in ("fixture query", "今天新增了什么记忆"):
+                        calls.append(mcp_server.call_tool("search_memories", {
+                            "query": query, "scope": scope,
+                        }, ctx))
+                calls.append(mcp_server.call_tool("add_memory", {
+                    "text": "synthetic shared-connection fact",
+                }, ctx))
+            results = await asyncio.gather(*calls)
+        for result in results:
+            output = result.content[0].text
+            self.assertIn("PROJECT_CONTEXT_UNVERIFIED", output)
+            self.assertNotIn("fact for", output)
+            self.assertNotIn("private peer detail", output)
+            self.assertNotIn(str(self.repo_a), output)
+        self.store.search.assert_not_called()
+        self.engine.get_recent_memories.assert_not_called()
+        self.engine.add_explicit.assert_not_called()
+
+    async def test_stateless_binding_without_roots_capability_fails_before_backend(self):
+        # Actual Antigravity requests may omit roots entirely, so waiting for
+        # list_roots() to throw leaves an unsafe second fallback path.
+        ctx = self.context(supported=False, can_send_request=False)
+        self.engine.get_recent_memories = MagicMock(return_value=[])
+        self.engine.add_explicit = MagicMock(return_value={"status": "success"})
+        with patch.object(mcp_server, "project_bindings", (("operator_binding", str(self.repo_a), False),)):
+            for scope in ("project", "all"):
+                for query in ("fixture query", "今天新增了什么记忆"):
+                    result = await mcp_server.call_tool("search_memories", {"query": query, "scope": scope}, ctx)
+                    output = result.content[0].text
+                    self.assertIn("PROJECT_CONTEXT_UNVERIFIED", output)
+            result = await mcp_server.call_tool("add_memory", {"text": "synthetic fixture"}, ctx)
+            self.assertIn("PROJECT_CONTEXT_UNVERIFIED", result.content[0].text)
+        ctx.session.list_roots.assert_not_awaited()
+        self.store.search.assert_not_called()
+        self.engine.get_recent_memories.assert_not_called()
+        self.engine.add_explicit.assert_not_called()
+
+    async def test_dedicated_binding_keeps_existing_back_channel_contract(self):
+        ctx = self.context(supported=False, can_send_request=True)
+        with patch.object(mcp_server, "project_bindings", (("operator_binding", str(self.repo_a), False),)):
+            output = await self.search(ctx=ctx, scope="project")
+        self.assertIn("fact for repository-a", output)
+        self.assertNotIn("fact for repository-b", output)
+        ctx.session.list_roots.assert_not_awaited()
+
+    async def test_shared_stateless_connection_keeps_explicit_and_global_operations(self):
+        from mcp.shared.exceptions import NoBackChannelError
+
+        ctx = self.context(supported=False, can_send_request=False,
+                           error=NoBackChannelError("no back channel"))
+        self.engine.add_explicit = MagicMock(return_value={"status": "success"})
+        binding = (("operator_binding", str(self.repo_a), False),)
+        with patch.object(mcp_server, "project_bindings", binding):
+            for project in ("repository-a", "repository-b", "repository-a"):
+                result = await self.search(ctx=ctx, scope="project", project_id=project)
+                self.assertIn(f"fact for {project}", result)
+                self.assertNotIn("fact for global", result)
+                added = await mcp_server.call_tool("add_memory", {
+                    "text": "explicit fixture", "project_id": project,
+                }, ctx)
+                self.assertEqual(json.loads(added.content[0].text)["status"], "success")
+                self.assertEqual(self.engine.add_explicit.call_args.kwargs["project_id"], project)
+            global_result = await self.search(ctx=ctx, scope="global")
+            self.assertIn("fact for global", global_result)
+            self.assertNotIn("fact for repository-", global_result)
+            await mcp_server.call_tool("add_memory", {"text": "global fixture", "scope": "global"}, ctx)
+            self.assertEqual(self.engine.add_explicit.call_args.kwargs["scope"], "global")
+        ctx.session.list_roots.assert_not_awaited()
 
     async def test_unavailable_ambiguous_or_invalid_roots_fail_before_storage(self):
         non_repo = self.repo_a.parent / "not-a-repository"

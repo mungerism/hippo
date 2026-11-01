@@ -1,31 +1,31 @@
-name: 💡 Feature Request
-description: Suggest an idea or proposal for Hippo
-title: "[Feat]: "
+name: 💡 功能建议
+description: 为 Hippo 提出想法或改进方案
+title: "[功能]: "
 labels: ["needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Have an idea? (English is preferred, Chinese is welcome / 欢迎中英文提案)
-        Remember Hippo's core tenet: A lightweight wrapper over Mem0 focusing on spec alignment and minimal dependencies.
+        欢迎提出建议！标题和正文默认使用中文，技术标识保留原文。
+        请遵循 Hippo 的核心原则：轻量封装 Mem0，对齐官方规范，保持依赖精简。
   - type: textarea
     id: problem
     attributes:
-      label: Problem & Motivation
-      description: What problem are you trying to solve?
-      placeholder: In the context of ..., currently ...
+      label: 问题与动机
+      description: 你希望解决什么问题？
+      placeholder: 在……场景下，目前……
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed Solution
-      description: How should this be implemented or improved?
-      placeholder: I propose to add / change ...
+      label: 建议方案
+      description: 你建议如何实现或改进？
+      placeholder: 建议新增或调整……
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives Considered
-      description: Any alternative solutions or features you have considered?
+      label: 考虑过的替代方案
+      description: 你还考虑过哪些方案或现有功能？

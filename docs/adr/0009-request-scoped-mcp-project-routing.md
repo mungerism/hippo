@@ -21,3 +21,24 @@ MCP 的自动 roots 和显式路径检测均以过滤掉全部 `GIT_*` 变量的
 [RFC-0003](/rfcs/0003-automatic-project-context) 的实现扩展了上述来源限制：允许明确启用的 Codex 请求 metadata、本地专属 stdio 启动时捕获的 `CLAUDE_PROJECT_DIR`，以及运维者传入的 `serve --project-root`。Claude 环境在 dotenv 载入前固定；普通仓库环境变量、服务 cwd 与最近项目不作为 MCP 来源。存在多个 roots 时，可信候选必须属于其中一个仓库；没有候选则 roots 必须唯一，各来源冲突时失败。
 
 Pi 工具通过回调 `ctx.cwd` 调用共用安全桥；Hook 保留完整候选，缺失或歧义时不能取进程 cwd 或首个工作区。新增 opt-in canonical 模式，以本地 Git common directory 为身份、显式映射保留历史空间、未绑定仓库使用完整哈希。默认保持 legacy；启用前须执行队列切换与历史绑定屏障，详见[运维手册](/runbooks/project-context)。这些规则取代本文原先对来源和命名空间的绝对限制，不改变请求隔离、scope、预算和 Mem0 存储契约。
+
+本机已于 2026-10-15 完成上述切换及四宿主真实召回验收，见[发布记录](/runbooks/project-context-acceptance)。Antigravity 的 stateless 连接会明确抛出 SDK `NoBackChannelError`；仅将这一状态视为 roots 不可用，继续要求有效独立上下文。普通 roots 异常、超时、空列表或冲突仍然失败。该兼容修订不改变软件默认开关。
+
+## 2026-10-16：Antigravity 连接归属验收失败
+
+[扩展验收](/runbooks/project-context-extended-acceptance)发现 Antigravity 2.23.1 在两个 Project 间复用同名 MCP 连接，B 查询返回 A 的测试身份；未执行 B 写入。不同服务名未被发现，尚无可用的已验证绕行。本机已获授权移除固定 root，回到显式 `project_id`。专属部署绑定能力保留，但只有实际连接独占经 A/B 并发、切换和重连验证后才能启用。此结论收窄前次单项目验收范围，不放宽解析器的失败门禁。
+
+## 2026-10-16：无回传通道不能仅凭启动绑定路由
+
+[Issue #101](https://github.com/mungerism/hippo/issues/101)的原生探针进一步观察到：Antigravity 请求可不声明 roots，SDK `can_send_request=false`；metadata 只有会话、产物目录和协议字段，没有活动仓库。先前仅捕获 `NoBackChannelError` 的兼容处理不足以覆盖此分支。
+
+MCP 网关因此在两处拒绝仅有启动绑定的自动项目调用：公开通道能力明确为 false 时，以及实际 roots 请求抛出 `NoBackChannelError` 时。返回 `PROJECT_CONTEXT_UNVERIFIED`，不进入任何记忆后端；显式选择与 global 保留。已启用且合法的请求级 Codex metadata 仍可参与解析，但所有来源必须一致。此规则取代前述 stateless 场景下“静态绑定单独足够”的解释，不按客户端名称或版本做特殊放行，也不从会话 ID / artifacts 目录猜测项目。
+
+这是一项防止错误读写的安全修复，不修复宿主自身的连接池或恢复 Antigravity 免选择器路由。没有可靠活动目录的当前宿主仍使用显式项目选择；工作区唯一服务名也需独立实测，不能据配置存在宣称已支持。
+
+
+## 2026-10-16：Antigravity 按事件补充可靠上下文
+
+原生 [Plugin Hook 探针](/runbooks/project-context-extended-acceptance#antigravity-hook-validation)证明，MCP 请求本身缺少目录时，PreToolUse 事件仍能提供当前会话的 `workspacePaths`。采用 [Hippo 路由插件](/runbooks/antigravity-plugin)将该来源送入共用解析器，只在选择器缺失时复制完整内层 `Arguments` 并补 `project_id`。共享服务保持无启动项目绑定；不缓存身份，不改变显式跨项目选择、global 或权限策略。多仓库不能唯一解析时由 Hook 拒绝；插件未执行时无绑定 MCP 仍失败关闭。
+
+这补充了自动上下文来源，不撤销固定绑定不可靠的结论，也不把目录视为鉴权凭据。安装器独立于 `hippo init`，显式启用，可保留配置、备份并停用回滚；Stop 捕获和路由 Hook 分别管理。
