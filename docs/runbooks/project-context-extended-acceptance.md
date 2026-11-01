@@ -1,0 +1,157 @@
+# 双项目路由扩展验收（2026-10-16）
+
+本次扩展验收的结论是**部分通过**：Codex、Claude Code、Pi 的双项目真实调用通过；Antigravity 跨 Project 的连接隔离失败；Hook 进程退出超过 50ms。不能据此宣称四宿主全部通过，也不应继续向当前 Antigravity 共享连接部署固定项目绑定。
+
+本记录补充并收窄[首次发布验收](/runbooks/project-context-acceptance)的适用范围。运行时沿用已部署的 `3bb67f3`，本次仓库变更只有文档与独立基准脚本。非 Git 支持见草稿 [RFC-0004](/rfcs/0004-non-git-workspace-context)，尚未实现或部署。
+
+## 环境与证据边界
+
+| 项目 | 实际环境 |
+| --- | --- |
+| Codex CLI | 0.155.1，独立临时会话，启用请求 metadata |
+| Claude Code | 2.1.216，独立 stdio 配置，原始项目环境 |
+| Pi | CLI 与加载器 package.json 均为 0.99.2；安装目录仍名为 0.83.0，不以目录名判断版本 |
+| Antigravity | 原生应用 2.23.1，两个本地 Project |
+| 仓库 | 两个不同路径、相同 basename 的 Git 仓库 A/B；另有 A 的 linked worktree |
+| 数据 | 独立验收用户与集合 `hippo_acceptance_hosts_20261015`，不使用生产记忆作合成写入目标 |
+
+实际宿主调用通过仅做日志观察的包装器进入已安装的 Hippo。包装器记录解析身份、是否传选择器、操作 ID 和时间，不替换解析结果或后端。逐条用实际 Qdrant payload 的 `agent_id` / `user_id` 核对返回 ID，不能只相信模型文字或进程退出码。
+
+初始只有 A/B/global 三条事实时，默认门禁因 BM25 约 0.035 低于 0.15 拒绝召回，尽管语义相似度约 0.92。随后在隔离集合加入 20 条无关合成背景事实，使该极小语料下的检索可用；没有关闭或调低门禁。此过程证明的是这套合成语料上的路由行为，不是检索质量评测。
+
+## 真实宿主结果
+
+| 宿主 | 实际操作 | 结果 |
+| --- | --- | --- |
+| Codex A/B | 每项目 search → add → search → 时间线；省略项目选择器，额外提供另一仓库作为 root | 8 次操作通过，返回身份正确 |
+| Claude A/B | 每项目上述 4 次操作；独立 stdio，省略选择器 | 8 次操作通过，返回身份正确 |
+| Pi A/B | 每项目上述 4 次操作；原生扩展读取回调 cwd，省略选择器 | 8 次操作通过，返回身份正确 |
+| Antigravity A | 原生工作区绑定，搜索、写入与时间线 | 单项目通过，不代表连接独占 |
+| Antigravity B | 同名服务，只读搜索 | **失败：返回 A 的 ID / namespace，未执行 B 写入** |
+| Antigravity 唯一服务名 | 改为 `hippo-acceptance-a/b`，显式注册插件并新开聊天 | 未发现新工具，未证明该绕行可用 |
+
+六个 CLI 进程并发启动；每个宿主 A/B 的实际工具窗口分别重叠约 Codex 16.30s、Claude 10.64s、Pi 17.35s。六个工具窗口没有共同交集，因此不把它表述为“六会话同时调用”。搜索的 project/all/global 隔离另由下述协议测试验证。
+
+Antigravity B 的只读调用进入了 A 的同一个探针 PID，解析结果为 `acceptance_a`。可证明的是当前应用/配置下连接发生跨 Project 复用；尚不能将根因精确归结为某个缓存键或某层插件注册逻辑。问题跟踪：[Issue #101](https://github.com/mungerism/hippo/issues/101)。
+
+[官方 MCP 说明](https://antigravity.google/docs/mcp)与[插件说明](https://www.antigravity.google/docs/plugins)描述配置与工具发现，但不足以替代连接隔离实测。只设置不同工作区配置，或只更换服务名，都不能作为本机已验收成功的依据。
+
+## 协议与加载器验证
+
+以下操作连接真实 Hippo 与隔离后端，但不是额外的原生聊天验收：
+
+- MCP SDK stdio：同一连接 A → B → A、8 个并发 A/B 调用、项目时间线隔离、逐次 roots 变化拒绝与恢复。
+- MCP SDK stdio：4 个并发 Claude / 运维专属绑定连接，关闭后重连不沿用旧身份。
+- 已安装 Pi 加载器与扩展：同一实例 A → B → A、6 个并发回调、linked worktree 归 A、缺失 cwd 拒绝、无 cwd 的 global 成功；桥接真实已部署 CLI。
+
+这些检查通过，覆盖 Hippo 的逐请求行为，不代表 Antigravity 会为两个 Project 正确建立独立连接。相关项目解析与队列单元回归 21 项通过。
+
+## 延迟实测
+
+每项 30 次，单位 ms；解析器计时不含导入或 roots 网络往返，Hook 为新进程启动至退出的全程时间，含持久化。独立临时队列持有 Worker 锁，未启动 Worker 或调用记忆后端。
+
+| 指标 | 中位数 | p95 | 最大值 | 判定 |
+| --- | ---: | ---: | ---: | --- |
+| 单候选解析（预热后） | 11.15 | 12.38 | 12.97 | p95 ≤ 50，通过 |
+| 候选 + 两 roots（预热后） | 33.26 | 36.90 | 37.16 | p95 ≤ 50，通过 |
+| Hook 新进程全程 | 77.67 | 80.88 | 82.13 | 全程 ≤ 50，**未通过** |
+
+此前独立一轮 30 次测量，单候选解析 p95 为 15.22ms，Hook p95 为 105.41ms、最大 138.67ms；两轮均显示 Hook 未达标。这里没有验证完整宿主传输链路的解析 p95，不能把预热解析器结果推广为端到端时延。
+
+复跑本仓库脚本，使用部署解释器和部署入口：
+
+```bash
+/path/to/deployed/python -m benchmarks.project_context_latency \
+  --hippo /path/to/deployed/hippo --samples 30 --check
+```
+
+`--check` 在任一实测目标失败时退出 1；本次预期如此。脚本同时核验每次捕获成功并实际持久化独立作业，不把快速失败当成成功样本。问题跟踪：[Issue #102](https://github.com/mungerism/hippo/issues/102)。优化须保留原子发布、fsync 和版本屏障，不能放宽现有目标以消除告警。
+
+## 缓解、证据保留与后续门禁
+
+用户已明确授权移除本机 Antigravity 的固定 `--project-root` 并仅重连 Hippo MCP。工作区插件配置改为 `hippo serve`；全局同名连接同样不绑定项目。没有可靠 roots / 活动上下文的项目操作须显式传 `project_id`。此操作不重启 Qdrant、Worker 或其他宿主。
+
+原生应用重连后的两次只读调用已验证：省略选择器返回 `PROJECT_CONTEXT_MISSING`；显式传 Hippo 仓库路径后成功返回 `Project: hippo`，工具参数与实际返回 ID 均已核对。全局 Hippo 条目仅增加 `PYTHONUNBUFFERED=1` 以触发该服务配置重载，其他 MCP 条目保持原样。
+
+原配置保存在本机 `~/.hippo/backups/antigravity-explicit-20261015T231713Z`。原始测试证据保存在 `~/.hippo/acceptance/host-routing-20261016`，不提交真实记忆、凭据或原始宿主报文到仓库。36 条合成记录已逐条核对用户、前缀和完整备份后随隔离测试集合清理，临时凭据副本已移除；生产集合未做删除。审计分别见 `cleanup-audit.json` 与 `antigravity-mitigation-verification.json`。
+
+重新启用 Antigravity 自动绑定前，必须在实际应用中完成 A/B 交替、并发、重连，逐次核对真实返回 ID 和写入 namespace；唯一服务名只有在真实工具发现及路由均通过后才可作为方案。非 Git 绑定不能绕过这一宿主发布条件。现存 9 条非 Git dead 作业继续隔离，不批量 retry 或移除围栏。
+
+## Issue #101 网关防护候选复验
+
+随后修订在网关阻断危险兜底，不改变 Antigravity 的连接池：SDK 明确 `can_send_request=false`，或 roots 请求抛出 `NoBackChannelError` 时，只有启动绑定而没有合法请求级目录的调用返回 `PROJECT_CONTEXT_UNVERIFIED`。第一项在 roots 未声明时也检查；显式项目选择与 global 保留，合法 metadata 与绑定冲突仍拒绝。保护不按宿主名称或版本放行。
+
+原生 Antigravity 2.23.1 使用临时的**纯路由 MCP 探针**载入候选解析器，不连接任何记忆后端。真实请求可不声明 roots，且 `can_send_request=false`；只观察到会话、产物目录及协议 metadata，没有活动 Git 目录。不能从会话 ID 或 artifacts 路径猜测项目。
+
+| 复验 | 实际结果 |
+| --- | --- |
+| 仅捕获 `NoBackChannelError` 的初版候选 | roots 未声明时仍错误接受 A 绑定，复现遗漏分支 |
+| 完整保护，A / B 省略选择器 | 两边均返回 `PROJECT_CONTEXT_UNVERIFIED`，不选 A 作为默认项目 |
+| 同一 A 绑定进程，显式选择 A / B | 分别返回 `isolation_a` / `isolation_b` |
+| 重建测试连接 | 三个候选进程上的结果一致，无旧身份兜底 |
+| 两聊天普通交替调用 | 每边四次结果正确；实际窗口未重叠，不计作并发证据 |
+| 两聊天同步屏障 | 两个不同会话的请求在同一进程中实际重叠，两边均安全拒绝 |
+
+完整候选共完成 15 次原生探针调用，记录与当前解析器源码 SHA-256 一致，后端调用数始终为零。同步屏障只用于确认并发，不计入时延评测。该证据验证真实宿主请求经过候选解析器的行为，不冒充生产记忆读写验收；实际工具的搜索、时间线、写入在单元回归中验证拒绝发生于后端调用之前。
+
+测试服务已从配置移除，所有匹配的临时探针进程已停止，其他 MCP 条目保留。证据位于本机 `~/.hippo/acceptance/issue101-20261016`，不含全局配置副本或凭据。本次未替换生产运行时、重启 Worker / Qdrant 或改动记忆集合，现有生产无固定 root 的显式选择配置继续使用。
+
+该修复收紧 Hippo 可控制的失败门禁；Antigravity 免选择器路由仍待宿主提供可验证的请求目录或连接归属，不将其宣称为已恢复。Issue #101 继续跟踪剩余宿主能力，Hook 时延问题 #102 也保持开放。
+
+## Plugin + PreToolUse 自动补参验证通过 {#antigravity-hook-validation}
+
+2026-10-16 后续原生验证确认了一条可行的接线：保留无固定 root 的共享 MCP 服务，由工作区 Plugin 的 `PreToolUse` Hook 根据**每次事件**的 `workspacePaths` 解析唯一 Git 项目，并在执行前自动补入现有 `project_id` 参数。Agent 全程省略项目选择器。
+
+这修正了“只能等待 MCP 请求直接提供活动目录”的限制判断：MCP metadata 没有该目录，但 Hook 事件可以提供工作区线索。先前固定连接方案的失败仍成立，不能用它推导所有 Plugin 路径都不可用。本次没有恢复静态 root 兜底。
+
+### 实际输入与改写位置
+
+工作区 Plugin 的 `SessionStart` 标记与 `PreToolUse` 均在原生应用 2.23.1 生效。实际 MCP 事件名是 `call_mcp_tool`，其参数不是扁平的工具参数：
+
+```json
+{
+  "toolCall": {
+    "name": "call_mcp_tool",
+    "args": {
+      "ServerName": "hippo-hook-probe-101",
+      "ToolName": "search_memories",
+      "Arguments": {"query": "HHP20261016 example", "scope": "project"}
+    }
+  },
+  "workspacePaths": ["/abs/test-repo"]
+}
+```
+
+Hook 返回 `{"decision":"allow","overwrite":{"Arguments":{...}}}`：复制完整的原 `Arguments` 后补 `project_id`，不能只在外层添加该字段，也不能因浅合并而丢失 query、scope 等参数。只匹配指定 MCP 服务及 Hippo 工具，其他工具保持原策略；global 不强制补项目。官方契约见 [Plugin](https://antigravity.google/docs/plugins)、[Hook](https://antigravity.google/docs/hooks#pretooluse)，这里的 MCP 包装字段由本机实际报文确认。
+
+### 原生验证结果
+
+| 场景 | 实际结果 |
+| --- | --- |
+| 仅观察、关闭补参 | Agent 未传 ID，MCP 返回 `PROJECT_CONTEXT_MISSING`，形成对照 |
+| A/B 搜索与合成 add | Hook 输入均无选择器；同一 MCP 进程实际收到 `hook_a` / `hook_b`，解析正确 |
+| project / all / global | 项目调用补参数；global 保留无项目调用 |
+| 一个原生 Project 挂载 A/B 两仓库 | Hook 返回 `deny / PROJECT_CONTEXT_AMBIGUOUS`，请求未到达 MCP |
+| 多仓库下的 global | 仍正常通过，不误选某个项目 |
+| MCP 进程重建、返回 A | 新进程仍按当前事件补参，不沿用 B 身份 |
+| A/B 两聊天同时在途 | 测试屏障确认两个真实请求在同一进程重叠，各自收到正确选择器 |
+| 最后关闭补参 | 同一进程重新返回缺项目错误，不缓存最近项目 |
+
+共核验 12 次实际 MCP 探针调用及 1 次在 MCP 前被拒绝的调用。校验脚本逐一关联 Hook 的原始 `Arguments`、改写输出和服务实际收到的参数，确认 Agent 没有自行补 ID，原 query/text/scope 保留。另有 5 个本地脚本控制用例，不计入原生验收；本机 `agy plugin list` 未列出该工作区插件，但原生 Hook 标记与执行记录证明其加载，不能以 CLI 安装列表代替实际组件验证。
+
+所有调用均为无记忆后端的路由探针，合成 add 不保存事实，未改动 Qdrant 集合，也不等同于生产记忆读写验收。屏障仅用于验证并发，不用于时延结论。两根目录恢复后再次观察到单根 B；临时 MCP 条目已移除、测试进程已停止、工作区测试插件已禁用，全局 MCP 文件精确恢复原字节，其他生产条目未改。
+
+本机证据位于 `~/.hippo/acceptance/antigravity-hook-20261016`，包含插件快照、纯路由服务、Hook/服务关联记录、`verification-report.json` 与 `cleanup-audit.json`；不含凭据或全局配置副本。复核：
+
+```bash
+python ~/.hippo/acceptance/antigravity-hook-20261016/verify.py
+```
+
+结论是**方案在本机路由层面可行，尚未产品化或启用生产 Plugin**。下一步应封装正式插件与安装接线，复用统一解析器，保留多根歧义拒绝和无绑定 MCP 的失败门禁，再做真实读写发布验收。MCP 线上参数仍携带 `project_id`，但由宿主插件自动补齐，用户和 Agent 都不需要手填。
+
+
+## 正式 Plugin 发布与捕获审计更正
+
+上述探针“无记忆后端 / 后端调用为零”仅描述探针服务本身。后续[正式插件发布验收](/runbooks/antigravity-plugin#release-20261016)发现全局 Stop 捕获仍会蒸馏测试会话，工作区停用字段未提供预期隔离；因此不能把探针无后端推导为整场验收未产生生产集合记录。两个临时仓库空间的 30 条合成蒸馏事实已备份、围栏阻断并按 ID 清理，空间剩余 0 条；详见发布记录。此前独立验收集合的清理证据保持有效。
+
+正式模块及安装命令已随 PR #105 合并、部署并完成真实 A/B 读写、共享进程并发、重连和 global 验收；这取代前述“尚未产品化”的时间点状态。固定 root 方案仍禁用。全局与工作区安装范围应单独核验，不以修改文件或新建会话证明已停用。

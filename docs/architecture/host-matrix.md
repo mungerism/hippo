@@ -8,23 +8,28 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 
 | 宿主 (Host) | 交互形态 | 捕获管道 (Ingestion) | 检索机制 (Recall) | 专属配置 / 约定 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Codex** | CLI 终端工具 | `hippo hook capture --host codex` (Session End Hook) | 每次会话启动前通过 MCP `search_memories` 自动注入 | 自动识别当前 Git Repo 作为 `project_id` |
-| **Pi** | 极简终端 Agent | 针对 `session_end` / `turn_end` 的专用适配器 | 通过 Tool Call 按需检索 | 内存隔离与会话标识注入 |
+| **Codex** | 桌面 / CLI | `hippo hook capture --host codex` | MCP 按需调用 `search_memories` | 启用 `--codex-context` 后使用请求目录；否则使用 roots 或显式选择 |
+| **Claude Code** | CLI 终端工具 | 本方案未新增 Hippo 捕获协议 | MCP 按需检索 | 专属 stdio 启动时捕获 `CLAUDE_PROJECT_DIR`，结合 roots 校验 |
+| **Pi** | 极简终端 Agent | 原生扩展的 `agent_settled` / `session_shutdown` 回调 | 通过 Tool Call 按需检索 | 工具与事件逐次读取 `ctx.cwd` |
 | **ZCode** | 终端编码套件 | 监听本地 `.zcode` 记忆变动或通过 CLI 迁移 | 统一注入 Prompt 上下文 | 支持通过 `hippo migrate-zcode` 迁移精细记忆 |
-| **Antigravity** | Agentic IDE 助手 | Antigravity MCP Server | 启动任务前必须检索 `scope: 'all'` 记忆 | 遵循 `AGENTS.md` 约定的记忆安全与执行隔离规则 |
+| **Antigravity** | Agentic IDE 助手 | Stop Hook | MCP 按需检索，任务前遵循 `AGENTS.md` | PreToolUse 逐调用 workspacePaths 自动补参；保留 roots / 显式选择 |
 
 ---
 
-## 自动项目上下文（实现候选）
+## 自动项目上下文（已实现）
 
-[RFC-0003](/rfcs/0003-automatic-project-context) 将 Codex、Claude Code、Antigravity、Pi 列为同一发布的兼容与验收范围。下表接线已实现，默认保持 legacy 命名空间，四宿主真实聊天验收仍待完成。部署以[自动项目路由运维](/runbooks/project-context)和 [ADR-0009](/adr/0009-request-scoped-mcp-project-routing) 为准。
+[RFC-0003](/rfcs/0003-automatic-project-context) 的四宿主接线已实现；2026-10-15 本机已完成四宿主真实召回验收并开启 canonical / v2。软件默认仍保持 legacy / v1。具体证据、宿主限制与未覆盖范围见[发布记录](/runbooks/project-context-acceptance)，切换步骤见[自动项目路由运维](/runbooks/project-context)和 [ADR-0009](/adr/0009-request-scoped-mcp-project-routing)。
 
 | 宿主 | 项目来源 | 需验证的条件 |
 | --- | --- | --- |
 | Codex | 请求级 sandbox cwd / roots | capability 协商、路径与多环境语义 |
 | Claude Code | stdio 的 `CLAUDE_PROJECT_DIR` / roots | 原始环境捕获与连接生命周期 |
-| Antigravity | roots / 工作区专属部署绑定 | 实际 roots 能力、多窗口与多目录消歧；Hook 不取首个目录 |
+| Antigravity | PreToolUse workspacePaths / roots / 显式选择 | 使用无固定绑定的共享 MCP；Hook 多仓库拒绝，保留显式选择优先 |
 | Pi | 工具与事件回调的 `ctx.cwd` | 逐调用传目录，安全桥接共用记忆逻辑，不依赖进程 cwd |
+
+2026-10-16 [双项目扩展验收](/runbooks/project-context-extended-acceptance)确认 Codex、Claude、Pi 的实际 A/B 调用通过；Antigravity 固定绑定隔离失败；同日后续[正式插件发布](/runbooks/antigravity-plugin)改为逐调用补参。该次 Hook 全程实测超过 50ms；后续[捕获隔离与延迟验收](/runbooks/hook-capture-acceptance)确认四宿主常驻/回退共 240 次部署采样通过 50ms；保留先前失败与系统负载限制，不以预热解析器结果替代进程总耗时。
+
+MCP 无回传通道且仅有启动绑定时返回 `PROJECT_CONTEXT_UNVERIFIED`；该检查也覆盖不声明 roots 的请求，显式选择和有效 global 保留。
 
 四宿主共用项目映射、scope 语义与检索门禁；缺少可靠上下文时保留显式项目选择。Antigravity 的多文件夹 Project 不自动合并成一个 Hippo 项目命名空间。
 
@@ -39,3 +44,6 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 1. **退出耗时硬限制**：从标准输入读取会话 payload，序列化并写入本地 Spool 存储，全过程必须在 **50ms** 以内完成并退出；
 2. **Fail-Safe 保障**：若本地存储异常或发生不可预期错误，必须静默吞掉异常并正常退出（exit 0），绝对不得阻断宿主本身的正常交互或终端退出；
 3. **环境自愈与保活**：必要时由后台守护进程按需启动 Qdrant，不依赖宿主环境手工管理数据库进程。
+
+
+Antigravity 已提供[正式路由插件](/runbooks/antigravity-plugin)：只改写精确匹配的 Hippo MCP 内层 `Arguments`，不新增工具、不授予权限。此前“退回显式选择”描述对应插件部署前；安装后的正常单仓库调用可省略选择器。原生可行性探针与正式部署验收分别记录，App 结论不外推其他版本。
