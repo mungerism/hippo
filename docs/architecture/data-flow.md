@@ -44,6 +44,7 @@ flowchart TD
 - **机制与实现**：
   - 双事件触发：会话结束（Session End）与单轮响应完成（Turn Complete）；
   - 宿主通过 `hippo hook capture` 管道将原始会话转储至本地 Spool 队列（基于 POSIX 目录状态机），耗时 <50ms 即退出；
+  - **Worker 本机入队通道**：常驻 Worker 持锁期间提供 Unix socket，Hook 只有在原子发布与 fsync 完成后才收到确认；不可用时回退本地发布。两条路径共用捕获停用与会话围栏检查，保留 50ms 实测门槛。
   - **Durable Staging & Atomic Publish（原子发布与断电恢复，#80）**：摒弃有半成品风险的直接创建，先在 `staging/` 完整落盘并写入 `READY.json`，在跨进程 `publish.lock` 保护下原子重命名至 `jobs/` 并对父目录执行 `fsync`；Worker 启动前自动执行 `recover_spool_publication()` 自愈，杜绝 ghost 假死与同事件重放丢弃；
   - **Pre-check（蒸馏前预审）**：在调用 LLM 蒸馏前，`SpoolWorker` 审查会话是否为纯口头禅确认或纯运行时流水日志。无文件修改且无实质性目标的纯噪音会话被提前判定并跳过，节省 LLM Token；有任何实质性用户意图、修改文件或不确定的内容均保守 Fail-Open 放行；
   - **Prompt Hardening（防注入加固）**：基于 `SESSION_DISTILLATION_PROMPT_V2`，明确将会话转录作为不可信输入，严禁将 Transcript 中的 Prompt Injection / 指令覆盖持久化为规则；明确区分日志中的稳定架构配置（提取为干净事实）与运行时流水（忽略）；

@@ -3,6 +3,12 @@
 Allows easy inspection, addition, and querying of memories from the command line.
 """
 
+if __name__ == "__main__":
+    import sys
+    from hippo_memory.capture import try_fast_capture
+    if try_fast_capture(sys.argv[1:]):
+        raise SystemExit(0)
+
 from pathlib import Path
 from typing import Optional
 import typer
@@ -23,6 +29,42 @@ agent_app = typer.Typer(help="宿主扩展的安全记忆桥接，不开放底�
 project_app = typer.Typer(help="检查仓库身份并绑定历史记忆命名空间")
 app.add_typer(agent_app, name="agent")
 app.add_typer(project_app, name="project")
+antigravity_app = typer.Typer(help="安装或停用 Antigravity 按调用自动补参插件")
+app.add_typer(antigravity_app, name="antigravity")
+
+
+@antigravity_app.command("install")
+def antigravity_install(
+    workspace: Optional[Path] = typer.Option(None, "--workspace", help="只在指定工作区安装；默认全局安装"),
+    server_name: Optional[list[str]] = typer.Option(None, "--server-name", help="精确匹配 MCP 服务名，可重复"),
+):
+    from hippo_memory.antigravity import install
+    from hippo_memory.config import HIPPO_HOME
+    import json
+
+    if workspace is not None and not workspace.is_dir():
+        raise typer.BadParameter("工作区目录不存在")
+    root = workspace.resolve() / ".agents" if workspace else Path.home() / ".gemini" / "config"
+    try:
+        result = install(config_root=root, bindings=HIPPO_HOME / "projects.json",
+                         servers=server_name or ["hippo-memory"], backup_root=HIPPO_HOME / "backups")
+    except (ValueError, OSError) as exc:
+        console.print(f"安装失败: {exc}")
+        raise typer.Exit(1)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+@antigravity_app.command("disable")
+def antigravity_disable(workspace: Optional[Path] = typer.Option(None, "--workspace")):
+    from hippo_memory.antigravity import disable
+
+    root = workspace.resolve() / ".agents" if workspace else Path.home() / ".gemini" / "config"
+    try:
+        disable(root)
+    except (ValueError, OSError) as exc:
+        console.print(f"停用失败: {exc}")
+        raise typer.Exit(1)
+    console.print("已停用 hippo-project-routing；重新加载宿主后生效。")
 
 
 def _agent_scope(scope, project, context_dir):
@@ -799,68 +841,36 @@ def hook_capture(
     queue_version: int = typer.Option(1, "--queue-version", min=1, max=2, help="显式选择已完成消费者升级的队列格式"),
 ):
     """Capture host hook context from stdin and enqueue into spool (<50ms fast exit)."""
-    import sys
-    import subprocess
-    from hippo_memory.hooks import SpoolStorage, SpoolWorker, get_adapter
+    from hippo_memory.capture import run_capture
+    from hippo_memory.config import DEFAULT_SPOOL_DIR
 
-    raw_input = ""
+    run_capture(host=host, cwd=cwd, queue_version=queue_version, sync=sync, spool_dir=DEFAULT_SPOOL_DIR)
+
+
+@hook_app.command("fence")
+def hook_fence(
+    host: str = typer.Option(..., "--host"),
+    session_id: str = typer.Option(..., "--session-id"),
+):
+    """持久阻断指定测试会话的捕获历史，启用前可在首次工具调用前核验。"""
+    import json
+    from hippo_memory.hooks import CapturedPayload, SpoolStorage, get_adapter
+
+    if not session_id.strip() or len(session_id) > 512:
+        raise typer.BadParameter("session-id 必须非空且不超过 512 字符")
     try:
-        # If piped via stdin, read all
-        if not sys.stdin.isatty():
-            raw_input = sys.stdin.read()
-    except Exception:
-        pass
-
-    adapter = None
-    payload = None
-    try:
-        try:
-            adapter = get_adapter(host)
-        except ValueError as e:
-            sys.stderr.write(f"Hippo Hook warning: unknown host {host}: {e}\n")
-            return
-
-        payload = adapter.parse_context(raw_input, env_cwd=cwd)
-        payload.schema_version = queue_version
-        if not payload.workspace_candidates:
-            payload.workspace_candidates = [payload.project_dir]
-        if queue_version == 2 and SpoolStorage().is_worker_active():
-            raise RuntimeError("旧队列 Worker 仍在运行，升级切换完成前不能发布 v2 作业")
-        storage = SpoolStorage(version=queue_version)
-        is_new, job_id = storage.enqueue(payload)
-
-        if sync:
-            worker = SpoolWorker(storage=storage)
-            worker.process_one_job(payload)
-        else:
-            # Hot-path fast check (<0.1ms): if a worker is already active (holding worker.lock),
-            # avoid spawning a redundant detached drain process.
-            # If no worker is active, spawn background detached worker with self-healing fallback.
-            if not storage.is_worker_active():
-                try:
-                    subprocess.Popen(
-                        [sys.executable, "-m", "hippo_memory.cli", "hook", "worker", "--drain",
-                         "--queue-version", str(queue_version)],
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        stdin=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
-    except Exception as e:
-        sys.stderr.write(f"Hippo Hook capture error: {e}\n")
-    finally:
-        try:
-            resp = adapter.format_response(payload) if (adapter and payload) else "{}\n"
-            sys.stdout.write(resp)
-            sys.stdout.flush()
-        except Exception:
-            try:
-                sys.stdout.write("{}\n")
-                sys.stdout.flush()
-            except Exception:
-                pass
+        adapter = get_adapter(host)
+        payload = CapturedPayload(job_id="operator-fence", host=adapter.host_name,
+                                  event="Stop", session_id=session_id, project_dir="")
+        storage = SpoolStorage()
+        storage.block_session(payload)
+        ledger = storage.context_ledger(payload)
+        assert json.loads(ledger.read_text())["blocked"] is True
+    except (ValueError, OSError) as exc:
+        console.print(f"围栏写入失败: {type(exc).__name__}")
+        raise typer.Exit(1)
+    print(json.dumps({"blocked": True, "host": adapter.host_name, "session_id": session_id,
+                      "ledger": str(ledger)}, ensure_ascii=False))
 
 
 @hook_app.command("worker")

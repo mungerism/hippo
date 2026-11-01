@@ -169,3 +169,40 @@ assert os.environ['CLAUDE_PROJECT_DIR'] == '/untrusted/dotenv/value'
             **os.environ, 'CLAUDE_PROJECT_DIR': '/original/host/value', 'HIPPO_HOME': str(self.base),
         }, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_stateless_roots_require_request_context_or_explicit_selection(self):
+        from mcp.shared.exceptions import NoBackChannelError
+
+        ctx = self.context(roots=[self.a])
+        ctx.session.list_roots.side_effect = NoBackChannelError('no back channel')
+        bindings = (('operator_binding', str(self.a), False),)
+        with patch('hippo_memory.mcp_scope.ProjectContextResolver', side_effect=self.resolver):
+            for source in ('operator_binding', 'claude_stdio'):
+                with self.subTest(source=source), self.assertRaises(ProjectContextError) as error:
+                    asyncio.run(resolve_mcp_scope(ctx, scope='project',
+                                bindings=((source, str(self.a), False),)))
+                self.assertEqual(error.exception.code, 'PROJECT_CONTEXT_UNVERIFIED')
+            with self.assertRaises(ProjectContextError) as error:
+                asyncio.run(resolve_mcp_scope(ctx, scope='project'))
+            self.assertEqual(error.exception.code, 'PROJECT_CONTEXT_MISSING')
+
+            # Real per-request metadata is still validated, including conflicts
+            # with a startup binding. A stale A binding must never win over B.
+            for caller in (self.a, self.b, self.a):
+                request = self.context(meta={CODEX_CONTEXT_KEY: {'sandboxCwd': caller.as_uri()}}, roots=[caller])
+                request.session.can_send_request = False
+                request.session.list_roots.side_effect = NoBackChannelError('no back channel')
+                scope, namespace = asyncio.run(resolve_mcp_scope(request, scope='project', codex_context=True))
+                self.assertEqual(namespace, self.resolver().path_project(str(caller), 'fixture').namespace)
+                if caller == self.a:
+                    self.assertEqual(asyncio.run(resolve_mcp_scope(request, scope='project',
+                                     codex_context=True, bindings=bindings)), (scope, namespace))
+                else:
+                    with self.assertRaises(ProjectContextError) as error:
+                        asyncio.run(resolve_mcp_scope(request, scope='project', codex_context=True, bindings=bindings))
+                    self.assertEqual(error.exception.code, 'PROJECT_CONTEXT_CONFLICT')
+
+            # Ordinary peer errors still fail closed, including with a good binding.
+            ctx.session.list_roots.side_effect = RuntimeError('peer failure')
+            with self.assertRaises(ProjectContextError):
+                asyncio.run(resolve_mcp_scope(ctx, scope='project', bindings=bindings))
