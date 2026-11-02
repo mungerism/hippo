@@ -81,6 +81,7 @@ hippo service status
 ### 3.2 Worker 运行机制
 
 - **单实例排他锁**：Worker 通过内核 `fcntl.flock` 实现单进程互斥，同时只有一个 Worker 实例可以运行；
+- **轻量活跃索引与空闲短路（#120）**：Worker 仅轮询 `active/` 活跃作业索引条目，并在队列全空时以微秒级前置短路避免无谓文件扫描；启动时（L1）与每 300s 租约心跳（L2）自动执行全量双层自愈对齐；
 - **LaunchAgent 保活**：plist 中配置 `KeepAlive: true` + `RunAtLoad: true`，崩溃后由 `launchd` 自动拉起；
 - **优雅退出**：Worker daemon 监听 `SIGTERM` / `SIGINT` 信号，收到信号后完成当前安全边界再退出；
 - **日志路径**：`~/.hippo/logs/worker.log`；
@@ -106,7 +107,8 @@ hippo service status
 │   ├── history.db           # SQLite 记忆版本历史
 │   └── qdrant/              # Qdrant 向量库存储
 ├── spool/                   # 异步会话蒸馏队列
-│   ├── jobs/                # 作业目录（payload.json + state.json）
+│   ├── jobs/                # 作业目录（payload.json + state.json 事实源）
+│   ├── active/              # 活跃作业轻量索引条目（pending/processing，空闲零开销）
 │   ├── receipts/            # 语义去重收据（永不清理）
 │   └── tombstones/          # 已清理作业墓碑标记（保持 job-id 幂等）
 ├── logs/
