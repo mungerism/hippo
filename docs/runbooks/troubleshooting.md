@@ -19,8 +19,29 @@ hippo doctor
    - ✅ 未安装：正常（按需消费模式）
    - ✅ 已安装且 running：正常（常驻保活）
    - ❌ 已安装但未运行 / crash loop：故障
-4. **宿主集成**：Codex、Pi、ZCode 与 Antigravity 的 Hook 与 MCP 配置状态；
-5. **Spool 队列**：异步蒸馏队列积压量、死信作业数量与最近作业健康度。
+4. **宿主集成**：Codex、Pi、ZCode 与 Antigravity 等可选集成的 Hook 与 MCP 静态配置状态；
+5. **Spool 队列**：分别列出 v1/v2 的 pending、processing、completed、skipped、coalesced、dead、不可读记录与收据文件数，并探测各版本消费锁。
+
+### 读懂巡检结果（#118）
+
+Doctor 不再用 v1 队列代替全部队列。`Spool v1` 与 `Spool v2` 分别统计，消费锁表示本次采样是否有消费者持有该版本的锁；它不等同于 LaunchAgent 运行状态，也不证明后台模型请求成功。不存在的队列标为未启用，巡检不创建目录、作业、锁或收据，不重试作业。不可读状态单独报错，不把损坏记录算成健康的零积压。成功收据文件数不等于有效记忆数。
+
+`hippo hook status` 仍默认 v1，但表格标题明确显示版本；部署使用 v2 时运行 `hippo hook status --queue-version 2`。死信提示包含正确的版本，只建议先运行 `hippo hook audit-dead --queue-version 2` 等只读审计，不建议直接批量重试受围栏保护的历史。
+
+MCP 配置按结构读取：Codex 的 TOML `mcp_servers`、常见 JSON `mcpServers`、ZCode 的 `mcp.servers`、Zed 的 JSONC `context_servers`（含 command 对象）。支持直接 `hippo-mcp`、`hippo serve`、常见 uv/uvx 启动方式和 Python 模块入口；检查 enabled/disabled，忽略注释、说明文字或其他程序参数中的同名字符串。无法解析的配置不输出原始配置内容。
+
+客户端和 Hook 都是可选集成，缺失或禁用不会被汇总为核心服务故障；配置错误会在相应集成行提示。自定义 shell 包装、未知启动参数或远程 MCP 连接需要单独验证，不会为了巡检执行配置中的命令。
+
+巡检的几层证据须分别理解：
+
+| 检查 | 能说明什么 | 不能说明什么 |
+| --- | --- | --- |
+| 端口 / collection | 本机 Qdrant 可访问、集合存在 | 远程模型可用、召回质量通过 |
+| LaunchAgent | 托管进程运行或退出情况 | 该进程正在消费哪个队列 |
+| 分版本消费锁 / 状态文件 | 当前消费者与队列元数据快照 | 持续吞吐、后续模型请求成功 |
+| MCP 配置 / Hook / Pi 文件 | 静态入口启用、文件或指纹存在 | 当前客户端已重连、真实事件已捕获 |
+
+汇总区将核心问题与可选集成提示分开。数据是非原子采样；活跃 Worker 可能在检查期间改变状态。真实 MCP 握手、调用和会话捕获仍需独立验收。
 
 ---
 
