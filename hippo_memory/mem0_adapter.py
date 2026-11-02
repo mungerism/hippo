@@ -8,6 +8,7 @@ and quality auditing to an individual HippoEngine instance.
 from __future__ import annotations
 
 import logging
+import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -18,6 +19,34 @@ if TYPE_CHECKING:
     from hippo_memory.engine import HippoEngine
 
 logger = logging.getLogger("hippo_memory.engine")
+
+
+def _validate_distillation_response(response: Any) -> None:
+    """Use Mem0's JSON normalization, then require its additive extraction shape.
+
+    Never put response text or parser diagnostics (which can contain facts) in
+    errors. Mem0 otherwise swallows parse failures as successful empty extraction.
+    """
+    from mem0.memory.utils import extract_json, remove_code_blocks
+    from hippo_memory.exceptions import DistillationResponseError
+
+    try:
+        normalized = remove_code_blocks(response)
+        try:
+            data = json.loads(normalized, strict=False)
+        except json.JSONDecodeError:
+            data = json.loads(extract_json(normalized), strict=False)
+    except (TypeError, ValueError, AttributeError):
+        raise DistillationResponseError("DISTILLATION_RESPONSE_INVALID_JSON") from None
+    if not isinstance(data, dict) or not isinstance(data.get("memory"), list):
+        raise DistillationResponseError("DISTILLATION_RESPONSE_INVALID_SHAPE")
+    if any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("text"), str)
+        or not item["text"].strip()
+        for item in data["memory"]
+    ):
+        raise DistillationResponseError("DISTILLATION_RESPONSE_INVALID_ITEM")
 
 
 def _extract_insert_args(
@@ -160,6 +189,7 @@ class Mem0PersistenceAdapter:
                 pass
 
         # Hook primary vector store
+        self._hook_distillation_response()
         self._hook_vector_store()
         # Hook history database
         self._hook_history_db()
@@ -176,6 +206,31 @@ class Mem0PersistenceAdapter:
         self._hook_mem_helpers()
 
         self._attached = True
+
+    def _hook_distillation_response(self) -> None:
+        """Guard only this engine's Warm Path primary extraction call."""
+        llm = getattr(self.mem, "llm", None)
+        if llm is None or id(llm) in self.wrapped_ids:
+            return
+        self.wrapped_ids.add(id(llm))
+        generate = getattr(llm, "generate_response", None)
+        if generate is None:
+            return
+
+        def guarded_generate(*args: Any, **kwargs: Any) -> Any:
+            response = generate(*args, **kwargs)
+            holder = self._get_effective_holder()
+            if holder is not None and holder.persistence_quality_enabled and not holder.primary_completed:
+                from hippo_memory.exceptions import DistillationResponseError
+
+                try:
+                    _validate_distillation_response(response)
+                except DistillationResponseError as error:
+                    holder.distillation_response_error = error
+                    raise
+            return response
+
+        llm.generate_response = guarded_generate
 
     def get_entity_store(self, instance: Any) -> Any:
         """Lazy entity_store accessor called from dynamic subclass property."""

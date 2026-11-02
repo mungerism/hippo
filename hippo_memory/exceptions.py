@@ -37,3 +37,7 @@ class HippoLockTimeoutError(HippoError, TimeoutError):
 class ContextConflictError(HippoError):
     """Warm Path observed-context revalidation detected a retryable concurrency conflict."""
 
+
+class DistillationResponseError(HippoError):
+    """Warm Path extraction returned an invalid protocol response (safe to retry)."""
+
