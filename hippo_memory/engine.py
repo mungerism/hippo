@@ -69,6 +69,7 @@ class _LazyWriteLockHolder:
         self._primary_records_revalidated: bool = False
         self.vector_store: Any = None
         self.error: Optional[Exception] = None
+        self.distillation_response_error: Optional[Exception] = None
 
     @property
     def all_entity_skipped_ids(self) -> set[str]:
@@ -845,6 +846,10 @@ class HippoEngine:
             try:
                 result = self.memory.add(conversation, **params)
             except Exception as e:
+                # Mem0 wraps provider-side errors in LLMError. Preserve the typed,
+                # redacted extraction failure instead of matching provider text.
+                if holder.distillation_response_error is not None:
+                    raise holder.distillation_response_error from None
                 err_str = str(e)
                 # If primary flagship model hits temporary 503 capacity issues or 429 quota exhaustion, fallback gracefully
                 should_fallback = any(
@@ -868,6 +873,8 @@ class HippoEngine:
             holder.release_if_locked()
 
         # Re-raise lock timeout / error if Mem0 internal try-except swallowed it (#42)
+        if holder.distillation_response_error is not None:
+            raise holder.distillation_response_error
         if holder.error is not None:
             raise holder.error
         if holder.context_aborted:
