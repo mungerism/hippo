@@ -1200,9 +1200,6 @@ class SpoolWorker:
 
         except ContextFenceError:
             raise
-        except ProjectContextError as error:
-            self.storage.fail_job(payload.job_id, str(error), retryable=False, context_error_code=error.code)
-            return False
         except ContextConflictError as e:
             err_msg = str(e)
             logger.warning(
@@ -1212,6 +1209,9 @@ class SpoolWorker:
             self.storage.fail_job(payload.job_id, err_msg, retryable=True)
             return False
         except Exception as e:
+            if isinstance(e, ProjectContextError):
+                self.storage.fail_job(payload.job_id, str(e), retryable=False, context_error_code=e.code)
+                return False
             err_msg = str(e)
             logger.error(f"Error processing job {payload.job_id}: {err_msg}", exc_info=True)
             # 503, 429, Connection errors are retryable
