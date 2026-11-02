@@ -170,6 +170,62 @@ class TestSpoolActiveIndex(unittest.TestCase):
         self.assertTrue((self.storage.jobs_dir / "job-ready-pub").exists())
         self.assertTrue(os.path.lexists(self.storage.active_dir / "job-ready-pub"))
 
+    def test_cold_start_bootstrap_unindexed_directory(self):
+        """Verify cold-start auto-bootstrap backfills legacy jobs on first list_jobs/has_active_jobs."""
+        legacy_tmp = tempfile.TemporaryDirectory()
+        try:
+            storage = SpoolStorage(base_dir=Path(legacy_tmp.name), version=2)
+            # Remove .initialized if created
+            init_file = storage.active_dir / ".initialized"
+            if init_file.exists():
+                init_file.unlink()
+
+            # Seed 2 pending jobs and 3 terminal jobs manually in jobs/
+            for i in range(2):
+                p = self._make_payload(f"legacy-pending-{i}")
+                storage.seed_terminal_job(
+                    f"legacy-pending-{i}",
+                    p.to_dict(),
+                    {"state": "pending", "attempt": 0, "updated_at": 1000.0, "not_before": 0.0},
+                )
+            for i in range(3):
+                p = self._make_payload(f"legacy-completed-{i}")
+                storage.seed_terminal_job(
+                    f"legacy-completed-{i}",
+                    p.to_dict(),
+                    {"state": "completed", "attempt": 1, "updated_at": 1000.0, "not_before": 0.0},
+                )
+
+            # Ensure active/ has no symlinks and no .initialized
+            for entry in storage.active_dir.iterdir():
+                entry.unlink()
+            self.assertFalse(init_file.exists())
+
+            # Direct call to list_jobs(PENDING) must NOT return false empty
+            pending = storage.list_jobs(state=JobState.PENDING)
+            self.assertEqual(len(pending), 2)
+            self.assertTrue(init_file.exists())
+            self.assertTrue(storage.has_active_jobs())
+            self.assertTrue(os.path.lexists(storage.active_dir / "legacy-pending-0"))
+            self.assertTrue(os.path.lexists(storage.active_dir / "legacy-pending-1"))
+            self.assertFalse(os.path.lexists(storage.active_dir / "legacy-completed-0"))
+        finally:
+            legacy_tmp.cleanup()
+
+    def test_sync_active_index_state_normalization(self):
+        """Verify _sync_active_index handles both JobState enums and strings safely."""
+        p = self._make_payload("job-norm-1")
+        self.storage.enqueue(p)
+        self.assertTrue(os.path.lexists(self.storage.active_dir / "job-norm-1"))
+
+        # String state transition to completed
+        self.storage.update_state("job-norm-1", JobState.COMPLETED)
+        self.storage._sync_active_index("job-norm-1", "completed")
+        self.assertFalse(os.path.lexists(self.storage.active_dir / "job-norm-1"))
+
+        # Invalid state string is safely handled without throwing
+        self.storage._sync_active_index("job-norm-1", "invalid_bogus_state")
+
 
 if __name__ == "__main__":
     unittest.main()
