@@ -166,9 +166,9 @@ class TestHippo(unittest.TestCase):
         # Inject fake client paths (pointing to non-existent temp dir) and port status for offline testing
         with tempfile.TemporaryDirectory() as tmp:
             fake_cfg = Path(tmp) / "cfg.json"
-            fake_cfg.write_text('{"command": "uv run hippo-mcp"}', encoding="utf-8")
+            fake_cfg.write_text('{"mcpServers":{"hippo":{"command":"uv","args":["run","hippo-mcp"]}}}', encoding="utf-8")
             with patch.object(doctor, "_client_config_checks",
-                              return_value=[("FakeClient", fake_cfg, "hippo-mcp")]), \
+                              return_value=[("FakeClient", fake_cfg, "json")]), \
                  patch.object(doctor, "is_listening", return_value=False), \
                  patch("hippo_memory.service.is_loaded", return_value=False):
                 checks = doctor.collect_checks()
@@ -178,7 +178,7 @@ class TestHippo(unittest.TestCase):
         self.assertIn(("Qdrant", "服务监听 127.0.0.1:6333"), names)
         self.assertIn(("依赖", "mem0ai"), names)
 
-        # Client checks with injected paths: exists and contains needle -> ok
+        # Client checks validate a supported entrypoint in the MCP structure.
         client_checks = [c for c in checks if c["category"] == "客户端" and c["name"] == "FakeClient"]
         self.assertEqual(len(client_checks), 1)
         self.assertTrue(client_checks[0]["ok"])
