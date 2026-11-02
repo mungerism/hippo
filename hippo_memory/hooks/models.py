@@ -174,6 +174,9 @@ class CapturedPayload:
     worker_pid: Optional[int] = None
     claimed_at: Optional[float] = None
     updated_at: Optional[float] = None
+    # Pi can supply an authoritative (possibly empty) active-branch snapshot.
+    turns_captured: bool = False
+    transcript_leaf_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

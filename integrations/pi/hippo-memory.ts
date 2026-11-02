@@ -36,7 +36,7 @@ function extractConversation(messages: any[]): Array<{ role: "user" | "assistant
       text = msg.content;
     } else if (Array.isArray(msg.content)) {
       text = msg.content
-        .filter((b: any) => b && (b.type === "text" || typeof b.text === "string"))
+        .filter((b: any) => b?.type === "text" && typeof b.text === "string")
         .map((b: any) => b.text || "")
         .join("\n");
     }
@@ -205,7 +205,7 @@ function extractTouchedFiles(messages: any[]): string[] {
     // Check tool result or content blocks
     if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
-        if (block?.type === "tool_result" || block?.type === "tool_use") {
+        if (block?.type === "tool_result" || block?.type === "tool_use" || block?.type === "toolCall") {
           const str = JSON.stringify(block);
           const matches = str.match(fileExtRegex);
           if (matches) matches.forEach((f) => files.add(f));
@@ -235,12 +235,36 @@ function extractTouchedFiles(messages: any[]): string[] {
 
       // Extract in-memory direct messages without disk scanning
       let rawMsgs: any[] = [];
-      if (Array.isArray(ctx?.messages)) {
+      let turnsCaptured = false;
+      // Use Pi's public projection when available (respects context edits and
+      // compaction), with getBranch for older SDKs.
+      // getMessages/ctx.messages are absent in native lifecycle contexts.
+      if (typeof sessionManager?.buildSessionProjection === "function") {
+        const projection = sessionManager.buildSessionProjection();
+        if (!Array.isArray(projection?.messages)) return;
+        rawMsgs = projection.messages;
+        turnsCaptured = true;
+      } else if (typeof sessionManager?.getBranch === "function") {
+        const branch = sessionManager.getBranch();
+        if (!Array.isArray(branch)) return;
+        rawMsgs = branch.filter((entry: any) => entry?.type === "message").map((entry: any) => entry.message);
+        turnsCaptured = true;
+      }
+      if (!turnsCaptured && Array.isArray(ctx?.messages)) {
         rawMsgs = ctx.messages;
-      } else if (typeof sessionManager?.getMessages === "function") {
+        turnsCaptured = true;
+      } else if (!turnsCaptured && typeof sessionManager?.getMessages === "function") {
         try {
-          rawMsgs = sessionManager.getMessages() || [];
+          const messages = sessionManager.getMessages();
+          if (Array.isArray(messages)) {
+            rawMsgs = messages;
+            turnsCaptured = true;
+          }
         } catch {}
+      }
+      let leafId: string | null = null;
+      if (typeof sessionManager?.getLeafId === "function") {
+        try { leafId = sessionManager.getLeafId(); } catch {}
       }
       const extractedTurns = extractConversation(rawMsgs);
       const lastAssistant = extractedTurns.filter((t) => t.role === "assistant").pop()?.content || "";
@@ -253,6 +277,8 @@ function extractTouchedFiles(messages: any[]): string[] {
         context_source: "pi_context",
         transcript_path: transcriptPath,
         turns: extractedTurns.slice(-100),
+        turns_captured: turnsCaptured,
+        leaf_id: leafId,
         total_turns: extractedTurns.length,
         last_assistant_message: lastAssistant,
         touched_files: touchedFiles,

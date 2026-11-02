@@ -9,7 +9,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Set
 
-from hippo_memory.hooks.adapters.base import FILE_EXT_RE, BaseHostAdapter
+from hippo_memory.hooks.adapters.base import BaseHostAdapter
 from hippo_memory.hooks.models import CapturedPayload, HookEvent, HostType, SHUTDOWN_COMMANDS, calculate_job_id
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,8 @@ class PiAdapter(BaseHostAdapter):
         raw_turns = data.get("turns") or []
         total_turns = data.get("total_turns")
         last_assistant_msg = str(data.get("last_assistant_message") or "")
+        leaf_id = data.get("leaf_id")
+        leaf_id = leaf_id if isinstance(leaf_id, str) and leaf_id else None
 
         boundary = "0"
         if raw_turns:
@@ -62,7 +64,7 @@ class PiAdapter(BaseHostAdapter):
         else:
             boundary = str(int(time.time() * 1000))
 
-        job_id = calculate_job_id(self.host_name, session_id, event, boundary)
+        job_id = calculate_job_id(self.host_name, session_id, event, f"{boundary}:{leaf_id}" if leaf_id else boundary)
 
         payload = CapturedPayload(
             job_id=job_id,
@@ -72,6 +74,9 @@ class PiAdapter(BaseHostAdapter):
             project_dir=cwd,
             workspace_candidates=[cwd],
             transcript_path=str(transcript_path) if transcript_path else None,
+            boundary=boundary,
+            turns_captured=data.get("turns_captured") is True,
+            transcript_leaf_id=leaf_id,
             created_at=time.time(),
         )
 
@@ -83,8 +88,10 @@ class PiAdapter(BaseHostAdapter):
             turns = []
             last_user_goal = ""
             for item in raw_turns:
+                if not isinstance(item, dict):
+                    continue
                 r = item.get("role")
-                c = self.clean_turn_text(item.get("content", ""))
+                c = self._text_content(item.get("content", ""))
                 if not c:
                     continue
                 if r == "user":
@@ -100,38 +107,57 @@ class PiAdapter(BaseHostAdapter):
 
         return payload
 
-    def _extract_touched_files_from_transcript(self, filepath: str) -> List[str]:
-        """Scan file modifications produced by tool calls from Pi local transcript log."""
-        lines = self.read_transcript_lines(filepath, max_lines=1000)
-        found: Set[str] = set()
-        for line in lines:
-            line_str = line.strip()
-            if not line_str:
-                continue
+    def _text_content(self, content: Any) -> str:
+        if isinstance(content, list):
+            content = "\n".join(
+                item["text"] for item in content
+                if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)
+            )
+        return self.clean_turn_text(content) if isinstance(content, str) else ""
+
+    def _transcript_messages(self, payload: CapturedPayload) -> List[dict]:
+        """Read the captured byte prefix and follow only its selected Pi branch."""
+        limit = int(payload.boundary) if payload.boundary and payload.boundary.isdigit() else None
+        with open(payload.transcript_path, "rb") as stream:
+            if limit is not None and limit > os.fstat(stream.fileno()).st_size:
+                return []  # A truncated/replaced file cannot represent this capture.
+            raw = stream.read(limit)
+        records = []
+        for line in raw.decode("utf-8", errors="replace").splitlines()[-2000:]:
             try:
-                rec = json.loads(line_str)
-            except Exception:
+                record = json.loads(line)
+            except (ValueError, TypeError):
                 continue
-            # Match files in toolUse / toolCall parameters
-            if isinstance(rec, dict):
-                args = rec.get("arguments") or rec.get("args") or rec
-                if isinstance(args, dict):
-                    found.update(self.extract_files_from_dict(args))
-                # Regex match source file names across the entire line
-                for m in FILE_EXT_RE.findall(line_str):
-                    found.add(m)
-        return self.cap_touched_files(found)
+            if not isinstance(record, dict):
+                continue
+            if record.get("type") == "session":
+                if record.get("id") != payload.session_id:
+                    return []
+                continue
+            records.append(record)
+
+        native = any(record.get("type") == "message" and isinstance(record.get("message"), dict) for record in records)
+        if not native:
+            return records  # Legacy flat role/content transcripts.
+        entries = {record["id"]: record for record in records if isinstance(record.get("id"), str)}
+        leaf = payload.transcript_leaf_id or next(
+            (record["id"] for record in reversed(records) if isinstance(record.get("id"), str)), None
+        )
+        branch, seen = [], set()
+        while leaf in entries:
+            if leaf in seen:
+                return []
+            seen.add(leaf)
+            entry = entries[leaf]
+            if entry.get("type") == "message" and isinstance(entry.get("message"), dict):
+                branch.append(entry["message"])
+            leaf = entry.get("parentId")
+        return list(reversed(branch))
 
     def extract_session_turns(self, payload: CapturedPayload) -> CapturedPayload:
-        # If in-memory turns exist but touched files are missing and transcript log is available, replenish files to prevent false Delta Skip
-        if not payload.touched_files and payload.transcript_path and os.path.isfile(payload.transcript_path):
-            try:
-                payload.touched_files = self._extract_touched_files_from_transcript(payload.transcript_path)
-            except Exception:
-                pass
-
-        # If already populated via in-memory turns, skip full turn parsing
-        if payload.turns and payload.last_assistant_final:
+        # An explicit empty snapshot is meaningful (e.g. a branch reset). Never
+        # replace it or a user-only snapshot with later/all-branch disk history.
+        if payload.turns_captured or payload.turns:
             return payload
 
         if not payload.transcript_path or not os.path.isfile(payload.transcript_path):
@@ -143,28 +169,17 @@ class PiAdapter(BaseHostAdapter):
         last_assistant_final = ""
 
         try:
-            lines = self.read_transcript_lines(payload.transcript_path, max_lines=2000)
-            for line in lines:
-                line_str = line.strip()
-                if not line_str:
-                    continue
-                try:
-                    record = json.loads(line_str)
-                except Exception:
-                    continue
-
-                if isinstance(record, dict):
-                    args = record.get("arguments") or record.get("args") or record
-                    if isinstance(args, dict):
-                        touched_files.update(self.extract_files_from_dict(args))
+            for record in self._transcript_messages(payload):
+                content = record.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") in ("toolCall", "tool_use"):
+                            args = block.get("arguments") or block.get("input")
+                            if isinstance(args, dict):
+                                touched_files.update(self.extract_files_from_dict(args))
 
                 role = record.get("role")
-                content = record.get("content") or ""
-                if isinstance(content, list):
-                    text_parts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
-                    content = "\n".join(text_parts)
-
-                cleaned_content = self.clean_turn_text(str(content))
+                cleaned_content = self._text_content(content)
                 if not cleaned_content:
                     continue
 
