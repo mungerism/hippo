@@ -14,7 +14,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from hippo_memory.hooks.adapters import get_adapter
 from hippo_memory.hooks.models import (
@@ -135,6 +135,23 @@ TERMINAL_STATES: set[str] = {
     JobState.DEAD.value,
 }
 
+TERMINAL_JOB_STATES: set[JobState] = {
+    JobState.COMPLETED,
+    JobState.SKIPPED,
+    JobState.COALESCED,
+    JobState.DEAD,
+}
+
+ACTIVE_STATES: set[str] = {
+    JobState.PENDING.value,
+    JobState.PROCESSING.value,
+}
+
+ACTIVE_JOB_STATES: set[JobState] = {
+    JobState.PENDING,
+    JobState.PROCESSING,
+}
+
 RETRYABLE_STATES: set[str] = {
     JobState.DEAD.value,
     JobState.SKIPPED.value,
@@ -159,6 +176,7 @@ class SpoolStorage:
         self.base_dir = self.root_dir / "v2" if version == 2 else self.root_dir
         self.contexts_dir = self.root_dir / "contexts"
         self.jobs_dir = self.base_dir / "jobs"
+        self.active_dir = self.base_dir / "active"
         self.staging_dir = self.base_dir / "staging"
         self.quarantine_dir = self.base_dir / "quarantine"
         self.receipts_dir = self.base_dir / "receipts"
@@ -167,6 +185,7 @@ class SpoolStorage:
         self.publish_lock_path = self.base_dir / "publish.lock"
 
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.active_dir.mkdir(parents=True, exist_ok=True)
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         self.quarantine_dir.mkdir(parents=True, exist_ok=True)
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
@@ -241,6 +260,7 @@ class SpoolStorage:
         dest = self.quarantine_dir / f"{path.name}.{int(time.time() * 1000)}"
         try:
             os.replace(path, dest)
+            self._sync_active_index(path.name, force_remove=True)
             if reason:
                 try:
                     with open(dest / ".quarantine_reason", "w", encoding="utf-8") as f:
@@ -355,6 +375,9 @@ class SpoolStorage:
                 if final_dir.exists():
                     if self.validate_published_job(final_dir):
                         # Existing accepted valid job: do not overwrite!
+                        state_data = self.load_state(payload.job_id)
+                        existing_state = state_data.get("state", JobState.PENDING.value)
+                        self._sync_active_index(payload.job_id, existing_state)
                         self._cleanup_staging_dir(staging_job_dir, owner_fd)
                         owner_fd = None
                         return False, payload.job_id
@@ -366,9 +389,8 @@ class SpoolStorage:
                     os.rename(staging_job_dir, final_dir)
                     os.kill(os.getpid(), signal.SIGKILL)
 
-                # Atomic rename staging -> final job directory
-                os.rename(staging_job_dir, final_dir)
-                fsync_dir(self.jobs_dir)
+                # Atomic rename staging -> final job directory and sync active index
+                self._publish_staging_job(staging_job_dir, final_dir, payload.job_id)
 
                 if fp == "after_parent_fsync_before_return":
                     os.kill(os.getpid(), signal.SIGKILL)
@@ -428,21 +450,196 @@ class SpoolStorage:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cur, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, s_path)
+        self._sync_active_index(job_id, state)
+
+    def _publish_staging_job(self, staging_path: Path, final_path: Path, job_id: str) -> None:
+        """Atomically rename a validated staging directory to jobs/ and index it as active PENDING."""
+        os.rename(staging_path, final_path)
+        fsync_dir(self.jobs_dir)
+        self._sync_active_index(job_id, JobState.PENDING)
+
+    def seed_terminal_job(
+        self,
+        job_id: str,
+        payload_data: Dict[str, Any],
+        state_data: Dict[str, Any],
+    ) -> None:
+        """Directly seed a historical terminal job for benchmarks and isolated test setups."""
+        job_dir = self.jobs_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        with open(job_dir / "payload.json", "w", encoding="utf-8") as f:
+            json.dump(payload_data, f, ensure_ascii=False)
+        with open(job_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump(state_data, f, ensure_ascii=False)
+
+    def _sync_active_index(
+        self,
+        job_id: str,
+        state: Optional[Union[JobState, str]] = None,
+        force_remove: bool = False,
+    ) -> None:
+        """Maintain lightweight active_dir index entries (symlinks to jobs/)."""
+        if not job_id:
+            return
+        active_path = self.active_dir / job_id
+        if force_remove:
+            try:
+                active_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+
+        job_state: Optional[JobState] = None
+        if isinstance(state, JobState):
+            job_state = state
+        elif isinstance(state, str):
+            try:
+                job_state = JobState(state)
+            except ValueError:
+                job_state = None
+
+        if job_state in ACTIVE_JOB_STATES:
+            if not os.path.lexists(active_path):
+                try:
+                    target = Path("..") / "jobs" / job_id
+                    active_path.symlink_to(target)
+                except FileExistsError:
+                    pass
+                except OSError as e:
+                    logger.debug(f"Failed to create active symlink for {job_id}: {e}")
+        elif job_state in TERMINAL_JOB_STATES:
+            # CAS defense: verify state on disk is still terminal before unlinking
+            try:
+                state_data = self.load_state(job_id)
+                disk_state_str = state_data.get("state")
+                if disk_state_str in TERMINAL_STATES:
+                    active_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _is_active_initialized(self) -> bool:
+        """Check if active_dir has completed initial baseline reconciliation."""
+        return (self.active_dir / ".initialized").exists()
+
+    def _mark_active_initialized(self) -> None:
+        """Mark active_dir as fully reconciled against jobs_dir."""
+        try:
+            (self.active_dir / ".initialized").touch(exist_ok=True)
+        except OSError:
+            pass
+
+    def has_active_jobs(self) -> bool:
+        """Fast check whether active_dir has any candidate job entries."""
+        if not self.active_dir.exists():
+            return False
+        if not self._is_active_initialized():
+            self.reconcile_active_set()
+        try:
+            with os.scandir(self.active_dir) as it:
+                for entry in it:
+                    if not entry.name.startswith("."):
+                        return True
+            return False
+        except OSError:
+            return False
+
+    def reconcile_active_set(self) -> Tuple[int, int]:
+        """L1/L2 self-healing reconciliation between jobs_dir (source of truth) and active_dir.
+
+        Returns:
+            (added_count, removed_count)
+        """
+        self.active_dir.mkdir(parents=True, exist_ok=True)
+        added = 0
+        removed = 0
+
+        # 1. Prune stale/orphan/dangling entries in active_dir
+        try:
+            with os.scandir(self.active_dir) as it:
+                for entry in list(it):
+                    if entry.name.startswith("."):
+                        continue
+                    job_id = entry.name
+                    job_dir = self.jobs_dir / job_id
+                    if not job_dir.is_dir():
+                        self._sync_active_index(job_id, force_remove=True)
+                        removed += 1
+                        continue
+                    state_data = self.load_state(job_id)
+                    job_state_val = state_data.get("state")
+                    if job_state_val not in ACTIVE_STATES:
+                        self._sync_active_index(job_id, force_remove=True)
+                        removed += 1
+        except OSError:
+            pass
+
+        # 2. Backfill any missing active jobs from jobs_dir (reading only lightweight state.json)
+        if self.jobs_dir.exists():
+            try:
+                with os.scandir(self.jobs_dir) as it:
+                    for entry in it:
+                        if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                            continue
+                        job_id = entry.name
+                        if os.path.lexists(self.active_dir / job_id):
+                            continue
+                        state_data = self.load_state(job_id)
+                        job_state_val = state_data.get("state")
+                        if job_state_val in ACTIVE_STATES and self.validate_published_job(Path(entry.path)):
+                            self._sync_active_index(job_id, job_state_val)
+                            added += 1
+            except OSError:
+                pass
+
+        self._mark_active_initialized()
+        if added or removed:
+            logger.info(f"Reconciled active queue index: +{added} backfilled, -{removed} pruned")
+        return added, removed
 
     def list_jobs(self, state: Optional[JobState] = None) -> List[CapturedPayload]:
-        """List all jobs matching the given state."""
+        """List jobs matching the given state. Routes active states through self.active_dir."""
         jobs: List[CapturedPayload] = []
-        if not self.jobs_dir.exists():
-            return jobs
+        is_active_query = state in ACTIVE_JOB_STATES
 
-        for entry in sorted(self.jobs_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0):
-            if not entry.is_dir():
+        if is_active_query:
+            if not self.active_dir.exists():
+                return jobs
+            if not self._is_active_initialized():
+                self.reconcile_active_set()
+            candidate_dirs: List[Path] = []
+            try:
+                with os.scandir(self.active_dir) as it:
+                    for entry in it:
+                        if entry.name.startswith("."):
+                            continue
+                        job_dir = self.jobs_dir / entry.name
+                        if not job_dir.is_dir():
+                            self._sync_active_index(entry.name, force_remove=True)
+                            continue
+                        candidate_dirs.append(job_dir)
+            except OSError:
+                return jobs
+            entries = sorted(candidate_dirs, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+        else:
+            if not self.jobs_dir.exists():
+                return jobs
+            entries = sorted(self.jobs_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+
+        for entry in entries:
+            if not entry.is_dir() or entry.name.startswith("."):
                 continue
             payload = self.load_payload(entry.name)
             if not payload:
+                if is_active_query:
+                    self._sync_active_index(entry.name, force_remove=True)
                 continue
-            st = self.load_state(entry.name)
-            payload.merge_state(st)
+            state_data = self.load_state(entry.name)
+            payload.merge_state(state_data)
+
+            if is_active_query and payload.state in TERMINAL_STATES:
+                # Read-Repair: remove stale active marker left by interrupted terminal transition
+                self._sync_active_index(entry.name, payload.state)
+                continue
 
             if state is None or payload.state == state.value:
                 jobs.append(payload)
@@ -708,6 +905,7 @@ class SpoolStorage:
                         # idempotency and later maintenance can safely remove it.
                         logger.error(f"Failed to remove pruned job dir {staging_entry}: {e}")
                         continue
+                    self._sync_active_index(job_id, force_remove=True)
 
             pruned.append({
                 "job_id": job_id,
@@ -784,6 +982,9 @@ class SpoolStorage:
                         if final_dir.exists():
                             if self.validate_published_job(final_dir):
                                 # Already published in jobs_dir, clean up redundant staging
+                                state_data = self.load_state(job_id)
+                                existing_state = state_data.get("state", JobState.PENDING.value)
+                                self._sync_active_index(job_id, existing_state)
                                 shutil.rmtree(entry, ignore_errors=True)
                                 continue
                             else:
@@ -792,8 +993,7 @@ class SpoolStorage:
 
                         # Publish to final_dir
                         try:
-                            os.rename(entry, final_dir)
-                            fsync_dir(self.jobs_dir)
+                            self._publish_staging_job(entry, final_dir, job_id)
                             recovered += 1
                             logger.info(f"Successfully recovered READY staging job -> {job_id}")
                         except OSError as e:
@@ -1231,9 +1431,12 @@ class SpoolWorker:
             return 0
 
         self.storage.recover_spool_publication()
+        self.storage.reconcile_active_set()
         processed = 0
         try:
             while True:
+                if not self.storage.has_active_jobs():
+                    break
                 self.storage.recover_expired_leases()
                 self.storage.coalesce_pending_jobs(self.engine.router)
 
@@ -1304,7 +1507,34 @@ class SpoolWorker:
 
         try:
             self.storage.recover_spool_publication()
+            self.storage.reconcile_active_set()
+            last_reconcile_at = time.monotonic()
             while not stop_requested:
+                now_mono = time.monotonic()
+                # L2 Periodic Reconciliation (every 300s):
+                # Recovers uncommitted ready staging directories and reconciles active_dir
+                # against authoritative jobs_dir. Defense-in-depth against external disk anomalies
+                # or unhandled producer crashes.
+                if now_mono - last_reconcile_at >= 300.0:
+                    self.storage.recover_spool_publication()
+                    self.storage.reconcile_active_set()
+                    last_reconcile_at = now_mono
+
+                # Fast short-circuit:
+                # ACTIVE_STATES includes both PENDING and PROCESSING. Any job currently holding
+                # an active lease remains present in active_dir. Therefore, has_active_jobs() is
+                # guaranteed True whenever pending jobs exist or leases are out. When False,
+                # recover_expired_leases() is guaranteed a no-op, so we can safely sleep and bypass
+                # directory traversal overhead.
+                if not self.storage.has_active_jobs():
+                    if run_once or stop_requested:
+                        break
+                    try:
+                        time.sleep(poll_interval)
+                    except InterruptedError:
+                        break
+                    continue
+
                 self.storage.recover_expired_leases()
                 self.storage.coalesce_pending_jobs(self.engine.router)
 
