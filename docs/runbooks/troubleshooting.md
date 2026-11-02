@@ -96,6 +96,21 @@ hippo doctor
      hippo service status
      ```
 
+### 故障 6：模型提取响应解析失败
+
+Warm Path 遇到 `DISTILLATION_RESPONSE_INVALID_JSON`、`DISTILLATION_RESPONSE_INVALID_SHAPE` 或 `DISTILLATION_RESPONSE_INVALID_ITEM` 时，不再把失败当作正常空提取完成。错误不包含原始模型响应；Worker 最多尝试 3 次，前两次分别退避 10 秒、20 秒，耗尽后保留 `dead` 作业供排查。合法的空事实列表、去重或持久化质量过滤后的空结果仍可正常完成。
+
+检查时选择实际运行的队列版本，例如本机 v2：
+
+```bash
+hippo hook status --queue-version 2
+hippo hook retry <job_id> --queue-version 2 --dry-run
+```
+
+确认模型输出恢复正常、项目身份可靠且会话未被围栏阻断后，才选择性重试相应死信。
+
+历史 `completed` 空收据不能单独证明解析失败：它也可能是合法的空提取或质量过滤。先备份相关作业和收据，结合可关联的日志与转录审计，记录证据和身份；无法关联的项目保留“原因未知”。不得删除全部空收据、清除成功游标或直接重放全部空结果。当前 CLI 默认不允许重试 `completed`，确需恢复时应另行准备经过审查的逐作业迁移计划，保留审计与防重依据。
+
 ---
 
 ## 3. Spool 队列运维速查

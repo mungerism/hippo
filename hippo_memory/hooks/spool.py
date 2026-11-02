@@ -22,7 +22,7 @@ from hippo_memory.hooks.models import (
     JobState,
     calculate_semantic_cursor,
 )
-from hippo_memory.exceptions import ContextConflictError
+from hippo_memory.exceptions import ContextConflictError, DistillationResponseError
 
 if TYPE_CHECKING:
     from hippo_memory.engine import HippoEngine
@@ -1175,6 +1175,11 @@ class SpoolWorker:
 
         except ContextFenceError:
             raise
+        except DistillationResponseError as e:
+            # No success receipt/cursor: bounded retry uses the existing queue
+            # backoff (10s, 20s), then preserves the job as dead on attempt three.
+            self.storage.fail_job(payload.job_id, str(e), retryable=True)
+            return False
         except ContextConflictError as e:
             err_msg = str(e)
             logger.warning(
