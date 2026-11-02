@@ -11,22 +11,20 @@ from hippo_memory.service import (
     find_listening_pid,
     get_process_rss_mb,
     is_listening,
-    is_worker_running,
     qdrant_service_status,
-    service_status,
     worker_service_status,
 )
 
 
 def _client_config_checks() -> List[tuple]:
-    """Client MCP config checks: (name, config file, expected needle). Paths evaluated at call time for HOME injection in tests."""
+    """Client MCP config checks: (name, config file, format)."""
     home = Path.home()
     return [
-        ("antigravity", home / ".gemini" / "config" / "mcp_config.json", "hippo-mcp"),
-        ("ZCode", home / ".zcode" / "cli" / "config.json", "hippo-mcp"),
-        ("Zed AI", home / ".config" / "zed" / "settings.json", "hippo-mcp"),
-        ("Cursor", home / ".cursor" / "mcp.json", "hippo-mcp"),
-        ("Codex", home / ".codex" / "config.toml", "hippo-mcp"),
+        ("antigravity", home / ".gemini" / "config" / "mcp_config.json", "json"),
+        ("ZCode", home / ".zcode" / "cli" / "config.json", "json"),
+        ("Zed AI", home / ".config" / "zed" / "settings.json", "jsonc"),
+        ("Cursor", home / ".cursor" / "mcp.json", "json"),
+        ("Codex", home / ".codex" / "config.toml", "toml"),
     ]
 
 
@@ -111,8 +109,8 @@ def collect_checks() -> List[dict]:
     """Run all health checks, returning [{category, name, ok, detail}]; single failure does not halt execution."""
     checks: List[dict] = []
 
-    def add(category: str, name: str, ok: bool, detail: str = "") -> None:
-        checks.append({"category": category, "name": name, "ok": ok, "detail": detail})
+    def add(category: str, name: str, ok: bool, detail: str = "", *, optional: bool = False) -> None:
+        checks.append({"category": category, "name": name, "ok": ok, "detail": detail, "optional": optional})
 
     provider = _active_provider()
     collection_provider = provider if provider != "未配置" else "gemini"
@@ -287,20 +285,18 @@ def collect_checks() -> List[dict]:
         add("服务", "dev.hippo.worker", False, f"状态查询失败: {e}")
 
     # --- Client Integrations ---
-    for name, path, needle in _client_config_checks():
-        try:
-            ok = path.exists() and needle in path.read_text(encoding="utf-8")
-            detail = "已配置" if ok else "未配置或未指向 hippo-mcp"
-        except OSError as e:
-            ok, detail = False, f"读取失败: {e}"
-        add("客户端", name, ok, f"{detail} ({path})")
+    from hippo_memory.doctor_config import inspect_client_config
+    for name, path, format in _client_config_checks():
+        ok, detail = inspect_client_config(path, format)
+        add("客户端", name, ok, f"{detail} ({path})", optional=True)
 
     from hippo_memory.hooks.models import HostType
     from hippo_memory.hosts import get_contract, get_host_contracts
 
     home = Path.home()
     pi_contract = get_contract(HostType.PI, home=home)
-    add("客户端", "pi 扩展", pi_contract.canonical_config_path.exists(), str(pi_contract.canonical_config_path))
+    add("客户端", "pi 扩展", pi_contract.canonical_config_path.exists(),
+        f"{pi_contract.canonical_config_path}（仅检查文件存在，未验证捕获）", optional=True)
 
     # --- Lifecycle Hook Mounting & Safety Checks ---
     for contract in get_host_contracts(home=home):
@@ -310,16 +306,17 @@ def collect_checks() -> List[dict]:
         if contract.is_hook_installed():
             # 1. Forward sibling fingerprint verification
             if contract.verify_sibling_fingerprints():
-                add("Hook 挂载", name, True, "已挂载")
+                add("Hook 挂载", name, True, "已挂载（仅配置/指纹检查，未验证真实事件）", optional=True)
             else:
                 add(
                     "Hook 挂载",
                     name,
                     False,
                     "[WARN] 配置文件存在但同目录缺少宿主核心指纹，疑似挂载至非标准目录",
+                    optional=True,
                 )
         else:
-            add("Hook 挂载", name, False, "未挂载 (可运行 hippo init)")
+            add("Hook 挂载", name, False, "未挂载（可选集成，可运行 hippo init）", optional=True)
 
         # 2. Reverse zombie configuration probe
         for zombie in contract.detect_zombies():
@@ -328,52 +325,12 @@ def collect_checks() -> List[dict]:
                 f"{contract.display_name} 遗留陷阱",
                 False,
                 f"[WARN] 检测到废弃历史路径残留配置 ({zombie})，宿主不会读取，请运行 hippo init 清理",
+                optional=True,
             )
 
-    # --- Spool Queue Check ---
-    try:
-        from hippo_memory.hooks import SpoolStorage, JobState
-
-        storage = SpoolStorage()
-        pending_jobs = storage.list_jobs(state=JobState.PENDING)
-        dead_jobs = storage.list_jobs(state=JobState.DEAD)
-        receipt_count = (
-            len(list(storage.receipts_dir.glob("*.json")))
-            if storage.receipts_dir.exists()
-            else 0
-        )
-
-        worker_running = is_worker_running()
-        pending_count = len(pending_jobs)
-        pending_ok = pending_count < 10
-        if pending_ok:
-            pending_detail = f"当前 pending: {pending_count} 个 (正常)"
-        elif worker_running:
-            pending_detail = f"当前 pending: {pending_count} 个（常驻 Worker 正在后台消费）"
-        else:
-            pending_detail = (
-                f"当前 pending: {pending_count} 个（较多，可执行 hippo hook worker --drain 或 "
-                "hippo service install worker 安装常驻消费服务）"
-            )
-        add("Spool 队列", "待消费积压", pending_ok, pending_detail)
-
-        dead_count = len(dead_jobs)
-        dead_ok = dead_count == 0
-        add(
-            "Spool 队列",
-            "死信作业 (dead)",
-            dead_ok,
-            f"当前 dead: {dead_count} 个"
-            + (
-                ""
-                if dead_ok
-                else "；可执行 hippo hook retry --all-dead --dry-run 预览，"
-                "hippo hook retry --all-dead 批量重试"
-            ),
-        )
-        add("Spool 队列", "累计蒸馏收据", True, f"已沉淀 {receipt_count} 个会话状态")
-    except Exception as e:
-        add("Spool 队列", "队列状态", False, f"探测异常: {e}")
+    # --- Spool observations are read-only and always identify their version. ---
+    from hippo_memory.doctor_spool import collect_spool_checks
+    checks.extend(collect_spool_checks(HIPPO_HOME / "spool"))
 
     # --- Dependencies ---
     try:

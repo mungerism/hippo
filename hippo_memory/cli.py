@@ -607,20 +607,26 @@ def doctor():
     table.add_column("说明", style="dim")
 
     failed = 0
+    optional = 0
     for c in checks:
         if not c["ok"]:
-            failed += 1
+            if c.get("optional"):
+                optional += 1
+            else:
+                failed += 1
         table.add_row(
             c["category"],
             c["name"],
-            "[green]✓[/green]" if c["ok"] else "[red]✗[/red]",
+            "[green]✓[/green]" if c["ok"] else "[yellow]提示[/yellow]" if c.get("optional") else "[red]✗[/red]",
             c["detail"],
         )
     console.print(table)
     if failed:
-        console.print(f"[yellow]共 {failed} 项未通过，见上方修复提示。[/yellow]")
+        console.print(f"[yellow]核心检查共 {failed} 项未通过，见上方修复提示。[/yellow]")
     else:
-        console.print("[bold green]✓ 全部检查通过。[/bold green]")
+        console.print("[bold green]✓ 核心检查通过。[/bold green]")
+    if optional:
+        console.print(f"[yellow]另有 {optional} 项可选集成提示；配置/文件存在不代表真实连接或捕获通过。[/yellow]")
 
 
 @app.command()
@@ -907,7 +913,7 @@ def hook_audit_dead(queue_version: int = typer.Option(2, "--queue-version", min=
 
 
 @hook_app.command("status")
-def hook_status(queue_version: int = typer.Option(1, "--queue-version", min=1, max=2)):
+def hook_status(queue_version: int = typer.Option(1, "--queue-version", min=1, max=2, help="检查的队列版本（默认 v1；v2 须显式指定）")):
     """Inspect spool queue statistics and job journal."""
     import datetime
     from hippo_memory.hooks import SpoolStorage, JobState
@@ -919,7 +925,7 @@ def hook_status(queue_version: int = typer.Option(1, "--queue-version", min=1, m
     for j in jobs:
         counts[j.state] = counts.get(j.state, 0) + 1
 
-    summary_table = Table(title="Hippo Hook Spool 队列统计")
+    summary_table = Table(title=f"Hippo Hook Spool v{queue_version} 队列统计")
     summary_table.add_column("状态 (State)", style="bold")
     summary_table.add_column("作业数量", style="cyan")
     for st, cnt in counts.items():
@@ -930,7 +936,7 @@ def hook_status(queue_version: int = typer.Option(1, "--queue-version", min=1, m
     if jobs:
         recent = jobs[-10:]
         recent.reverse()
-        detail_table = Table(title=f"最近作业详情 (最新 {len(recent)} 条)")
+        detail_table = Table(title=f"v{queue_version} 最近作业详情 (最新 {len(recent)} 条)")
         detail_table.add_column("Job ID", style="dim", width=18)
         detail_table.add_column("宿主", width=10)
         detail_table.add_column("事件", width=12)
