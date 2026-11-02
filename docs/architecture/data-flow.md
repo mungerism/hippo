@@ -51,6 +51,7 @@ flowchart TD
   - **Post-audit（落库前质检）**：挂载在真实持久化调用入口（`HippoEngine._hook_memory_persistence` 拦截的 `vector_store.insert` 与 `update`）。只对 `source == "session_distillation"` 的后台写入生效，对提取后的记忆执行 `ACCEPT / DROP` 审查。被拒绝的项直接从批量写入中剔除或阻断更新，并记录到 `skipped_ids` 阻断 History 与 Entity 副作用，绝不篡改已生成向量的文本，且 Hot Path（`infer=False` / `add_explicit()`）零开销绕过；
   - **Concurrency Conflict & Retry（并发冲突与重试，#80）**：在持有写锁并持久化前对 Phase 1 检索到的前提记忆重验版本指纹。若观察上下文在提炼期间被并发修改、废弃或删除，`HippoEngine` 显式抛出类型化 `ContextConflictError`，`SpoolWorker` 将其识别为可重试冲突并通过指数退避重新放回 `pending`，绝不记录伪成功收据，待重试耗尽后方进入 `dead` 保留诊断现场；而合法的真正空提取或质量门禁空过滤仍作为终端成功处理；
   - 记忆带有完整的 provenance（宿主来源、会话 ID、确认时间戳），便于后续追溯。
+  - **上下文拒绝诊断（#117）**：作业保存具体的 `context_error_code`，持久会话围栏保留首次阻断的原因、作业与时间，后续 `CAPTURE_SESSION_BLOCKED` 不覆盖第一现场。`hippo hook audit-dead` 只读检查当前上下文、冻结身份、围栏与防重记录；当前目录有效不能证明历史快照归属，旧原因缺失时明确报告未知，不自动清除围栏或重放作业。
 
 ---
 

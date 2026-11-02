@@ -62,6 +62,13 @@ SHUTDOWN_COMMANDS = {
 }
 
 
+def session_context_key(host: str, user_id: str, session_id: str) -> str:
+    """Stable ledger key shared by capture and read-only diagnostics."""
+    import json
+
+    return hashlib.sha256(json.dumps([host, user_id, session_id]).encode()).hexdigest()
+
+
 def calculate_semantic_cursor(
     project_id: str,
     session_id: str,

@@ -100,8 +100,28 @@ hippo doctor
 
 ## 3. Spool 队列运维速查
 
+### 上下文死信：先审计，再判断是否允许恢复
+
+```bash
+hippo hook audit-dead --queue-version 2
+```
+
+该命令只读取作业、会话围栏和本地项目配置，验证当前目录与冻结身份，不读取转录、不访问模型、不创建队列、不修改状态。输出包括脱敏的会话摘要、当前上下文状态、首次围栏原因及 `retry_preview`；不输出仓库路径、用户 ID 或对话内容。`manual_review` 仅表示通过了当前可检查的条件，仍须验证历史转录范围和故障是否已恢复，不能当作自动恢复授权。
+
+- `session_blocked`：会话已被围栏保护，禁止清除围栏或重放完整历史。修复新会话的活动仓库来源；旧记录只有在另行证明安全分段与身份后才能设计迁移。
+- `context_unresolved`：当前目录缺失、非 Git、来源歧义等，修复宿主上下文；不得回退服务 cwd、任选一个 workspace 或猜测项目。
+- `identity_mismatch`、`identity_not_frozen`、`session_fence_unknown`：无法证明历史作业归属，保留现场，不用当前映射重新归属历史。
+- `capture_disabled`、`capture_config_invalid`：停用或配置异常，不能通过重试绕过。
+- `already_processed`、`tombstoned`：已有成功游标或清理记录，不重复投递。
+- `unreadable_job_or_fence`：先排查损坏记录，不尝试自动恢复。
+
+新发生的上下文拒绝会在作业状态中保留 `context_error_code`；首次会话围栏记录 `blocked_reason`、`blocked_job_id`、`blocked_at`，后续拒绝不会覆盖第一现场。旧记录没有这些证据时，报告 `LEGACY_CAUSE_UNKNOWN` / `LEGACY_FENCE_REASON_UNKNOWN`，不依据后续有效 cwd 反推首次阻断原因。
+
+2026-11-02 本机排查（#117）：v2 共 373 个死信，其中 367 个上下文相关，涉及 Codex 85 个、Antigravity 8 个会话。按当前目录检查，139 个作业为非 Git 目录，5 个涉及已不存在的目录，223 个拥有有效 Git 仓库但会话已被围栏阻断。当前目录有效不能证明历史上下文始终安全；旧围栏未保留首次原因，无法完整还原。此快照不等同于宿主故障率，也不构成批量重试依据。
+
 | 命令 | 用途 |
 |------|------|
+| `hippo hook audit-dead --queue-version 2` | 只读预览死信恢复条件与会话围栏，不执行重试 |
 | `hippo hook status` | 查看队列统计与最近作业详情 |
 | `hippo hook retry <job_id>` | 重试单个失败/跳过的作业 |
 | `hippo hook retry --all-dead` | 批量重试所有死信作业 |

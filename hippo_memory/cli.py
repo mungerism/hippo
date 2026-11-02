@@ -896,6 +896,16 @@ def hook_worker(
         console.print(f"[green]✓ Spool 消费完成，共处理 {count} 项作业。[/green]")
 
 
+@hook_app.command("audit-dead")
+def hook_audit_dead(queue_version: int = typer.Option(2, "--queue-version", min=1, max=2)):
+    """只读预览死信恢复条件；不清除围栏、不重置状态、不调用模型。"""
+    import json
+    from hippo_memory.config import DEFAULT_SPOOL_DIR
+    from hippo_memory.spool_audit import audit_dead_jobs
+
+    print(json.dumps(audit_dead_jobs(DEFAULT_SPOOL_DIR, version=queue_version), ensure_ascii=False))
+
+
 @hook_app.command("status")
 def hook_status(queue_version: int = typer.Option(1, "--queue-version", min=1, max=2)):
     """Inspect spool queue statistics and job journal."""

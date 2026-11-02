@@ -21,6 +21,7 @@ from hippo_memory.hooks.models import (
     CapturedPayload,
     JobState,
     calculate_semantic_cursor,
+    session_context_key,
 )
 from hippo_memory.exceptions import ContextConflictError
 
@@ -28,6 +29,16 @@ if TYPE_CHECKING:
     from hippo_memory.engine import HippoEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _blocked_ledger_record(old: dict, job: CapturedPayload, reason: str) -> dict:
+    """Retain the first durable fence cause, including legacy unknown causes."""
+    if old.get("blocked"):
+        return old
+    return {
+        "blocked": True, "identity": old.get("identity"),
+        "blocked_reason": reason, "blocked_job_id": job.job_id, "blocked_at": time.time(),
+    }
 
 def __getattr__(name):
     # Preserve historical helper exports without loading Worker-only policy
@@ -512,12 +523,15 @@ class SpoolStorage:
         """Mark job skipped without error."""
         self.update_state(job_id, JobState.SKIPPED, skip_reason=reason)
 
-    def fail_job(self, job_id: str, error_msg: str, retryable: bool = True) -> None:
+    def fail_job(
+        self, job_id: str, error_msg: str, retryable: bool = True, *, context_error_code: Optional[str] = None,
+    ) -> None:
         """Fail job with retry backoff or move to dead-letter state."""
         st = self.load_state(job_id)
         attempt = st.get("attempt", 0) + 1
         max_attempts = 3
         now = time.time()
+        diagnostic = {"context_error_code": context_error_code} if context_error_code else {}
 
         if retryable and attempt < max_attempts:
             backoff_delay = (2 ** attempt) * 5.0
@@ -528,6 +542,7 @@ class SpoolStorage:
                 attempt=attempt,
                 not_before=not_before,
                 error=error_msg,
+                **diagnostic,
             )
             logger.info(f"Job {job_id} scheduled for retry {attempt}/{max_attempts} after {backoff_delay:.1f}s")
         else:
@@ -536,6 +551,7 @@ class SpoolStorage:
                 JobState.DEAD,
                 attempt=attempt,
                 error=error_msg,
+                **diagnostic,
             )
             logger.warning(f"Job {job_id} moved to DEAD state: {error_msg}")
 
@@ -580,6 +596,7 @@ class SpoolStorage:
                 attempt=0,
                 not_before=0.0,
                 error=None,
+                context_error_code=None,
                 worker_pid=None,
                 claimed_at=None,
                 skip_reason=None,
@@ -831,17 +848,19 @@ class SpoolStorage:
             user_id = getattr(router, "default_user_id", None)
         if not isinstance(user_id, str):
             user_id = get_default_user_id()
-        key = hashlib.sha256(json.dumps([job.host, user_id, job.session_id]).encode()).hexdigest()
+        key = session_context_key(job.host, user_id, job.session_id)
         self.contexts_dir.mkdir(parents=True, exist_ok=True)
         return self.contexts_dir / f"{key}.json"
 
-    def block_session(self, job: CapturedPayload, router=None) -> None:
+    def block_session(self, job: CapturedPayload, router=None, *, reason: str = "CAPTURE_SESSION_BLOCKED") -> None:
         """An unresolved prefix makes later full-session snapshots unsafe as well."""
         ledger = self.context_ledger(job, router)
         with ledger.with_suffix(".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             old = json.loads(ledger.read_text()) if ledger.exists() else {}
-            durable_write_json(ledger, {"blocked": True, "identity": old.get("identity")})
+            if old.get("blocked"):
+                return
+            durable_write_json(ledger, _blocked_ledger_record(old, job, reason))
 
     def capture_allowed(self, job: CapturedPayload, router=None) -> bool:
         if job.host != "antigravity":
@@ -852,21 +871,23 @@ class SpoolStorage:
             disabled = capture_disabled(job)
         except Exception:
             # Invalid opt-out configuration cannot publish a sensitive prefix.
-            self.block_session(job, router)
+            self.block_session(job, router, reason="HIPPO_CAPTURE_CONFIG_INVALID")
             raise
         if disabled:
-            self.block_session(job, router)
+            self.block_session(job, router, reason="CAPTURE_DISABLED")
             return False
         return True
 
     def prepare_identity(self, job: CapturedPayload, router=None) -> None:
         try:
             self._prepare_identity(job, router)
-        except Exception:
+        except Exception as error:
             # Do not mark this job dead until the durable fence exists: on a
             # storage failure, a subsequent consumer must retry the unsafe prefix.
             try:
-                self.block_session(job, router)
+                from hippo_memory.project_context import ProjectContextError
+                reason = error.code if isinstance(error, ProjectContextError) else "PROJECT_CONTEXT_PREPARATION_FAILED"
+                self.block_session(job, router, reason=reason)
             except Exception as exc:
                 raise ContextFenceError("Cannot persist project context fence") from exc
             raise
@@ -930,7 +951,7 @@ class SpoolStorage:
             old = json.loads(ledger.read_text()) if ledger.exists() else None
             signature = {k: identity[k] for k in ("namespace", "context_key", "mode")}
             if old and (old.get("blocked") or old.get("identity") != signature):
-                durable_write_json(ledger, {"blocked": True, "identity": old.get("identity")})
+                durable_write_json(ledger, _blocked_ledger_record(old, job, "PROJECT_CONTEXT_CONFLICT"))
                 raise ProjectContextError("PROJECT_CONTEXT_CONFLICT")
             durable_write_json(ledger, {"identity": signature, "blocked": False})
         job.routing_identity = identity
@@ -942,7 +963,7 @@ class SpoolStorage:
         for job in self.list_jobs(state=JobState.PROCESSING):
             if job.routing_identity is None:
                 try:
-                    self.block_session(job, router)
+                    self.block_session(job, router, reason="UNRESOLVED_PROCESSING_LEASE")
                 except Exception as exc:
                     raise ContextFenceError("Cannot persist unresolved processing fence") from exc
 
@@ -959,9 +980,12 @@ class SpoolStorage:
                     self.skip_job(job.job_id, f"Delta skip: {reason}")
                     continue
                 self.prepare_identity(job, router)
-            except Exception:
-                self.block_session(job, router)
-                self.fail_job(job.job_id, "Project context unresolved; repair context or use a new session", retryable=False)
+            except Exception as error:
+                from hippo_memory.project_context import ProjectContextError
+                code = error.code if isinstance(error, ProjectContextError) else "PROJECT_CONTEXT_PREPARATION_FAILED"
+                self.block_session(job, router, reason=code)
+                self.fail_job(job.job_id, f"{code}: repair context or use a new session", retryable=False,
+                              context_error_code=code)
 
     def coalesce_pending_jobs(self, router=None) -> int:
         """Coalesce consecutive pending jobs belonging to the same session under superset invariant."""
@@ -1082,6 +1106,7 @@ class SpoolWorker:
         """Execute distillation for a single claimed job. Returns True if handled."""
         from hippo_memory.persistence_quality import should_skip_session
         from hippo_memory.prompts import SESSION_DISTILLATION_PROMPT_V1
+        from hippo_memory.project_context import ProjectContextError
         self.storage.fence_unresolved_processing(self.engine.router)
         pid = os.getpid()
         if not self.storage.claim_job(payload.job_id, worker_pid=pid):
@@ -1175,6 +1200,9 @@ class SpoolWorker:
 
         except ContextFenceError:
             raise
+        except ProjectContextError as error:
+            self.storage.fail_job(payload.job_id, str(error), retryable=False, context_error_code=error.code)
+            return False
         except ContextConflictError as e:
             err_msg = str(e)
             logger.warning(
