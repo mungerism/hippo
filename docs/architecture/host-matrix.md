@@ -10,7 +10,7 @@ Hippo 作为统一的跨 IDE 记忆中枢，需要无缝接入各种不同的 AI
 | :--- | :--- | :--- | :--- | :--- |
 | **Codex** | 桌面 / CLI | `hippo hook capture --host codex` | MCP 按需调用 `search_memories` | 启用 `--codex-context` 后使用请求目录；否则使用 roots 或显式选择 |
 | **Claude Code** | CLI 终端工具 | 本方案未新增 Hippo 捕获协议 | MCP 按需检索 | 专属 stdio 启动时捕获 `CLAUDE_PROJECT_DIR`，结合 roots 校验 |
-| **Pi** | 极简终端 Agent | 原生扩展的 `agent_settled` / `session_shutdown` 回调 | 通过 Tool Call 按需检索 | 工具与事件逐次读取 `ctx.cwd` |
+| **Pi** | 极简终端 Agent | 原生扩展的 `agent_settled` / `session_shutdown` 回调 | 通过 Tool Call 按需检索 | 逐次读取 `ctx.cwd` 与活动分支投影；[捕获契约与验收](/runbooks/pi-capture) |
 | **ZCode** | 终端编码套件 | 监听本地 `.zcode` 记忆变动或通过 CLI 迁移 | 统一注入 Prompt 上下文 | 支持通过 `hippo migrate-zcode` 迁移精细记忆 |
 | **Antigravity** | Agentic IDE 助手 | Stop Hook | MCP 按需检索，任务前遵循 `AGENTS.md` | PreToolUse 逐调用 workspacePaths 自动补参；保留 roots / 显式选择 |
 

@@ -18,3 +18,4 @@
 | **扩展验收** | [双项目路由扩展验收](/runbooks/project-context-extended-acceptance) | 双项目并发、连接隔离失败与 Hook 时延 | 实际宿主调用、独立延迟基准 |
 | **Antigravity 插件** | [自动项目路由插件](/runbooks/antigravity-plugin) | 逐调用补参、安装、停用和验收 | `hippo antigravity install/disable` |
 | **捕获验收** | [捕获隔离与 Hook 入队延迟](/runbooks/hook-capture-acceptance) | #106 / #102 部署、原生围栏和 240 次计时证据 | `project_context_latency.py --resident --check` |
+| **Pi 捕获** | [Pi 会话捕获与验收](/runbooks/pi-capture) | #119 空提取、活动分支、快照边界与真实 CLI 隔离验收 | `tests.pi_native_acceptance` |
