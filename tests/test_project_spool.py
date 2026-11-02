@@ -104,6 +104,25 @@ class TestProjectSpool(unittest.TestCase):
         self.assertEqual(self.storage.load_state(payload.job_id)['state'], 'dead')
         self.assertEqual(PiAdapter().parse_context('{}').project_dir, '')
 
+    def test_first_context_failure_is_preserved_across_later_blocked_jobs(self):
+        first = self.job('missing-context', self.base / 'missing', session='audit-session')
+        self.storage.enqueue(first)
+        self.storage.coalesce_pending_jobs(self.engine.router)
+        state = self.storage.load_state(first.job_id)
+        self.assertEqual(state['context_error_code'], 'PROJECT_CONTEXT_INVALID')
+        ledger_file = self.storage.context_ledger(first, self.engine.router)
+        original = json.loads(ledger_file.read_text())
+        self.assertEqual(original['blocked_reason'], 'PROJECT_CONTEXT_INVALID')
+        self.assertEqual(original['blocked_job_id'], first.job_id)
+        self.assertGreater(original['blocked_at'], 0)
+
+        later = self.job('blocked-later', self.a, session='audit-session', extra=True)
+        self.storage.enqueue(later)
+        self.storage.coalesce_pending_jobs(self.engine.router)
+        self.assertEqual(self.storage.load_state(later.job_id)['context_error_code'], 'CAPTURE_SESSION_BLOCKED')
+        self.assertEqual(json.loads(ledger_file.read_text()), original)
+        self.engine.add.assert_not_called()
+
     def test_unknown_versions_are_quarantined_before_deserialization(self):
         payload = self.job('future', self.a)
         self.storage.enqueue(payload)
