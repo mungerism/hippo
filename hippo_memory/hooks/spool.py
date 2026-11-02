@@ -567,7 +567,7 @@ class SpoolStorage:
                         continue
                     state_data = self.load_state(job_id)
                     job_state_val = state_data.get("state")
-                    if job_state_val not in (JobState.PENDING.value, JobState.PROCESSING.value):
+                    if job_state_val not in ACTIVE_STATES:
                         self._sync_active_index(job_id, force_remove=True)
                         removed += 1
         except OSError:
@@ -585,7 +585,7 @@ class SpoolStorage:
                             continue
                         state_data = self.load_state(job_id)
                         job_state_val = state_data.get("state")
-                        if job_state_val in (JobState.PENDING.value, JobState.PROCESSING.value) and self.validate_published_job(Path(entry.path)):
+                        if job_state_val in ACTIVE_STATES and self.validate_published_job(Path(entry.path)):
                             self._sync_active_index(job_id, job_state_val)
                             added += 1
             except OSError:
@@ -599,7 +599,7 @@ class SpoolStorage:
     def list_jobs(self, state: Optional[JobState] = None) -> List[CapturedPayload]:
         """List jobs matching the given state. Routes active states through self.active_dir."""
         jobs: List[CapturedPayload] = []
-        is_active_query = state in (JobState.PENDING, JobState.PROCESSING)
+        is_active_query = state in ACTIVE_JOB_STATES
 
         if is_active_query:
             if not self.active_dir.exists():
